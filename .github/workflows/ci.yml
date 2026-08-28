@@ -14,9 +14,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: npm
@@ -55,6 +55,9 @@ jobs:
       - name: Regression tests
         run: npm test
 
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
@@ -72,8 +75,12 @@ jobs:
         run: |
           test ! -e .env
           test ! -e data/guilds.json
+          test ! -e data/guilds.json.bak
+          test ! -e data/bot.lock
+          test ! -e data/stop.request
           test ! -d data/speaker-label-cache
           test ! -d runtime
+          test ! -d temp
           test ! -e bot.log
           test ! -e bot-old.log
 
@@ -81,9 +88,9 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: npm
@@ -113,7 +120,7 @@ jobs:
       - name: Secret/runtime file guard
         shell: pwsh
         run: |
-          $forbidden = @('.env', 'data/guilds.json', 'data/speaker-label-cache', 'runtime', 'bot.log', 'bot-old.log')
+          $forbidden = @('.env', 'data/guilds.json', 'data/guilds.json.bak', 'data/bot.lock', 'data/stop.request', 'data/speaker-label-cache', 'runtime', 'temp', 'bot.log', 'bot-old.log')
           foreach ($item in $forbidden) {
             if (Test-Path $item) { throw "Forbidden runtime/private path committed: $item" }
           }

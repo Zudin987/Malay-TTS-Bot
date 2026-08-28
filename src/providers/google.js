@@ -1,5 +1,6 @@
 import { PassThrough } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
+import { waitForWritableDrain } from '../stream-backpressure.js';
 
 const ENDPOINT = 'https://translate.google.com/translate_tts';
 const DEFAULT_MAXIMUM_LENGTH = 200;
@@ -253,7 +254,7 @@ export async function streamGoogleMalay(text, options = {}) {
         const part = i === 0 ? first : await promises[i];
         totalBytes += part.length;
         if (totalBytes > maxAudioBytes) throw new Error(`Google Malay TTS exceeded ${maxAudioBytes} total audio bytes.`);
-        if (!output.write(part)) await new Promise((resolve) => output.once('drain', resolve));
+        if (!output.write(part)) await waitForWritableDrain(output, deadline.signal, 'Google TTS output stream');
       }
       await Promise.all(workers);
       output.end();

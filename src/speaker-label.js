@@ -57,25 +57,38 @@ function validPcm(pcm) {
   return pcm.length <= maxBytes;
 }
 
-export function decodeAudioToSpeakerPcm(audioBuffer, { spawnImpl = spawn } = {}) {
+export function decodeAudioToSpeakerPcm(audioBuffer, { spawnImpl = spawn, timeoutMs = 5000 } = {}) {
   if (!Buffer.isBuffer(audioBuffer) || audioBuffer.length === 0) return Promise.reject(new Error('Speaker-label decoder received empty audio.'));
+  const boundedTimeoutMs = Math.max(500, Math.min(finiteNumber(timeoutMs, 5000), 30_000));
   return new Promise((resolve, reject) => {
     const ffmpeg = spawnImpl(getFfmpegPath(), [
       '-hide_banner', '-loglevel', 'error', '-nostdin', '-f', 'mp3', '-i', 'pipe:0', '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '24000', '-f', 's16le', 'pipe:1'
     ], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     const chunks = [];
     let stderr = '';
+    let settled = false;
+    let timer = null;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      callback(value);
+    };
     ffmpeg.stdout.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
     ffmpeg.stderr.setEncoding('utf8');
     ffmpeg.stderr.on('data', (chunk) => { stderr += chunk; });
-    ffmpeg.on('error', reject);
+    ffmpeg.on('error', (error) => finish(reject, error));
     ffmpeg.on('close', (code) => {
-      if (code !== 0) return reject(new Error(`Speaker-label FFmpeg decode failed (${code})${stderr.trim() ? `: ${stderr.trim()}` : ''}`));
+      if (code !== 0) return finish(reject, new Error(`Speaker-label FFmpeg decode failed (${code})${stderr.trim() ? `: ${stderr.trim()}` : ''}`));
       const pcm = Buffer.concat(chunks);
-      if (!validPcm(pcm)) return reject(new Error(`Speaker-label FFmpeg decode produced invalid/oversized PCM (${pcm.length} bytes).`));
-      resolve(pcm);
+      if (!validPcm(pcm)) return finish(reject, new Error(`Speaker-label FFmpeg decode produced invalid/oversized PCM (${pcm.length} bytes).`));
+      finish(resolve, pcm);
     });
-    ffmpeg.stdin.on('error', (error) => { if (error?.code !== 'EPIPE') reject(error); });
+    ffmpeg.stdin.on('error', (error) => { if (error?.code !== 'EPIPE') finish(reject, error); });
+    timer = setTimeout(() => {
+      try { ffmpeg.kill?.(); } catch {}
+      finish(reject, new Error(`Speaker-label FFmpeg decode timed out after ${boundedTimeoutMs}ms.`));
+    }, boundedTimeoutMs);
     ffmpeg.stdin.end(audioBuffer);
   });
 }

@@ -41,6 +41,14 @@ function cleanIdList(value, maximum = 500) {
     .slice(0, maximum);
 }
 
+function updateOptOutIds(currentIds, userId, enabled) {
+  const key = String(userId ?? '').trim();
+  const ids = new Set(cleanIdList(currentIds, Number.POSITIVE_INFINITY));
+  if (enabled) ids.add(key);
+  else ids.delete(key);
+  return cleanIdList([...ids], Number.POSITIVE_INFINITY);
+}
+
 function normalizeGuild(raw = {}) {
   const input = isObject(raw) ? raw : {};
   return {
@@ -59,7 +67,9 @@ function normalizeGuild(raw = {}) {
       : null,
     userAliases: cleanStringMap(input.userAliases, { maxValue: 80 }),
     ttsVoices: cleanStringMap(input.ttsVoices, { maxValue: 40 }),
-    ttsOptOutUserIds: cleanIdList(input.ttsOptOutUserIds),
+    // Privacy state must never be silently truncated. An arbitrary entry cap can
+    // make /ttsoptout report success while dropping a later user's opt-out.
+    ttsOptOutUserIds: cleanIdList(input.ttsOptOutUserIds, Number.POSITIVE_INFINITY),
     dictionaryOverrides: cleanStringMap(input.dictionaryOverrides, { maxKey: 80, maxValue: 160, normalizeKey: (key) => key.toLocaleLowerCase('ms-MY') })
   };
 }
@@ -223,11 +233,7 @@ export function isUserTtsOptedOut(guildId, userId) {
 
 export function setUserTtsOptOut(guildId, userId, enabled) {
   const current = getGuildSettings(guildId);
-  const key = String(userId);
-  const ids = new Set(current.ttsOptOutUserIds);
-  if (enabled) ids.add(key);
-  else ids.delete(key);
-  current.ttsOptOutUserIds = cleanIdList([...ids]);
+  current.ttsOptOutUserIds = updateOptOutIds(current.ttsOptOutUserIds, userId, enabled);
   save();
   return enabled;
 }
@@ -255,4 +261,4 @@ export function removeGuildDictionaryEntry(guildId, shortform) {
   return true;
 }
 
-export const __test = { normalizeGuild, normalizeGuildCollection };
+export const __test = { normalizeGuild, normalizeGuildCollection, updateOptOutIds };
