@@ -4,7 +4,7 @@
 
 GitHub is the source of truth for development. `main` is stable/released code and `develop` is the active integration branch. Use focused feature/fix branches and pull requests for non-trivial changes.
 
-Current imported baseline: **v0.23.3 — Adaptive Quota Failover / 4 Voices**.
+Current stable baseline: **v0.23.4 — Audit Hardening**.
 
 ## Priorities
 
