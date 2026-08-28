@@ -30,9 +30,8 @@ function currentProcessStartMs() {
   return Math.round(Date.now() - process.uptime() * 1000);
 }
 
-function readLockData() {
+function parseLockData(raw) {
   try {
-    const raw = fs.readFileSync(lockPath, 'utf8');
     const data = JSON.parse(raw);
     return {
       pid: Number(data?.pid),
@@ -41,6 +40,16 @@ function readLockData() {
       nonce: typeof data?.nonce === 'string' ? data.nonce : null,
       raw
     };
+  } catch {
+    // Preserve the raw record even when JSON is corrupt so a stable corrupt
+    // stale lock can still be compared byte-for-byte and safely removed.
+    return { pid: NaN, execPath: null, processStartMs: NaN, nonce: null, raw };
+  }
+}
+
+function readLockData() {
+  try {
+    return parseLockData(fs.readFileSync(lockPath, 'utf8'));
   } catch {
     return { pid: NaN, execPath: null, processStartMs: NaN, nonce: null, raw: null };
   }
@@ -97,8 +106,8 @@ export function acquireSingleInstanceLock() {
   // lock file.
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      const fd = fs.openSync(lockPath, 'wx');
       const nonce = randomUUID();
+      const fd = fs.openSync(lockPath, 'wx');
       try {
         fs.writeFileSync(fd, `${JSON.stringify({
           pid: process.pid,
@@ -108,7 +117,12 @@ export function acquireSingleInstanceLock() {
           nonce
         })}\n`, 'utf8');
         fs.fsyncSync(fd);
-      } finally { fs.closeSync(fd); }
+      } catch (writeError) {
+        try { fs.closeSync(fd); } catch {}
+        try { fs.unlinkSync(lockPath); } catch {}
+        throw writeError;
+      }
+      fs.closeSync(fd);
 
       ownedNonce = nonce;
       ownsLock = true;
@@ -143,4 +157,4 @@ export function releaseSingleInstanceLock() {
   ownedNonce = null;
 }
 
-export const __test = { normalizeExecutable, lockBelongsToLiveBot, lockRecordUnchanged };
+export const __test = { normalizeExecutable, lockBelongsToLiveBot, lockRecordUnchanged, parseLockData };
