@@ -1,10 +1,8 @@
-name: Prepare v0.23.5 Release Metadata
+name: Prepare v0.23.5 Release
 
 on:
   push:
     branches: ['audit/v0.23.5']
-    paths:
-      - '.github/workflows/release-prep-v0235.yml'
 
 permissions:
   contents: write
@@ -25,108 +23,127 @@ jobs:
           node-version: '24'
           cache: npm
 
-      - name: Apply v0.23.5 release metadata
+      - name: Update release metadata
         shell: bash
         run: |
           set -euo pipefail
-          python - <<'PY'
+          python3 - <<'PY'
           from pathlib import Path
+          import json
 
-          def replace_exact(path, old, new, count=None):
-              p = Path(path)
-              text = p.read_text()
-              actual = text.count(old)
-              if count is not None and actual != count:
-                  raise SystemExit(f'{path}: expected {count} occurrence(s), found {actual}: {old!r}')
-              if actual == 0:
-                  raise SystemExit(f'{path}: missing expected text: {old!r}')
-              p.write_text(text.replace(old, new))
+          VERSION = '0.23.5'
 
-          replace_exact('package.json', '"version": "0.23.4"', '"version": "0.23.5"', 1)
-          replace_exact('package-lock.json', '"version": "0.23.4"', '"version": "0.23.5"', 2)
-          replace_exact('setup-clean.cmd', 'Malay TTS Bot clean setup v0.23.4', 'Malay TTS Bot clean setup v0.23.5', 1)
-          replace_exact('src/providers/gemini.js', "'x-goog-api-client': 'malay-tts-bot/0.23.4'", "'x-goog-api-client': 'malay-tts-bot/0.23.5'", 1)
-          replace_exact('test/regression.test.js', "test('v0.23.4 defaults keep adaptive Live audio-end grace and current speaker/message gain'", "test('v0.23.5 defaults keep adaptive Live audio-end grace and current speaker/message gain'", 1)
-          replace_exact('test/regression.test.js', "test('v0.23.4 voice pool is restricted to Charon, Enceladus, Aoede and Despina'", "test('v0.23.5 voice pool is restricted to Charon, Enceladus, Aoede and Despina'", 1)
-          replace_exact('MAINTENANCE.md', 'Current stable baseline: **v0.23.4 — Audit Hardening**.', 'Current stable baseline: **v0.23.5 — Reliability & Privacy Hardening**.', 1)
+          def write_json(path, data):
+              Path(path).write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 
-          readme = Path('README.md')
-          text = readme.read_text()
-          header = '# Malay TTS Bot — v0.23.4 — Audit Hardening'
-          if text.count(header) != 1:
-              raise SystemExit('README release header mismatch')
-          text = text.replace(header, '# Malay TTS Bot — v0.23.5 — Reliability & Privacy Hardening', 1)
-          anchor = """## v0.23.4 highlights
+          package = json.loads(Path('package.json').read_text(encoding='utf-8'))
+          if package.get('version') != '0.23.4':
+              raise SystemExit(f"Unexpected package version: {package.get('version')}")
+          package['version'] = VERSION
+          write_json('package.json', package)
 
-- **Adaptive Gemini Live audio-end grace.**"""
-          replacement = """## v0.23.5 highlights
+          lock = json.loads(Path('package-lock.json').read_text(encoding='utf-8'))
+          if lock.get('version') != '0.23.4' or lock.get('packages', {}).get('', {}).get('version') != '0.23.4':
+              raise SystemExit('Unexpected package-lock baseline version')
+          lock['version'] = VERSION
+          lock['packages']['']['version'] = VERSION
+          write_json('package-lock.json', lock)
 
-- **Cancellation-safe streamed provider backpressure.** Gemini 3.1 Flash TTS and Google Malay fallback now stop waiting for `drain` when their output stream is aborted, closed or errors, preventing cancelled work from hanging completion or retaining a Gemini concurrency slot.
-- **Privacy opt-out no longer has a hidden 500-user ceiling.** Both guild-state normalization and `/ttsoptout` mutation preserve the complete valid opted-out user set instead of silently dropping later entries.
-- **Speaker-label decoder lifetime is bounded.** A wedged FFmpeg speaker-label decode is terminated by a hard watchdog instead of surviving after the foreground label wait has already timed out.
-- **Release hygiene is stricter.** CI now rejects `guilds.json.bak`, stale lock/stop files and temp/runtime artifacts in addition to the existing secret/cache/log guards.
-- **CI is fully Node-24-native.** GitHub Actions uses checkout/setup-node v7, Ubuntu runs `npm audit --audit-level=high`, and the suite remains cross-platform on Ubuntu and Windows.
-- **Regression suite expanded to 57 tests.** New coverage exercises provider cancellation while backpressured, >500-user opt-out persistence/mutation, and wedged speaker-label FFmpeg termination.
+          setup_path = Path('setup-clean.cmd')
+          setup = setup_path.read_text(encoding='utf-8')
+          if 'clean setup v0.23.4' not in setup:
+              raise SystemExit('setup-clean version anchor missing')
+          setup_path.write_text(setup.replace('clean setup v0.23.4', 'clean setup v0.23.5'), encoding='utf-8')
 
-### v0.23.4 hardening retained
+          gemini_path = Path('src/providers/gemini.js')
+          gemini = gemini_path.read_text(encoding='utf-8')
+          if 'malay-tts-bot/0.23.4' not in gemini:
+              raise SystemExit('Gemini client version anchor missing')
+          gemini_path.write_text(gemini.replace('malay-tts-bot/0.23.4', 'malay-tts-bot/0.23.5'), encoding='utf-8')
 
-- **Adaptive Gemini Live audio-end grace.**"""
-          if text.count(anchor) != 1:
-              raise SystemExit('README highlights anchor mismatch')
-          text = text.replace(anchor, replacement, 1)
-          text = text.replace('**Do not restore an old `config\\settings.json`**; v0.23.4 ships new defaults/fields.', '**Do not restore an old `config\\settings.json`**; v0.23.5 ships the release defaults.', 1)
-          text = text.replace('Generative Live speech still cannot provide a mathematical guarantee that it will never produce an extra sound/word. v0.23.4 retains the hardened prompts/recovery,', 'Generative Live speech still cannot provide a mathematical guarantee that it will never produce an extra sound/word. v0.23.5 retains the hardened prompts/recovery,', 1)
-          readme.write_text(text)
+          regression_path = Path('test/regression.test.js')
+          regression = regression_path.read_text(encoding='utf-8')
+          old_default = 'v0.23.4 defaults keep adaptive Live audio-end grace and current speaker/message gain'
+          old_voice = 'v0.23.4 voice pool is restricted to Charon, Enceladus, Aoede and Despina'
+          if old_default not in regression or old_voice not in regression:
+              raise SystemExit('Regression release-label anchor missing')
+          regression = regression.replace(old_default, 'v0.23.5 defaults keep adaptive Live audio-end grace and current speaker/message gain')
+          regression = regression.replace(old_voice, 'v0.23.5 voice pool is restricted to Charon, Enceladus, Aoede and Despina')
+          regression_path.write_text(regression, encoding='utf-8')
+
+          maintenance_path = Path('MAINTENANCE.md')
+          maintenance = maintenance_path.read_text(encoding='utf-8')
+          baseline = 'Current stable baseline: **v0.23.4 — Audit Hardening**.'
+          if baseline not in maintenance:
+              raise SystemExit('Maintenance baseline anchor missing')
+          maintenance_path.write_text(maintenance.replace(baseline, 'Current stable baseline: **v0.23.5 — Reliability & Privacy Hardening**.'), encoding='utf-8')
+
+          readme_path = Path('README.md')
+          readme = readme_path.read_text(encoding='utf-8')
+          old_header = '# Malay TTS Bot — v0.23.4 — Audit Hardening'
+          old_marker = '## v0.23.4 highlights\n\n- **Adaptive Gemini Live audio-end grace.**'
+          if old_header not in readme or old_marker not in readme:
+              raise SystemExit('README release anchors missing')
+          readme = readme.replace(old_header, '# Malay TTS Bot — v0.23.5 — Reliability & Privacy Hardening', 1)
+          new_highlights = (
+              '## v0.23.5 highlights\n\n'
+              '- **Cancellation-safe streamed provider backpressure.** Gemini 3.1 Flash TTS and Google Malay fallback now stop waiting for `drain` when output is aborted, closed or errors, preventing cancelled work from hanging completion or retaining a Gemini concurrency slot.\n'
+              '- **Privacy opt-out has no hidden 500-user ceiling.** Guild-state normalization and `/ttsoptout` mutation both preserve the complete valid opted-out user set.\n'
+              '- **Speaker-label decoder lifetime is bounded.** A wedged FFmpeg speaker-label decode is terminated by a hard watchdog instead of surviving after the foreground label wait times out.\n'
+              '- **Release hygiene is stricter.** CI rejects `guilds.json.bak`, stale lock/stop files and temp/runtime artifacts in addition to existing secret/cache/log guards.\n'
+              '- **CI is Node-24-native.** GitHub Actions uses checkout/setup-node v7, Ubuntu runs dependency audit, and the full suite remains cross-platform on Ubuntu and Windows.\n'
+              '- **Regression suite expanded to 57 tests.** New coverage exercises provider cancellation while backpressured, >500-user opt-out persistence/mutation, and wedged speaker-label FFmpeg termination.\n\n'
+              '### v0.23.4 hardening retained\n\n'
+              '- **Adaptive Gemini Live audio-end grace.**'
+          )
+          readme = readme.replace(old_marker, new_highlights, 1)
+          readme = readme.replace('**Do not restore an old `config\\settings.json`**; v0.23.4 ships new defaults/fields.', '**Do not restore an old `config\\settings.json`**; v0.23.5 ships the release defaults.', 1)
+          readme = readme.replace('Generative Live speech still cannot provide a mathematical guarantee that it will never produce an extra sound/word. v0.23.4 retains the hardened prompts/recovery,', 'Generative Live speech still cannot provide a mathematical guarantee that it will never produce an extra sound/word. v0.23.5 retains the hardened prompts/recovery,', 1)
+          readme_path.write_text(readme, encoding='utf-8')
 
           old_release = Path('RELEASE-v0.23.4.txt')
           if not old_release.exists():
-              raise SystemExit('missing RELEASE-v0.23.4.txt')
+              raise SystemExit('Missing v0.23.4 release note')
           old_release.unlink()
-          Path('RELEASE-v0.23.5.txt').write_text("""Malay TTS Bot v0.23.5 — Reliability & Privacy Hardening
-
-Source: v0.23.4 Audit Hardening stable release.
-Priority: latency > quality > features.
-
-Reliability / privacy fixes:
-- Gemini 3.1 Flash TTS and Google Malay fallback now use abort/error/close-aware writable backpressure handling. Cancelling a provider while its output is waiting for drain can no longer leave completion stuck; Gemini therefore cannot retain one of the two global generation slots through this path.
-- TTS privacy opt-out IDs are no longer silently truncated at 500 entries. The full valid set is preserved both when guild state is normalized and when /ttsoptout mutates persisted state.
-- Speaker-label FFmpeg decoding has a bounded watchdog. A wedged child is terminated instead of remaining alive after the foreground label wait has already fallen back to message playback.
-- CI release hygiene now also rejects data/guilds.json.bak, data/bot.lock, data/stop.request and temp/runtime artifacts.
-
-Validation / release process:
-- Regression suite expanded from 52 to 57 tests.
-- Added Gemini exact-TTS cancellation-under-backpressure coverage.
-- Added Google fallback cancellation-under-backpressure coverage.
-- Added >500-user privacy opt-out normalization and mutation coverage.
-- Added speaker-label FFmpeg watchdog/termination coverage.
-- Node 24 CI passes on Ubuntu and Windows.
-- Ubuntu CI runs npm audit and the actual FFmpeg volume + limiter + libopus/Ogg encode/decode probe.
-- GitHub Actions checkout/setup-node use their Node-24-native v7 majors.
-- Final release-prep gate runs the complete regression suite five consecutive times.
-
-Retained:
-- Provider order remains Gemini 3.1 Live -> Gemini 2.5 Live -> Gemini 3.1 TTS -> Google Malay TTS.
-- Voice pool remains Charon, Enceladus, Aoede and Despina.
-- One Discord message = one TTS item. No message merging and no multi-turn Gemini Live reuse.
-- Speaker username remains separate Google Malay TTS audio and is never inserted into Gemini message text.
-- Clean audio defaults remain fixedVolume 0.60 and speakerLabel.gain 1.50.
-- Free-first / billing-disabled operating model remains unchanged.
-
-Deferred non-critical notes:
-- stop-bot.js intentionally avoids killing a PID that no longer matches the recorded bot process identity; in the extremely rare stale-lock/PID-reuse case this can cost only the stop timeout.
-- Gemini orchestrator retries remain effectively disabled for latency-first failover; retry-count configuration cleanup can remain a later maintenance change.
-
-Upgrade:
-Preserve only .env and data\\guilds.json. Do not restore an old config\\settings.json. Replace the old folder with the v0.23.5 clean package, restore those two files, then run setup-clean.cmd.
-""")
+          release_lines = [
+              'Malay TTS Bot v0.23.5 — Reliability & Privacy Hardening',
+              '',
+              'Source: v0.23.4 Audit Hardening stable release.',
+              'Priority: latency > quality > features.',
+              '',
+              'Reliability / privacy fixes:',
+              '- Gemini 3.1 Flash TTS and Google Malay fallback now use abort/error/close-aware writable backpressure handling. Cancelling while output is waiting for drain can no longer leave provider completion stuck or retain a Gemini concurrency slot.',
+              '- TTS privacy opt-out IDs are no longer silently truncated at 500 entries. The full valid set is preserved during guild-state normalization and /ttsoptout mutation.',
+              '- Speaker-label FFmpeg decoding has a bounded watchdog. A wedged child is terminated instead of remaining alive after the foreground label wait has already fallen back to message playback.',
+              '- CI release hygiene now also rejects data/guilds.json.bak, data/bot.lock, data/stop.request and temp/runtime artifacts.',
+              '',
+              'Validation / release process:',
+              '- Regression suite expanded from 52 to 57 tests.',
+              '- Added Gemini exact-TTS and Google fallback cancellation-under-backpressure coverage.',
+              '- Added >500-user privacy opt-out normalization and mutation coverage.',
+              '- Added speaker-label FFmpeg watchdog/termination coverage.',
+              '- Node 24 CI passes on Ubuntu and Windows.',
+              '- Ubuntu CI runs npm audit and the actual FFmpeg volume + limiter + libopus/Ogg encode/decode probe.',
+              '- GitHub Actions checkout/setup-node use their Node-24-native v7 majors.',
+              '- Final release-prep gate runs the complete regression suite five consecutive times.',
+              '',
+              'Retained:',
+              '- Provider order remains Gemini 3.1 Live -> Gemini 2.5 Live -> Gemini 3.1 TTS -> Google Malay TTS.',
+              '- Voice pool remains Charon, Enceladus, Aoede and Despina.',
+              '- One Discord message = one TTS item. No message merging and no multi-turn Gemini Live reuse.',
+              '- Speaker username remains separate Google Malay TTS audio and is never inserted into Gemini message text.',
+              '- Clean audio defaults remain fixedVolume 0.60 and speakerLabel.gain 1.50.',
+              '- Free-first / billing-disabled operating model remains unchanged.',
+              '',
+              'Deferred non-critical notes:',
+              '- stop-bot.js intentionally avoids killing a PID that no longer matches the recorded bot process identity; in the extremely rare stale-lock/PID-reuse case this can cost only the stop timeout.',
+              '- Gemini orchestrator retries remain effectively disabled for latency-first failover; retry-count configuration cleanup can remain a later maintenance change.',
+              '',
+              'Upgrade:',
+              'Preserve only .env and data\\guilds.json. Do not restore an old config\\settings.json. Replace the old folder with the v0.23.5 clean package, restore those two files, then run setup-clean.cmd.',
+          ]
+          Path('RELEASE-v0.23.5.txt').write_text('\n'.join(release_lines) + '\n', encoding='utf-8')
           PY
-
-          test ! -e RELEASE-v0.23.4.txt
-          test -e RELEASE-v0.23.5.txt
-          ! grep -q 'malay-tts-bot/0.23.4' src/providers/gemini.js
-          ! grep -q '"version": "0.23.4"' package.json package-lock.json
-          ! grep -q 'clean setup v0.23.4' setup-clean.cmd
-          git diff --check
 
       - name: Install dependencies
         run: npm ci
@@ -135,8 +152,15 @@ Preserve only .env and data\\guilds.json. Do not restore an old config\\settings
         shell: bash
         run: |
           set -euo pipefail
-          while IFS= read -r -d '' f; do node --check "$f"; done < <(find . -type f -name '*.js' -not -path './node_modules/*' -print0)
-          node -e "const fs=require('fs'),p=require('path'); const files=['package.json','package-lock.json',...fs.readdirSync('config').filter(x=>x.endsWith('.json')).map(x=>p.join('config',x))]; for(const f of files) JSON.parse(fs.readFileSync(f,'utf8')); console.log('Validated '+files.length+' JSON file(s).')"
+          find . -type f -name '*.js' -not -path './node_modules/*' -print0 | xargs -0 -n1 node --check
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const files = ['package.json', 'package-lock.json', ...fs.readdirSync('config').filter((x) => x.endsWith('.json')).map((x) => path.join('config', x))];
+          for (const file of files) JSON.parse(fs.readFileSync(file, 'utf8'));
+          console.log(`Validated ${files.length} JSON file(s).`);
+          NODE
+          git diff --check
 
       - name: Five consecutive regression passes
         shell: bash
@@ -150,10 +174,17 @@ Preserve only .env and data\\guilds.json. Do not restore an old config\\settings
       - name: Dependency audit
         run: npm audit --audit-level=high
 
-      - name: Release hygiene guard
+      - name: Release hygiene
         shell: bash
         run: |
           set -euo pipefail
+          test ! -e RELEASE-v0.23.4.txt
+          test -e RELEASE-v0.23.5.txt
+          test "$(node -p "require('./package.json').version")" = "0.23.5"
+          test "$(node -p "require('./package-lock.json').version")" = "0.23.5"
+          ! grep -q 'malay-tts-bot/0.23.4' src/providers/gemini.js
+          ! grep -q 'clean setup v0.23.4' setup-clean.cmd
+          ! grep -q 'v0.23.4 defaults keep adaptive' test/regression.test.js
           test ! -e .env
           test ! -e data/guilds.json
           test ! -e data/guilds.json.bak
