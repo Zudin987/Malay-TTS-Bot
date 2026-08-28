@@ -76,3 +76,44 @@ jobs:
           test ! -d runtime
           test ! -e bot.log
           test ! -e bot-old.log
+
+  windows-validate:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: JavaScript syntax
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse -Filter *.js |
+            Where-Object { $_.FullName -notmatch '[\\/]node_modules[\\/]' } |
+            ForEach-Object {
+              node --check $_.FullName
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+
+      - name: JSON validation
+        shell: pwsh
+        run: |
+          node -e "const fs=require('fs'),p=require('path'); const files=['package.json','package-lock.json',...fs.readdirSync('config').filter(x=>x.endsWith('.json')).map(x=>p.join('config',x))]; for(const f of files) JSON.parse(fs.readFileSync(f,'utf8')); console.log('Validated '+files.length+' JSON file(s).')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Regression tests on Windows
+        run: npm test
+
+      - name: Secret/runtime file guard
+        shell: pwsh
+        run: |
+          $forbidden = @('.env', 'data/guilds.json', 'data/speaker-label-cache', 'runtime', 'bot.log', 'bot-old.log')
+          foreach ($item in $forbidden) {
+            if (Test-Path $item) { throw "Forbidden runtime/private path committed: $item" }
+          }

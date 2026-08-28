@@ -1,4 +1,4 @@
-# Malay TTS Bot — v0.23.3 — Adaptive Quota Failover
+# Malay TTS Bot — v0.23.4 — Audit Hardening
 
 Private Windows Discord Malaysian Malay / Malaysian English TTS bot. The runtime stays lightweight: no local AI model, no EXE conversion, no message merging, and every Gemini Live message uses a fresh one-turn session.
 
@@ -16,7 +16,16 @@ Gemini voice pool:
 
 Speaker usernames are **not** inserted into Gemini text. The username is generated separately with Google Malay TTS, cached locally, played first, followed by the configured gap (100 ms default), then the user message uses the assigned Gemini voice.
 
-## v0.23.3 highlights
+## v0.23.4 highlights
+
+- **Adaptive Gemini Live audio-end grace.** Missing/delayed completion metadata no longer clips healthy audio after a fixed 650 ms gap; ordinary `generationComplete` turns still close audio immediately.
+- **HTTP-200 Gemini TTS SSE errors are classified correctly.** RPD/daily quota, auth, permission, config/request and retryable transport failures now feed the same provider-health logic as HTTP failures.
+- **Cutoff recovery keeps ownership metadata.** Recovery items preserve the originating Discord message ID and voice-channel ID.
+- **Less hot-path disk I/O.** Non-critical guild normalization and automatic voice-assignment persistence are coalesced briefly, while explicit settings/privacy writes remain synchronous.
+- **FFmpeg path lookup is cached.** Repeated playback avoids redundant filesystem probes and automatically invalidates when `FFMPEG_PATH` changes.
+- **Unicode-safe speaker labels.** ZWJ emoji sequences are preserved and the 80-character safety limit truncates by grapheme cluster.
+- **Single-instance lock race hardened.** Lock ownership now includes a nonce and stale/corrupt lock replacement requires exact-record revalidation before deletion.
+- **Windows CI added.** The full Node 24 regression suite now runs on both Ubuntu and Windows, with Ubuntu also probing the real FFmpeg/libopus filter path.
 
 - **Quota and transport failures are separated.** A quota error on Gemini 3.1 Live no longer suppresses Gemini 2.5 Live as if the whole Live transport were broken.
 - **Exponential per-provider circuit breakers.** Short quota/rate failures cool down for 15s, then 60s, then 300s on repeated failures; success resets the streak. Temporary errors use a smaller 8s -> 30s -> 120s ladder.
@@ -81,7 +90,7 @@ Then:
 1. Stop the current bot.
 2. Replace the old `C:\Malay-TTS-Bot` contents with this clean package.
 3. Restore `.env` and `data\guilds.json`.
-4. **Do not restore an old `config\settings.json`**; v0.23.3 ships new defaults/fields.
+4. **Do not restore an old `config\settings.json`**; v0.23.4 ships new defaults/fields.
 5. Run `setup-clean.cmd` from an Administrator-capable interactive account. It runs `npm ci`, applies best-effort restrictive ACLs to `.env`/`guilds.json`, runs the doctor and deploys slash commands.
 6. Start the existing **Malay TTS Bot** Task Scheduler task.
 
@@ -115,7 +124,7 @@ Gemini preprocessing remains intentionally light and deterministic. It does not 
 
 Default profile goals are exact recitation, Malaysian Malay/Malaysian English pronunciation, slightly slower-than-normal calm delivery, restrained pitch movement and neutral/gently downward statement endings.
 
-Generative Live speech still cannot provide a mathematical guarantee that it will never produce an extra sound/word. v0.23.3 retains the hardened prompts/recovery, while the exact Gemini TTS and Google fallback paths remain available when Live fails.
+Generative Live speech still cannot provide a mathematical guarantee that it will never produce an extra sound/word. v0.23.4 retains the hardened prompts/recovery, while the exact Gemini TTS and Google fallback paths remain available when Live fails.
 
 ## Useful commands
 

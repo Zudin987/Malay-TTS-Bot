@@ -3,6 +3,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+let cachedPath = null;
+let cachedConfiguredPath = null;
 
 function candidatePaths() {
   const configured = String(process.env.FFMPEG_PATH ?? '').trim();
@@ -19,12 +21,22 @@ function candidatePaths() {
 }
 
 export function getFfmpegPath() {
+  const configured = String(process.env.FFMPEG_PATH ?? '').trim();
+  if (cachedPath && cachedConfiguredPath === configured) return cachedPath;
   for (const candidate of candidatePaths()) {
     try {
-      if (fs.statSync(candidate).isFile()) return candidate;
+      if (fs.statSync(candidate).isFile()) {
+        cachedConfiguredPath = configured;
+        cachedPath = candidate;
+        return cachedPath;
+      }
     } catch {}
   }
-  return 'ffmpeg';
+  cachedConfiguredPath = configured;
+  cachedPath = 'ffmpeg';
+  return cachedPath;
 }
 
-export const __test = { candidatePaths };
+function resetFfmpegPathCache() { cachedPath = null; cachedConfiguredPath = null; }
+
+export const __test = { candidatePaths, resetFfmpegPathCache };

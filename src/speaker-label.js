@@ -31,7 +31,10 @@ export function getSpeakerLabelOptions() {
 }
 
 export function normalizeSpeakerLabelText(value) {
-  const cleaned = String(value ?? '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/gu, ' ').replace(/[\u200B-\u200D\u2060\uFEFF]/gu, '').replace(/\s+/gu, ' ').trim();
+  const cleaned = String(value ?? '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/gu, ' ').replace(/[\u200B\u200C\u2060\uFEFF]/gu, '').replace(/\s+/gu, ' ').trim();
+  if (typeof Intl?.Segmenter === 'function') {
+    return [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(cleaned)].slice(0, 80).map((entry) => entry.segment).join('');
+  }
   return Array.from(cleaned).slice(0, 80).join('');
 }
 export function speakerLabelCacheKey(value) {

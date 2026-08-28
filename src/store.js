@@ -7,6 +7,7 @@ import { readJsonWithBackup, writeBackupText, writeJsonAtomicWithBackup } from '
 const filePath = path.join(dataDir, 'guilds.json');
 let guilds = {};
 let lastValidText = null;
+let deferredSaveTimer = null;
 
 function isObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
@@ -99,8 +100,23 @@ function loadGuilds() {
 loadGuilds();
 
 function save() {
+  if (deferredSaveTimer) { clearTimeout(deferredSaveTimer); deferredSaveTimer = null; }
   fs.mkdirSync(dataDir, { recursive: true });
   lastValidText = writeJsonAtomicWithBackup(filePath, guilds, lastValidText);
+}
+
+function scheduleNoncriticalSave(delayMs = 150) {
+  if (deferredSaveTimer) return;
+  deferredSaveTimer = setTimeout(() => {
+    deferredSaveTimer = null;
+    try {
+      fs.mkdirSync(dataDir, { recursive: true });
+      lastValidText = writeJsonAtomicWithBackup(filePath, guilds, lastValidText);
+    } catch (error) {
+      console.error('[store] Deferred guilds.json save failed:', error.message);
+    }
+  }, Math.max(25, Math.min(Number(delayMs) || 150, 1000)));
+  deferredSaveTimer.unref?.();
 }
 
 export function getGuildSettings(guildId) {
@@ -111,7 +127,7 @@ export function getGuildSettings(guildId) {
   const previous = guilds[id];
   const changed = !isObject(previous) || JSON.stringify(previous) !== JSON.stringify(normalized);
   guilds[id] = normalized;
-  if (changed) save();
+  if (changed) scheduleNoncriticalSave();
   return guilds[id];
 }
 
@@ -175,7 +191,7 @@ export function getOrAssignUserTtsVoice(guildId, userId, allowedVoices) {
   const candidates = voices.filter((voice) => usage.get(voice) === minimumUsage);
   const selected = candidates[randomInt(candidates.length)];
   current.ttsVoices[key] = selected;
-  save();
+  scheduleNoncriticalSave();
   return selected;
 }
 

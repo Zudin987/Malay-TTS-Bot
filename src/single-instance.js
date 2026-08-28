@@ -1,12 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
 const lockPath = path.join(rootDir, 'data', 'bot.lock');
 let ownsLock = false;
+let ownedNonce = null;
 
 function processIsRunning(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -28,17 +30,33 @@ function currentProcessStartMs() {
   return Math.round(Date.now() - process.uptime() * 1000);
 }
 
-function readLockData() {
+function parseLockData(raw) {
   try {
-    const data = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    const data = JSON.parse(raw);
     return {
       pid: Number(data?.pid),
       execPath: normalizeExecutable(data?.execPath),
-      processStartMs: Number(data?.processStartMs)
+      processStartMs: Number(data?.processStartMs),
+      nonce: typeof data?.nonce === 'string' ? data.nonce : null,
+      raw
     };
   } catch {
-    return { pid: NaN, execPath: null, processStartMs: NaN };
+    // Preserve the raw record even when JSON is corrupt so a stable corrupt
+    // stale lock can still be compared byte-for-byte and safely removed.
+    return { pid: NaN, execPath: null, processStartMs: NaN, nonce: null, raw };
   }
+}
+
+function readLockData() {
+  try {
+    return parseLockData(fs.readFileSync(lockPath, 'utf8'));
+  } catch {
+    return { pid: NaN, execPath: null, processStartMs: NaN, nonce: null, raw: null };
+  }
+}
+
+function lockRecordUnchanged(before, after) {
+  return typeof before?.raw === 'string' && before.raw.length > 0 && before.raw === after?.raw;
 }
 
 function windowsProcessIdentity(pid) {
@@ -83,19 +101,30 @@ function lockBelongsToLiveBot(lock) {
 export function acquireSingleInstanceLock() {
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  // A third attempt gives a concurrent starter one chance to replace a stale
+  // lock while we re-check it without either process deleting the other's new
+  // lock file.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
+      const nonce = randomUUID();
       const fd = fs.openSync(lockPath, 'wx');
       try {
         fs.writeFileSync(fd, `${JSON.stringify({
           pid: process.pid,
           startedAt: new Date().toISOString(),
           processStartMs: currentProcessStartMs(),
-          execPath: path.resolve(process.execPath)
+          execPath: path.resolve(process.execPath),
+          nonce
         })}\n`, 'utf8');
         fs.fsyncSync(fd);
-      } finally { fs.closeSync(fd); }
+      } catch (writeError) {
+        try { fs.closeSync(fd); } catch {}
+        try { fs.unlinkSync(lockPath); } catch {}
+        throw writeError;
+      }
+      fs.closeSync(fd);
 
+      ownedNonce = nonce;
       ownsLock = true;
       process.once('exit', releaseSingleInstanceLock);
       return true;
@@ -103,6 +132,13 @@ export function acquireSingleInstanceLock() {
       if (error?.code !== 'EEXIST') throw error;
       const existing = readLockData();
       if (lockBelongsToLiveBot(existing)) return false;
+
+      // Close the stale-lock TOCTOU window: another bot may have removed the
+      // stale record and acquired its own lock while we were inspecting the old
+      // PID. Delete only if the exact file contents are still the record we
+      // classified as stale.
+      const confirmed = readLockData();
+      if (!lockRecordUnchanged(existing, confirmed)) continue;
 
       try { fs.unlinkSync(lockPath); }
       catch (unlinkError) { if (unlinkError?.code !== 'ENOENT') throw unlinkError; }
@@ -116,8 +152,9 @@ export function releaseSingleInstanceLock() {
   ownsLock = false;
   try {
     const data = readLockData();
-    if (data.pid === process.pid) fs.unlinkSync(lockPath);
+    if (data.pid === process.pid && data.nonce === ownedNonce) fs.unlinkSync(lockPath);
   } catch {}
+  ownedNonce = null;
 }
 
-export const __test = { normalizeExecutable, lockBelongsToLiveBot };
+export const __test = { normalizeExecutable, lockBelongsToLiveBot, lockRecordUnchanged, parseLockData };
