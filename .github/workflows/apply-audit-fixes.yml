@@ -1,0 +1,77 @@
+name: Apply v0.23.5 Audit Fixes
+
+on:
+  push:
+    branches: ['audit/v0.23.5']
+    paths:
+      - '.github/workflows/apply-audit-fixes.yml'
+      - 'audit-v0235.patch'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/v0.23.5
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Apply audited patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check audit-v0235.patch
+          git apply audit-v0235.patch
+          rm -f audit-v0235.patch audit-v0235-files.tar.xz
+          rm -f .github/workflows/v0235-audit-apply.yml
+          rm -f .github/workflows/audit-export-source.yml
+          rm -f .github/workflows/apply-audit-fixes.yml
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate source and JSON
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' f; do node --check "$f"; done < <(find . -type f -name '*.js' -not -path './node_modules/*' -print0)
+          node -e "const fs=require('fs'),p=require('path'); const files=['package.json','package-lock.json',...fs.readdirSync('config').filter(x=>x.endsWith('.json')).map(x=>p.join('config',x))]; for(const f of files) JSON.parse(fs.readFileSync(f,'utf8')); console.log('Validated '+files.length+' JSON file(s).')"
+          git diff --check
+
+      - name: Regression tests
+        run: npm test
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+      - name: Release hygiene guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e .env
+          test ! -e data/guilds.json
+          test ! -e data/speaker-label-cache
+          test ! -e runtime
+          test ! -e bot.log
+          test ! -e bot-old.log
+          test ! -e audit-v0235-files.tar.xz
+
+      - name: Commit fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: harden streamed cancellation and opt-out persistence'
+          git push origin HEAD:audit/v0.23.5
