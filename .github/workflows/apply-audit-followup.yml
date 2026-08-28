@@ -26,12 +26,88 @@ jobs:
           node-version: '24'
           cache: npm
 
-      - name: Apply follow-up patch
+      - name: Apply deterministic follow-up edits
         shell: bash
         run: |
           set -euo pipefail
-          git apply --check audit-v0235-followup.patch
-          git apply audit-v0235-followup.patch
+          python - <<'PY'
+          from pathlib import Path
+
+          store = Path('src/store.js')
+          text = store.read_text()
+          anchor = "function normalizeGuild(raw = {}) {"
+          helper = """function updateOptOutIds(currentIds, userId, enabled) {
+            const key = String(userId ?? '').trim();
+            const ids = new Set(cleanIdList(currentIds, Number.POSITIVE_INFINITY));
+            if (enabled) ids.add(key);
+            else ids.delete(key);
+            return cleanIdList([...ids], Number.POSITIVE_INFINITY);
+          }
+
+          """
+          if 'function updateOptOutIds(' not in text:
+              if text.count(anchor) != 1: raise SystemExit('normalizeGuild anchor mismatch')
+              text = text.replace(anchor, helper + anchor)
+          old_setter = """  const key = String(userId);
+            const ids = new Set(current.ttsOptOutUserIds);
+            if (enabled) ids.add(key);
+            else ids.delete(key);
+            current.ttsOptOutUserIds = cleanIdList([...ids]);"""
+          new_setter = "  current.ttsOptOutUserIds = updateOptOutIds(current.ttsOptOutUserIds, userId, enabled);"
+          if old_setter in text:
+              text = text.replace(old_setter, new_setter, 1)
+          if "export const __test = { normalizeGuild, normalizeGuildCollection };" in text:
+              text = text.replace(
+                  "export const __test = { normalizeGuild, normalizeGuildCollection };",
+                  "export const __test = { normalizeGuild, normalizeGuildCollection, updateOptOutIds };",
+                  1,
+              )
+          if new_setter not in text or 'updateOptOutIds };' not in text:
+              raise SystemExit('store edit verification failed')
+          store.write_text(text)
+
+          tests = Path('test/regression.test.js')
+          text = tests.read_text()
+          marker = "test('speaker label maxWaitMs=0 means do not wait', async () => {"
+          new_test = """test('privacy opt-out mutation never silently drops users after the old 500-entry cap', () => {
+            const ids = Array.from({ length: 650 }, (_, index) => String(10000 + index));
+            const added = '999999999999999999';
+            const enabled = storeTest.updateOptOutIds(ids, added, true);
+            assert.equal(enabled.length, 651);
+            assert.equal(enabled.includes(added), true);
+            assert.equal(enabled.includes(ids[0]), true);
+
+            const disabled = storeTest.updateOptOutIds(enabled, ids[0], false);
+            assert.equal(disabled.length, 650);
+            assert.equal(disabled.includes(ids[0]), false);
+            assert.equal(disabled.includes(added), true);
+          });
+
+          """
+          if "privacy opt-out mutation never silently drops users" not in text:
+              if text.count(marker) != 1: raise SystemExit('regression test anchor mismatch')
+              text = text.replace(marker, new_test + marker, 1)
+          tests.write_text(text)
+
+          ci = Path('.github/workflows/ci.yml')
+          text = ci.read_text().replace('actions/checkout@v4', 'actions/checkout@v7').replace('actions/setup-node@v4', 'actions/setup-node@v7')
+          audit_step = """      - name: Dependency audit
+                run: npm audit --audit-level=high
+
+          """
+          ffmpeg_marker = "      - name: Install FFmpeg\n"
+          if 'name: Dependency audit' not in text:
+              if text.count(ffmpeg_marker) != 1: raise SystemExit('CI FFmpeg anchor mismatch')
+              text = text.replace(ffmpeg_marker, audit_step + ffmpeg_marker, 1)
+          ci.write_text(text)
+
+          maintenance = Path('MAINTENANCE.md')
+          text = maintenance.read_text().replace(
+              'Current imported baseline: **v0.23.3 — Adaptive Quota Failover / 4 Voices**.',
+              'Current stable baseline: **v0.23.4 — Audit Hardening**.',
+          )
+          maintenance.write_text(text)
+          PY
           rm -f audit-v0235-followup.patch .github/workflows/apply-audit-followup.yml
 
       - name: Install dependencies
@@ -61,6 +137,7 @@ jobs:
           test ! -e runtime
           test ! -e bot.log
           test ! -e bot-old.log
+          test ! -e audit-v0235-followup.patch
 
       - name: Commit follow-up fixes
         shell: bash
