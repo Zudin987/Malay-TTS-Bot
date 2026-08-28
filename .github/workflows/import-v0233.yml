@@ -24,7 +24,7 @@ jobs:
         run: |
           set -euo pipefail
           cat .import2/part*.b64 | tr -d '[:space:]' | base64 -d > /tmp/source.tar.gz
-          echo 'e38e49d52d5cfa74988e4d0839f42241bd794dade2118cd7fc26a10e4b4d75cd  /tmp/source.tar.gz' | sha256sum -c -
+          echo '61317417c956469a62ca7ba06366fdff98040bb521489b45a744d2dee378e895  /tmp/source.tar.gz' | sha256sum -c -
           mkdir -p /tmp/source
           tar -xzf /tmp/source.tar.gz -C /tmp/source
           test "$(find /tmp/source -type f | wc -l)" -eq 56
