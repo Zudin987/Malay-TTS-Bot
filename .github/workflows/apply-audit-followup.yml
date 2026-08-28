@@ -69,7 +69,10 @@ jobs:
           privacy_test = Path('test/privacy-optout.test.js')
           privacy_test.write_text("""import test from 'node:test';
           import assert from 'node:assert/strict';
-          import { __test as storeTest } from '../src/store.js';
+
+          process.env.DISCORD_TOKEN ||= 'test-token';
+          process.env.DISCORD_CLIENT_ID ||= '123456789012345678';
+          const { __test: storeTest } = await import('../src/store.js');
 
           test('privacy opt-out mutation never silently drops users after the old 500-entry cap', () => {
             const ids = Array.from({ length: 650 }, (_, index) => String(10000 + index));
