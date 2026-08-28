@@ -30,3 +30,4 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
+# Temporary audit-only workflow; remove before release.
