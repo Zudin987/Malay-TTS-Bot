@@ -111,6 +111,13 @@ test('guild-store normalization rejects malformed containers and clamps reset', 
   assert.deepEqual(Object.keys(collection), ['123456', '1234567']);
 });
 
+test('privacy opt-out normalization never silently drops users after an arbitrary cap', () => {
+  const ids = Array.from({ length: 650 }, (_, index) => String(10000 + index));
+  const normalized = storeTest.normalizeGuild({ ttsOptOutUserIds: ids });
+  assert.equal(normalized.ttsOptOutUserIds.length, ids.length);
+  assert.equal(normalized.ttsOptOutUserIds.at(-1), ids.at(-1));
+});
+
 test('speaker label maxWaitMs=0 means do not wait', async () => {
   const original = settings.speakerLabel.maxWaitMs;
   settings.speakerLabel.maxWaitMs = 0;
@@ -464,6 +471,73 @@ test('Gemini exact TTS cancellation is non-mutating and does not throw', async (
   assert.doesNotThrow(() => generated.cancel(reason));
   assert.equal(reason.cancelled, undefined);
   await assert.rejects(generated.completion, /explicit cleanup/);
+});
+
+test('Gemini exact TTS cancellation interrupts a backpressured output drain', async () => {
+  const oversizedChunk = Buffer.alloc(200 * 1024, 1).toString('base64');
+  const encoder = new TextEncoder();
+  let requestSignal = null;
+  let readCount = 0;
+  const fetchImpl = async (_url, init) => {
+    requestSignal = init.signal;
+    return {
+      ok: true,
+      body: {
+        getReader() {
+          return {
+            async read() {
+              readCount += 1;
+              if (readCount === 1) {
+                return {
+                  value: encoder.encode(`data: ${JSON.stringify({ event_type: 'step.delta', delta: { type: 'audio', data: oversizedChunk, mime_type: 'audio/pcm', sample_rate: 24000, channels: 1 } })}\n\n`),
+                  done: false
+                };
+              }
+              return new Promise((resolve, reject) => {
+                const fail = () => reject(requestSignal.reason || new Error('aborted'));
+                if (requestSignal.aborted) fail();
+                else requestSignal.addEventListener('abort', fail, { once: true });
+              });
+            },
+            async cancel() {}
+          };
+        }
+      }
+    };
+  };
+
+  const generated = await gemini.synthesizeGemini('backpressure cancellation', 'Charon', {
+    apiKey: 'test-key', fetchImpl, timeoutMs: 1000, streamIdleTimeoutMs: 2000, maxOutputAudioMs: 10_000, retryCount: 0
+  });
+  generated.cancel(new Error('cancel while backpressured'));
+  await assert.rejects(
+    Promise.race([
+      generated.completion,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('completion remained stuck after cancellation')), 300))
+    ]),
+    /cancel while backpressured/
+  );
+});
+
+test('Google fallback cancellation interrupts a backpressured output drain', async () => {
+  const { streamGoogleMalay } = await import('../src/providers/google.js');
+  const fetchImpl = async () => ({
+    ok: true,
+    headers: { get: () => 'audio/mpeg' },
+    body: null,
+    async arrayBuffer() { return Buffer.alloc(128 * 1024, 7); }
+  });
+  const generated = await streamGoogleMalay('backpressure cancellation', {
+    fetchImpl, retryCount: 0, timeoutMs: 1000, completionTimeoutMs: 2000, maximumLength: 200
+  });
+  generated.cancel(new Error('cancel Google while backpressured'));
+  await assert.rejects(
+    Promise.race([
+      generated.completion,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Google completion remained stuck after cancellation')), 300))
+    ]),
+    /cancel Google while backpressured/
+  );
 });
 
 test('provider failure is wired directly to destroy the playback input', async () => {

@@ -59,7 +59,9 @@ function normalizeGuild(raw = {}) {
       : null,
     userAliases: cleanStringMap(input.userAliases, { maxValue: 80 }),
     ttsVoices: cleanStringMap(input.ttsVoices, { maxValue: 40 }),
-    ttsOptOutUserIds: cleanIdList(input.ttsOptOutUserIds),
+    // Privacy state must never be silently truncated. An arbitrary entry cap can
+    // make /ttsoptout report success while dropping a later user's opt-out.
+    ttsOptOutUserIds: cleanIdList(input.ttsOptOutUserIds, Number.POSITIVE_INFINITY),
     dictionaryOverrides: cleanStringMap(input.dictionaryOverrides, { maxKey: 80, maxValue: 160, normalizeKey: (key) => key.toLocaleLowerCase('ms-MY') })
   };
 }

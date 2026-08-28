@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { PassThrough } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
+import { waitForWritableDrain } from '../stream-backpressure.js';
 
 const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 const API_REVISION = '2026-05-20';
@@ -295,7 +296,7 @@ async function startStreamingRequest(fetchImpl, text, voiceName, apiKey, options
         sampleRate = Math.max(8_000, Math.min(Math.floor(finiteNumber(event.delta.sample_rate ?? event.delta.sampleRate, sampleRate)), 96_000));
         channels = Math.max(1, Math.min(Math.floor(finiteNumber(event.delta.channels, channels)), 2));
         resolveFirst();
-        if (!output.write(chunk)) await new Promise((resolve) => output.once('drain', resolve));
+        if (!output.write(chunk)) await waitForWritableDrain(output, linked.controller.signal, 'Gemini TTS output stream');
       }
       if (event.event_type === 'interaction.completed') {
         const status = event.interaction?.status || 'completed';
