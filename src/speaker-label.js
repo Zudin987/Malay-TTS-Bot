@@ -89,7 +89,6 @@ export function decodeAudioToSpeakerPcm(audioBuffer, { spawnImpl = spawn, timeou
       try { ffmpeg.kill?.(); } catch {}
       finish(reject, new Error(`Speaker-label FFmpeg decode timed out after ${boundedTimeoutMs}ms.`));
     }, boundedTimeoutMs);
-    timer.unref?.();
     ffmpeg.stdin.end(audioBuffer);
   });
 }
