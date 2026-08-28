@@ -1,0 +1,16 @@
+.env
+node_modules/
+temp/
+bot.log
+bot-old.log
+data/bot.lock
+data/*.bak
+config/*.bak
+data/stop.request
+
+data/speaker-label-cache/
+data/guilds.json
+data/guilds.json.bak
+
+# Portable runtimes/binaries belong in release ZIPs, not Git source.
+runtime/
