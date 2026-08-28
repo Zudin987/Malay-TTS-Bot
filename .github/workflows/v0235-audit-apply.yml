@@ -26,11 +26,18 @@ jobs:
           node-version: '24'
           cache: npm
 
-      - name: Apply audited source bundle
+      - name: Validate and apply audited source bundle
         shell: bash
         run: |
           set -euo pipefail
-          echo 'd1868d8097a6871ffa5c73fe8a405172fa1c7926359927d73c3e94c95899d407  audit-v0235-files.tar.xz' | sha256sum -c -
+          sha256sum audit-v0235-files.tar.xz
+          mapfile -t entries < <(tar -tJf audit-v0235-files.tar.xz)
+          printf '%s\n' "${entries[@]}"
+          for entry in "${entries[@]}"; do
+            case "$entry" in
+              /*|../*|*/../*|*/..) echo "Unsafe archive path: $entry" >&2; exit 1 ;;
+            esac
+          done
           tar -xJf audit-v0235-files.tar.xz
           rm -f audit-v0235-files.tar.xz .github/workflows/v0235-audit-apply.yml
 
