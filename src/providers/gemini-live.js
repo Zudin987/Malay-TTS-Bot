@@ -120,7 +120,7 @@ function cancellationError(reason) {
     transportLike: Boolean(source?.transportLike)
   });
   if (source) {
-    for (const key of ['name', 'budgetLike', 'quotaLike', 'authLike', 'retryable', 'runawayLike']) {
+    for (const key of ['name', 'budgetLike', 'quotaLike', 'dailyQuotaLike', 'authLike', 'permissionLike', 'configLike', 'retryable', 'runawayLike']) {
       if (source[key] !== undefined) error[key] = source[key];
     }
   }
@@ -179,6 +179,9 @@ async function startFreshTurn(text, voiceName, options) {
   let timer = null;
   let audioEndTimer = null;
   let audioOutputEnded = false;
+  let lastAudioChunkAt = 0;
+  let maximumObservedAudioGapMs = 0;
+  let audioChunkCount = 0;
   let messageQueue = Promise.resolve();
   let audioBytes = 0;
   let mimeType = null;
@@ -194,10 +197,23 @@ async function startFreshTurn(text, voiceName, options) {
     clearAudioEndTimer();
     if (output && !output.destroyed && !output.writableEnded) output.end();
   };
+  const effectiveAudioEndGraceMs = () => {
+    // The grace timer is only a fallback for rare turns where Gemini omits or
+    // delays generationComplete/turnComplete. A fixed 650 ms gap can clip a
+    // healthy next audio event during network jitter. Protect the first gap
+    // for at least 900 ms, then adapt to observed cadence, capped at 1200 ms
+    // unless the operator explicitly configured a larger base grace.
+    if (audioChunkCount <= 1) return Math.max(audioEndGraceMs, 900);
+    const observed = maximumObservedAudioGapMs > 0
+      ? Math.ceil(maximumObservedAudioGapMs * 1.35 + 120)
+      : audioEndGraceMs;
+    return Math.max(audioEndGraceMs, Math.min(1200, observed));
+  };
   const armAudioEndGrace = () => {
     if (!streamOutput || audioOutputEnded || settled || !seenAudio) return;
     clearAudioEndTimer();
-    audioEndTimer = setTimeout(() => endAudioOutput(), audioEndGraceMs);
+    const graceMs = effectiveAudioEndGraceMs();
+    audioEndTimer = setTimeout(() => endAudioOutput(), graceMs);
     audioEndTimer.unref?.();
   };
   const closeSocket = (code = 1000, reason = 'single turn complete') => {
@@ -315,6 +331,10 @@ async function startFreshTurn(text, voiceName, options) {
           if (audioOutputEnded) {
             return fail(new GeminiLiveError('Gemini Live emitted additional audio after the audio-output end grace.', { transportLike: true }));
           }
+          const chunkAt = Date.now();
+          if (lastAudioChunkAt > 0) maximumObservedAudioGapMs = Math.max(maximumObservedAudioGapMs, chunkAt - lastAudioChunkAt);
+          lastAudioChunkAt = chunkAt;
+          audioChunkCount += 1;
           seenAudio = true;
           audioBytes += audio.length;
           if (audioBytes > maxAudioBytes) {

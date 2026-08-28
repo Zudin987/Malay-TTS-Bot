@@ -38,6 +38,30 @@ export class GeminiTtsHttpError extends Error {
   }
 }
 
+export class GeminiTtsStreamError extends Error {
+  constructor(payload = {}, setupLike = false) {
+    const source = payload && typeof payload === 'object' ? payload : {};
+    const detail = String(source.message || source.detail || 'Gemini TTS streaming interaction failed.').trim();
+    const code = source.code ?? source.status_code ?? source.http_status ?? null;
+    const apiStatus = source.status ?? source.type ?? source.error_type ?? null;
+    super(detail);
+    this.name = 'GeminiTtsStreamError';
+    this.code = code;
+    this.status = code;
+    this.apiStatus = apiStatus;
+    this.apiMessage = detail;
+    const haystack = `${code ?? ''} ${apiStatus ?? ''} ${detail}`;
+    this.quotaLike = /\b429\b|resource[_ -]?exhausted|quota|rate.?limit|too many requests/iu.test(haystack);
+    this.dailyQuotaLike = this.quotaLike && /requests?\s*per\s*day|\brpd\b|daily|per\s+day|day\s+quota/iu.test(haystack);
+    this.authLike = /\b401\b|unauthenticated|authentication|api.?key.{0,50}(invalid|expired|revoked|disabled)|invalid.{0,30}api.?key/iu.test(haystack);
+    this.permissionLike = /\b403\b|permission[_ -]?denied|forbidden/iu.test(haystack);
+    this.configLike = /\b400\b|invalid[_ -]?argument|invalid[_ -]?request/iu.test(haystack);
+    this.retryable = this.quotaLike || /\b408\b|\b429\b|\b5\d\d\b|temporar|unavailable|overload|internal|server[_ -]?error/iu.test(haystack);
+    this.transportLike = /\b5\d\d\b|network|connection|transport/iu.test(haystack);
+    this.setupLike = Boolean(setupLike);
+  }
+}
+
 function finiteNumber(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -148,7 +172,7 @@ function cancellationError(reason) {
   const source = reason instanceof Error ? reason : null;
   const error = new Error(source?.message || String(reason || 'Gemini TTS cancelled.'));
   if (source) {
-    for (const key of ['name', 'code', 'status', 'budgetLike', 'quotaLike', 'authLike', 'retryable', 'runawayLike', 'setupLike', 'transportLike']) {
+    for (const key of ['name', 'code', 'status', 'apiStatus', 'budgetLike', 'quotaLike', 'dailyQuotaLike', 'authLike', 'permissionLike', 'configLike', 'retryable', 'runawayLike', 'setupLike', 'transportLike']) {
       if (source[key] !== undefined) error[key] = source[key];
     }
   }
@@ -286,9 +310,10 @@ async function startStreamingRequest(fetchImpl, text, voiceName, apiKey, options
         usage = event.interaction?.usage ?? usage;
       }
       if (event.event_type === 'interaction.failed' || event.event_type === 'error') {
-        const error = new Error(event.error?.message || event.message || 'Gemini TTS streaming interaction failed.');
-        error.name = 'GeminiTtsStreamError';
-        throw error;
+        const payload = event.error && typeof event.error === 'object'
+          ? event.error
+          : { message: event.message || 'Gemini TTS streaming interaction failed.', code: event.code, status: event.status, type: event.type };
+        throw new GeminiTtsStreamError(payload, !firstSettled);
       }
     };
 
