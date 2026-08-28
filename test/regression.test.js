@@ -368,7 +368,7 @@ test('Gemini Live audio-end grace closes audio before the longer stream-idle tim
   }
   const elapsed = Date.now() - started;
   assert.equal(bytes, 1200);
-  assert.ok(elapsed >= 250 && elapsed < 700, `audio-end grace elapsed=${elapsed}ms`);
+  assert.ok(elapsed >= 850 && elapsed < 1200, `adaptive audio-end grace elapsed=${elapsed}ms`);
   generated.cancel(new Error('test cleanup'));
   await assert.rejects(generated.completion);
 });
@@ -722,4 +722,101 @@ test('default style uses prompt-level calm pacing and does not inject SSML tags'
   assert.match(normalized.geminiLive.profile.stylePrompt, /brief natural clause pauses/);
   assert.equal(normalized.geminiLive.profile.stylePrompt.includes('<break'), false);
   assert.match(normalized.geminiLive.profile.systemInstruction, /Never add or invent content/);
+});
+
+// v0.23.4 audit-hardening regression coverage
+
+
+test('Gemini Live tolerates a healthy 700ms inter-chunk gap without clipping', async () => {
+  class FakeSocket {
+    constructor() { this.readyState = 0; setTimeout(() => { this.readyState = 1; this.onopen?.(); }, 0); }
+    send(payload) {
+      const message = JSON.parse(payload);
+      if (message.setup) {
+        setTimeout(() => this.onmessage?.({ data: JSON.stringify({ setupComplete: {} }) }), 0);
+        return;
+      }
+      if (message.realtimeInput) {
+        const one = Buffer.alloc(1200, 1).toString('base64');
+        const two = Buffer.alloc(1200, 2).toString('base64');
+        setTimeout(() => this.onmessage?.({ data: JSON.stringify({ serverContent: { modelTurn: { parts: [{ inlineData: { data: one, mimeType: 'audio/pcm;rate=24000' } }] } } }) }), 10);
+        setTimeout(() => this.onmessage?.({ data: JSON.stringify({ serverContent: { modelTurn: { parts: [{ inlineData: { data: two, mimeType: 'audio/pcm;rate=24000' } }] } } }) }), 710);
+        setTimeout(() => this.onmessage?.({ data: JSON.stringify({ serverContent: { generationComplete: true } }) }), 730);
+        setTimeout(() => this.onmessage?.({ data: JSON.stringify({ serverContent: { turnComplete: true } }) }), 750);
+      }
+    }
+    close() { this.readyState = 3; }
+  }
+  const generated = await live.synthesizeGeminiLive('dua chunk dengan network jitter', 'Charon', {
+    apiKey: 'test-key', webSocketFactory: () => new FakeSocket(), firstAudioTimeoutMs: 500,
+    streamIdleTimeoutMs: 1600, audioEndGraceMs: 650, maxOutputAudioMs: 6000, retryCount: 0
+  });
+  let bytes = 0;
+  for await (const chunk of generated.audioStream) bytes += Buffer.from(chunk).length;
+  assert.equal(bytes, 2400);
+  const info = await generated.completion;
+  assert.equal(info.audioBytes, 2400);
+});
+
+test('Gemini exact TTS classifies HTTP-200 SSE RPD errors as daily quota', async () => {
+  const encoder = new TextEncoder();
+  let emitted = false;
+  const fetchImpl = async () => ({
+    ok: true,
+    body: {
+      getReader() {
+        return {
+          async read() {
+            if (emitted) return { done: true, value: undefined };
+            emitted = true;
+            const event = { event_type: 'error', error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: 'RPD quota exceeded for this model' } };
+            return { done: false, value: encoder.encode(`data: ${JSON.stringify(event)}\n\n`) };
+          },
+          async cancel() {}
+        };
+      }
+    }
+  });
+  await assert.rejects(
+    gemini.synthesizeGemini('quota classification', 'Charon', { apiKey: 'test-key', fetchImpl, timeoutMs: 500, retryCount: 0 }),
+    (error) => error?.quotaLike === true && error?.dailyQuotaLike === true && error?.configLike === false
+  );
+});
+
+test('cutoff recovery preserves message and voice-channel ownership metadata', () => {
+  const state = { disposed: false, queue: [], cutoffRecoveries: 0, mirrorReplays: 0 };
+  const item = audio.__test.createQueueItem('recover me', {
+    userId: '42', messageId: 'message-123', voiceChannelId: 'voice-456', recoveryAttempt: 0
+  });
+  const scheduled = audio.__test.scheduleRecovery('guild-test', state, item, new Error('pre-audible failure'), { fullRetry: true });
+  assert.equal(scheduled, true);
+  assert.equal(state.queue[0].messageId, 'message-123');
+  assert.equal(state.queue[0].voiceChannelId, 'voice-456');
+});
+
+test('speaker labels truncate by grapheme cluster', () => {
+  const family = '👨‍👩‍👧‍👦';
+  const result = speaker.normalizeSpeakerLabelText(family.repeat(100));
+  assert.equal(graphemeCount(result), 80);
+  assert.equal(result, family.repeat(80));
+});
+
+test('atomic guild JSON replacement keeps both primary and backup valid', async () => {
+  const fsPromises = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const safeJson = await import('../src/safe-json.js');
+  const dir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'malay-tts-safe-json-'));
+  const file = path.join(dir, 'guilds.json');
+  try {
+    let previous = safeJson.writeJsonAtomicWithBackup(file, { version: 1 });
+    previous = safeJson.writeJsonAtomicWithBackup(file, { version: 2 }, previous);
+    const primary = JSON.parse(await fsPromises.readFile(file, 'utf8'));
+    const backup = JSON.parse(await fsPromises.readFile(`${file}.bak`, 'utf8'));
+    assert.deepEqual(primary, { version: 2 });
+    assert.deepEqual(backup, { version: 1 });
+    assert.match(previous, /"version": 2/);
+  } finally {
+    await fsPromises.rm(dir, { recursive: true, force: true });
+  }
 });

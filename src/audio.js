@@ -407,6 +407,7 @@ function scheduleRecovery(guildId, state, item, error, { replay = null, fullRetr
   if (!fullRetry && !Buffer.isBuffer(replay?.audioBuffer)) return false;
   const recovery = createQueueItem(item.text, {
     messageCreatedAt: item.messageCreatedAt, preprocessMs: item.preprocessMs, userId: item.userId,
+    messageId: item.messageId, voiceChannelId: item.voiceChannelId,
     voice: item.voice, speakerLabel: item.speakerLabel, speakerResetSeconds: item.speakerResetSeconds, googleText: item.googleText,
     verificationText: item.verificationText, forceBuffered: true,
     recoveryAttempt: item.recoveryAttempt + 1, isRecovery: true,
@@ -1047,4 +1048,4 @@ export function getAudioStatus(guildId) {
   };
 }
 
-export const __test = { mp3DurationMs, decideSpeakerLabel, buildPcmTail, createQueueItem, cancelQueuedItemsForUser, cancelCurrentItemForUser, createPrefetchSpool, wireProviderToInput, scheduleCompletionGraceCancel, canRunQueue, takeNextItem, abandonUnclaimedGeneration };
+export const __test = { mp3DurationMs, decideSpeakerLabel, buildPcmTail, createQueueItem, cancelQueuedItemsForUser, cancelCurrentItemForUser, createPrefetchSpool, wireProviderToInput, scheduleRecovery, scheduleCompletionGraceCancel, canRunQueue, takeNextItem, abandonUnclaimedGeneration };
