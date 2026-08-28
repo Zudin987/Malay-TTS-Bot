@@ -427,7 +427,7 @@ test('TTS opt-out cancellation removes this user queued/prefetched items and abo
   await new Promise((resolve) => setImmediate(resolve));
 });
 
-test('v0.23.4 defaults keep adaptive Live audio-end grace and current speaker/message gain', () => {
+test('v0.23.5 defaults keep adaptive Live audio-end grace and current speaker/message gain', () => {
   const normalized = configTest.normalizeSettings({});
   assert.equal(normalized.geminiLive.audioEndGraceMs, 650);
   assert.equal(normalized.speakerLabel.gain, 1.5);
@@ -667,7 +667,7 @@ test('prelude/setup failure aborts overlapped provider work that was never hande
 });
 
 
-test('v0.23.4 voice pool is restricted to Charon, Enceladus, Aoede and Despina', () => {
+test('v0.23.5 voice pool is restricted to Charon, Enceladus, Aoede and Despina', () => {
   assert.deepEqual(gemini.GEMINI_VOICES, ['Charon', 'Enceladus', 'Aoede', 'Despina']);
   assert.equal(gemini.GEMINI_VOICE_OPTIONS.find((v) => v.name === 'Despina')?.style, 'Smooth');
 });
