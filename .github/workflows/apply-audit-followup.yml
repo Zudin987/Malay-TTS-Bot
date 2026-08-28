@@ -1,0 +1,73 @@
+name: Apply v0.23.5 Audit Follow-up
+
+on:
+  push:
+    branches: ['audit/v0.23.5']
+    paths:
+      - '.github/workflows/apply-audit-followup.yml'
+      - 'audit-v0235-followup.patch'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: audit/v0.23.5
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Apply follow-up patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply --check audit-v0235-followup.patch
+          git apply audit-v0235-followup.patch
+          rm -f audit-v0235-followup.patch .github/workflows/apply-audit-followup.yml
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate source and JSON
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' f; do node --check "$f"; done < <(find . -type f -name '*.js' -not -path './node_modules/*' -print0)
+          node -e "const fs=require('fs'),p=require('path'); const files=['package.json','package-lock.json',...fs.readdirSync('config').filter(x=>x.endsWith('.json')).map(x=>p.join('config',x))]; for(const f of files) JSON.parse(fs.readFileSync(f,'utf8')); console.log('Validated '+files.length+' JSON file(s).')"
+          git diff --check
+
+      - name: Regression tests
+        run: npm test
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+      - name: Release hygiene guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e .env
+          test ! -e data/guilds.json
+          test ! -e data/speaker-label-cache
+          test ! -e runtime
+          test ! -e bot.log
+          test ! -e bot-old.log
+
+      - name: Commit follow-up fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: complete opt-out persistence and modernize CI'
+          git push origin HEAD:audit/v0.23.5
