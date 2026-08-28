@@ -26,7 +26,7 @@ jobs:
           node-version: '24'
           cache: npm
 
-      - name: Apply deterministic follow-up edits
+      - name: Apply tested source follow-up
         shell: bash
         run: |
           set -euo pipefail
@@ -66,10 +66,12 @@ jobs:
               raise SystemExit('store edit verification failed')
           store.write_text(text)
 
-          tests = Path('test/regression.test.js')
-          text = tests.read_text()
-          marker = "test('speaker label maxWaitMs=0 means do not wait', async () => {"
-          new_test = """test('privacy opt-out mutation never silently drops users after the old 500-entry cap', () => {
+          privacy_test = Path('test/privacy-optout.test.js')
+          privacy_test.write_text("""import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import { __test as storeTest } from '../src/store.js';
+
+          test('privacy opt-out mutation never silently drops users after the old 500-entry cap', () => {
             const ids = Array.from({ length: 650 }, (_, index) => String(10000 + index));
             const added = '999999999999999999';
             const enabled = storeTest.updateOptOutIds(ids, added, true);
@@ -82,24 +84,7 @@ jobs:
             assert.equal(disabled.includes(ids[0]), false);
             assert.equal(disabled.includes(added), true);
           });
-
-          """
-          if "privacy opt-out mutation never silently drops users" not in text:
-              if text.count(marker) != 1: raise SystemExit('regression test anchor mismatch')
-              text = text.replace(marker, new_test + marker, 1)
-          tests.write_text(text)
-
-          ci = Path('.github/workflows/ci.yml')
-          text = ci.read_text().replace('actions/checkout@v4', 'actions/checkout@v7').replace('actions/setup-node@v4', 'actions/setup-node@v7')
-          audit_step = """      - name: Dependency audit
-                run: npm audit --audit-level=high
-
-          """
-          ffmpeg_marker = "      - name: Install FFmpeg\n"
-          if 'name: Dependency audit' not in text:
-              if text.count(ffmpeg_marker) != 1: raise SystemExit('CI FFmpeg anchor mismatch')
-              text = text.replace(ffmpeg_marker, audit_step + ffmpeg_marker, 1)
-          ci.write_text(text)
+          """)
 
           maintenance = Path('MAINTENANCE.md')
           text = maintenance.read_text().replace(
@@ -139,12 +124,12 @@ jobs:
           test ! -e bot-old.log
           test ! -e audit-v0235-followup.patch
 
-      - name: Commit follow-up fixes
+      - name: Commit source follow-up
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
-          git commit -m 'fix: complete opt-out persistence and modernize CI'
+          git commit -m 'fix: complete opt-out persistence hardening'
           git push origin HEAD:audit/v0.23.5
