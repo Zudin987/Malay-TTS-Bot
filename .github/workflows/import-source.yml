@@ -1,0 +1,79 @@
+name: Finalize source import
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.import3/**'
+      - '.github/workflows/import-source.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: source-import-v0233
+  cancel-in-progress: true
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Wait for complete snapshot
+        id: parts
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=$(find .import3 -maxdepth 1 -type f -name 'part*.b64' 2>/dev/null | wc -l)
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "Snapshot parts present: $count/19"
+
+      - name: Reconstruct and verify v0.23.3 source
+        if: steps.parts.outputs.count == '19'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for n in $(seq -w 0 18); do
+            test -f ".import3/part${n}.b64"
+          done
+          cat .import3/part{00..18}.b64 > /tmp/source.b64
+          base64 --decode /tmp/source.b64 > /tmp/source.tar.gz
+          echo '61317417c956469a62ca7ba06366fdff98040bb521489b45a744d2dee378e895  /tmp/source.tar.gz' | sha256sum -c -
+          mkdir -p /tmp/source
+          tar -xzf /tmp/source.tar.gz -C /tmp/source
+          test -f /tmp/source/src/bootstrap.js
+          test -f /tmp/source/config/settings.json
+          test -f /tmp/source/package-lock.json
+          test -f /tmp/source/test/regression.test.js
+          test -f /tmp/source/.github/workflows/ci.yml
+
+      - name: Replace staging tree with verified source
+        if: steps.parts.outputs.count == '19'
+        shell: bash
+        run: |
+          set -euo pipefail
+          find . -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+          cp -a /tmp/source/. .
+          test ! -e .env
+          test ! -e data/guilds.json
+          test ! -d runtime
+          test ! -d node_modules
+          test ! -d .import
+          test ! -d .import2
+          test ! -d .import3
+
+      - name: Commit verified v0.23.3 baseline
+        if: steps.parts.outputs.count == '19'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'Import v0.23.3 verified source baseline'
+          git push origin HEAD:main
