@@ -200,7 +200,7 @@ async function startStreamingRequest(fetchImpl, text, voiceName, apiKey, options
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
         'x-goog-api-key': apiKey,
-        'x-goog-api-client': 'malay-tts-bot/0.23.3',
+        'x-goog-api-client': 'malay-tts-bot/0.23.4',
         'Api-Revision': API_REVISION
       },
       body: JSON.stringify((() => {
