@@ -1,0 +1,93 @@
+name: Package v0.23.8 Clean
+
+on:
+  push:
+    branches:
+      - package/v0.23.8
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-2025
+    steps:
+      - name: Checkout exact stable source
+        uses: actions/checkout@v7
+        with:
+          ref: e9ee93eb829afba57f298f6c09fc250a4986390a
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Validate stable source before packaging
+        shell: pwsh
+        run: |
+          npm ci
+          npm test
+          if ((node -p "require('./package.json').version") -ne '0.23.8') { throw 'package.json is not v0.23.8' }
+          $settings = Get-Content 'config/settings.json' -Raw | ConvertFrom-Json
+          if ([double]$settings.speakerLabel.speed -ne 1.15) { throw 'speakerLabel.speed mismatch' }
+          if ([int]$settings.speakerLabel.gapMs -ne 75) { throw 'speakerLabel.gapMs mismatch' }
+
+      - name: Build clean package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pkg = Join-Path $PWD 'out\Malay-TTS-Bot-v0.23.8-Clean'
+          New-Item -ItemType Directory -Force -Path $pkg | Out-Null
+          foreach ($dir in @('config','src','test')) {
+            Copy-Item $dir -Destination $pkg -Recurse -Force
+          }
+          New-Item -ItemType Directory -Force -Path (Join-Path $pkg 'data') | Out-Null
+          Copy-Item 'data/.gitkeep' -Destination (Join-Path $pkg 'data/.gitkeep') -Force
+          foreach ($file in @('.env.example','deploy-commands.cmd','deploy-commands.js','doctor.cmd','MAINTENANCE.md','package-lock.json','package.json','README.md','RELEASE-v0.23.8.txt','restart-bot.vbs','setup-clean.cmd','start-hidden.vbs','stop-bot.vbs')) {
+            Copy-Item $file -Destination $pkg -Force
+          }
+          New-Item -ItemType Directory -Force -Path (Join-Path $pkg 'runtime') | Out-Null
+          $nodeZip = Join-Path $env:RUNNER_TEMP 'node-v24.19.0-win-x64.zip'
+          Invoke-WebRequest 'https://nodejs.org/dist/v24.19.0/node-v24.19.0-win-x64.zip' -OutFile $nodeZip
+          Expand-Archive $nodeZip -DestinationPath (Join-Path $pkg 'runtime') -Force
+          $forbidden = @('.env','data/guilds.json','bot.log','bot-old.log','.git','.github','node_modules')
+          foreach ($f in $forbidden) {
+            if (Test-Path (Join-Path $pkg $f)) { throw "Forbidden package path present: $f" }
+          }
+          $zip = Join-Path $PWD 'out\Malay-TTS-Bot-v0.23.8-Clean.zip'
+          Compress-Archive -Path (Join-Path $pkg '*') -DestinationPath $zip -CompressionLevel Optimal -Force
+          Get-FileHash $zip -Algorithm SHA256 | ForEach-Object { $_.Hash.ToLowerInvariant() } | Set-Content (Join-Path $PWD 'out\SHA256.txt')
+
+      - name: Re-extract and validate the actual ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $verify = Join-Path $PWD 'verify-v0238'
+          Expand-Archive (Join-Path $PWD 'out\Malay-TTS-Bot-v0.23.8-Clean.zip') -DestinationPath $verify -Force
+          Push-Location $verify
+          try {
+            if ((node -p "require('./package.json').version") -ne '0.23.8') { throw 'archive package.json version mismatch' }
+            $settings = Get-Content 'config/settings.json' -Raw | ConvertFrom-Json
+            if ([double]$settings.speakerLabel.speed -ne 1.15) { throw 'archive speakerLabel.speed mismatch' }
+            if ([int]$settings.speakerLabel.gapMs -ne 75) { throw 'archive speakerLabel.gapMs mismatch' }
+            foreach ($f in @('.env','data/guilds.json','bot.log','bot-old.log','.git','.github','node_modules')) {
+              if (Test-Path $f) { throw "Forbidden archive path present: $f" }
+            }
+            if (-not (Test-Path 'runtime/node-v24.19.0-win-x64/node.exe')) { throw 'portable Node runtime missing' }
+            npm ci
+            npm test
+            & 'runtime/node-v24.19.0-win-x64/node.exe' -e "if(process.versions.node!=='24.19.0') process.exit(1)"
+          } finally {
+            Pop-Location
+          }
+
+      - name: Upload validated clean ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Malay-TTS-Bot-v0.23.8-Clean-artifact
+          path: |
+            out/Malay-TTS-Bot-v0.23.8-Clean.zip
+            out/SHA256.txt
+          if-no-files-found: error
+          retention-days: 7
