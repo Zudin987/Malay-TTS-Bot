@@ -1,0 +1,49 @@
+name: Prepare v0.23.8 Metadata
+
+on:
+  push:
+    branches:
+      - release/v0.23.8
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    if: github.event.head_commit.message != 'Prepare v0.23.8 release metadata'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: release/v0.23.8
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Update release metadata
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+          pkg.version = '0.23.8';
+          lock.version = '0.23.8';
+          if (lock.packages && lock.packages['']) lock.packages[''].version = '0.23.8';
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          fs.writeFileSync('package-lock.json', JSON.stringify(lock, null, 2) + '\n');
+          let setup = fs.readFileSync('setup-clean.cmd', 'utf8');
+          setup = setup.replace('Malay TTS Bot clean setup v0.23.7', 'Malay TTS Bot clean setup v0.23.8');
+          fs.writeFileSync('setup-clean.cmd', setup);
+          let maintenance = fs.readFileSync('MAINTENANCE.md', 'utf8');
+          maintenance = maintenance.replace(/Current stable baseline: \*\*v0\.23\.7[^\n]*\*\*\./, 'Current stable baseline: **v0.23.8 — Cutoff Recovery & Faster Speaker Labels**.');
+          fs.writeFileSync('MAINTENANCE.md', maintenance);
+          NODE
+          git diff --check
+      - name: Commit metadata
+        shell: bash
+        run: |
+          git config user.name "MrEz"
+          git config user.email "39240221+Zudin987@users.noreply.github.com"
+          git add package.json package-lock.json setup-clean.cmd MAINTENANCE.md
+          git commit -m "Prepare v0.23.8 release metadata"
+          git push origin HEAD:release/v0.23.8
