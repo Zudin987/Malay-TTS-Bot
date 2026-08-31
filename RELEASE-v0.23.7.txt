@@ -1,0 +1,23 @@
+Malay TTS Bot v0.23.7 — Discord Setup/Auth Hotfix
+
+Highlights
+
+- Slash-command deployment now catches Discord API failures and prints concise, actionable guidance instead of dumping the full request body/stack trace.
+- Discord HTTP 401 is reported as an invalid/revoked/mismatched bot token problem with clear instructions to refresh DISCORD_TOKEN.
+- Discord HTTP 403 is reported separately with client-ID/application/permission guidance.
+- setup-clean.cmd now treats any non-zero npm, doctor or command-deployment exit status as failure, including negative Windows crash codes.
+- setup-clean.cmd can no longer print "Setup complete" after a failed slash-command deployment.
+- Added regression coverage for Discord deployment error formatting and Windows setup exit guards.
+
+Compatibility
+
+- No TTS runtime/provider behavior changed from v0.23.6.
+- Gemini request-scoped round-robin, provider diagnostics, 2.5 Live backoff, voice pool, one-message-one-item behavior, fresh one-turn Live sessions and Google fallback remain unchanged.
+- Existing .env and data\guilds.json remain compatible.
+- No new runtime dependency or local AI/TTS component was added.
+
+Upgrade
+
+Preserve only .env and data\guilds.json. Replace the old C:\Malay-TTS-Bot files with the v0.23.7 clean package, restore those two files, then run setup-clean.cmd. Do not restore an old config\settings.json.
+
+If setup reports Discord 401 Unauthorized, reset/copy the bot token in the Discord Developer Portal, replace DISCORD_TOKEN in C:\Malay-TTS-Bot\.env, then run deploy-commands.cmd again. Do not share the bot token.
