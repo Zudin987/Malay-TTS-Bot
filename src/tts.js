@@ -425,7 +425,9 @@ async function bufferGenerated(generated, parentSignal = null) {
 }
 
 function exactProfile() {
-  const profile = { ...(settings.geminiLive?.profile ?? {}) };
+  const profile = { ...(settings.geminiTts?.profile ?? {}) };
+  // Keep the old top-level overrides working for existing custom installs.
+  if (typeof settings.geminiTts?.systemInstruction === 'string' && settings.geminiTts.systemInstruction.trim()) profile.systemInstruction = settings.geminiTts.systemInstruction.trim();
   if (typeof settings.geminiTts?.stylePrompt === 'string' && settings.geminiTts.stylePrompt.trim()) profile.stylePrompt = settings.geminiTts.stylePrompt.trim();
   return profile;
 }
