@@ -65,3 +65,12 @@ The round-robin is intended for multiple keys from the same Google Cloud project
 Useful commands: `/join`, `/leave`, `/speaker`, `/changevoice`, `/name`, `/dictionary`, `/restarttts`, `/status`, `/ttsprivacy`, `/ttsoptout`.
 
 [Maintenance](MAINTENANCE.md) · [Latest release](../../releases/latest)
+
+
+## Gemini read-aloud prompting
+
+Gemini Live and Gemini TTS intentionally use separate prompt profiles. Live uses a short system instruction plus a nonce-delimited transcript. Gemini TTS uses a TTS-specific system instruction and an AUDIO PROFILE / DIRECTOR'S NOTES / TRANSCRIPT request structure. Both keep the Discord message inside collision-resistant per-request speech boundaries.
+
+Square-bracket spans are neutralized for Gemini audio only, for example `[laughs]` becomes `(laughs)` before synthesis. This preserves the lexical text while preventing Gemini's native square-bracket audio-tag syntax from turning user text into a performance direction. Google Malay fallback input is unchanged.
+
+The editable defaults live under `geminiLive.profile` and `geminiTts.profile` in `config/settings.json`. Keep fidelity rules in `systemInstruction` and delivery/accent/pacing rules in `stylePrompt`.
