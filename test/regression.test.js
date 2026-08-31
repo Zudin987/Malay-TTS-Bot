@@ -44,10 +44,11 @@ test('settings normalization removes forbidden merge and multi-turn controls', (
 test('settings clamp speaker reset/cache/runtime watchdog values', () => {
   const normalized = configTest.normalizeSettings({
     speakerResetSeconds: -1,
-    speakerLabel: { maxWaitMs: 99999, gain: 9, maxPcmDurationMs: 1 },
+    speakerLabel: { speed: 9, maxWaitMs: 99999, gain: 9, maxPcmDurationMs: 1 },
     audioPipeline: { playbackHardMaxMs: 999999, progressWatchdogMs: 1, replayOnlyBeforeMs: 9999 }
   });
   assert.equal(normalized.speakerResetSeconds, 5);
+  assert.equal(normalized.speakerLabel.speed, 1.5);
   assert.equal(normalized.speakerLabel.maxWaitMs, 3000);
   assert.equal(normalized.speakerLabel.gain, 2);
   assert.equal(normalized.speakerLabel.maxPcmDurationMs, 500);
@@ -155,6 +156,47 @@ test('PCM recovery resumes from a tail with overlap rather than replaying whole 
   } finally {
     settings.audioPipeline.playbackResumeOverlapMs = original;
   }
+});
+
+test('late completion transcript recovers only the missing spoken suffix', async () => {
+  const text = 'aku nak pergi ke kedai membeli beras';
+  const item = audio.__test.createQueueItem(text, { verificationText: text });
+  const state = {
+    disposed: false, running: true, voiceReady: false, queue: [], cutoffRecoveries: 0, mirrorReplays: 0,
+    suspiciousShortOutputs: 0, transcriptCutoffs: 0, playbackCutoffs: 0, completionGraceTimeouts: 0
+  };
+  const pcm = Buffer.alloc(Math.round(24_000 * 2 * 1.3));
+  const generated = {
+    audioFormat: 's16le', sampleRate: 24_000, channels: 1,
+    completion: Promise.resolve({ audioBytes: pcm.length, audioBuffer: pcm, transcript: 'aku nak pergi ke' }),
+    cancel() {}
+  };
+  assert.equal(audio.__test.scheduleCompletionGraceCancel('test-guild', state, generated, { item, playedMs: 1300, playbackSpeed: 1 }), true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(state.queue.length, 1);
+  assert.equal(state.queue[0].text, 'kedai membeli beras');
+  assert.equal(state.queue[0].isRecovery, true);
+  assert.equal(state.queue[0].skipLive, true);
+});
+
+test('late severe cutoff without transcript schedules a trimmed regenerated tail', () => {
+  const text = 'aku nak pergi ke kedai membeli beras';
+  const item = audio.__test.createQueueItem(text, { verificationText: text });
+  const state = {
+    disposed: false, running: true, voiceReady: false, queue: [], cutoffRecoveries: 0, mirrorReplays: 0,
+    suspiciousShortOutputs: 0, transcriptCutoffs: 0, playbackCutoffs: 0
+  };
+  const partial = Buffer.alloc(Math.round(24_000 * 2 * 1.1));
+  const error = Object.assign(new Error('late Live cutoff'), {
+    audioFormat: 's16le', sampleRate: 24_000, channels: 1, audioBytes: partial.length, partialAudioBuffer: partial
+  });
+  const recovered = audio.__test.handleCompletionRecovery('test-guild', state, item, {
+    audioFormat: 's16le', sampleRate: 24_000, channels: 1
+  }, 1100, 1, { error });
+  assert.equal(recovered, true);
+  assert.equal(state.queue.length, 1);
+  assert.ok(state.queue[0].resumeFraction > 0 && state.queue[0].resumeFraction < 0.95);
+  assert.equal(state.queue[0].text, text);
 });
 
 test('Discord cleanup resolves role/channel markers without fixed placeholder collisions', () => {
@@ -364,10 +406,10 @@ test('Gemini Live audio-end grace closes audio before the longer stream-idle tim
   const started = Date.now();
   const generated = await live.synthesizeGeminiLive('ujian grace audio', 'Charon', {
     apiKey: 'test-key', webSocketFactory: () => new FakeSocket(), firstAudioTimeoutMs: 500,
-    streamIdleTimeoutMs: 1200, audioEndGraceMs: 300, maxOutputAudioMs: 6000, retryCount: 0
+    streamIdleTimeoutMs: 2200, audioEndGraceMs: 300, maxOutputAudioMs: 6000, retryCount: 0
   });
   let bytes = 0;
-  const keepAlive = setTimeout(() => {}, 800);
+  const keepAlive = setTimeout(() => {}, 1800);
   try {
     for await (const chunk of generated.audioStream) bytes += Buffer.from(chunk).length;
   } finally {
@@ -375,7 +417,7 @@ test('Gemini Live audio-end grace closes audio before the longer stream-idle tim
   }
   const elapsed = Date.now() - started;
   assert.equal(bytes, 1200);
-  assert.ok(elapsed >= 850 && elapsed < 1200, `adaptive audio-end grace elapsed=${elapsed}ms`);
+  assert.ok(elapsed >= 1200 && elapsed < 1900, `adaptive audio-end grace elapsed=${elapsed}ms`);
   generated.cancel(new Error('test cleanup'));
   await assert.rejects(generated.completion);
 });
@@ -427,9 +469,11 @@ test('TTS opt-out cancellation removes this user queued/prefetched items and abo
   await new Promise((resolve) => setImmediate(resolve));
 });
 
-test('v0.23.5 defaults keep adaptive Live audio-end grace and current speaker/message gain', () => {
+test('current defaults keep adaptive Live grace and faster cached speaker labels', () => {
   const normalized = configTest.normalizeSettings({});
   assert.equal(normalized.geminiLive.audioEndGraceMs, 650);
+  assert.equal(normalized.speakerLabel.speed, 1.15);
+  assert.equal(normalized.speakerLabel.gapMs, 75);
   assert.equal(normalized.speakerLabel.gain, 1.5);
   assert.equal(normalized.fixedVolume, 0.6);
 });
@@ -801,7 +845,7 @@ test('default style uses prompt-level calm pacing and does not inject SSML tags'
 // v0.23.4 audit-hardening regression coverage
 
 
-test('Gemini Live tolerates a healthy 700ms inter-chunk gap without clipping', async () => {
+test('Gemini Live tolerates a healthy 1100ms inter-chunk gap without clipping', async () => {
   class FakeSocket {
     constructor() { this.readyState = 0; setTimeout(() => { this.readyState = 1; this.onopen?.(); }, 0); }
     send(payload) {
@@ -814,16 +858,16 @@ test('Gemini Live tolerates a healthy 700ms inter-chunk gap without clipping', a
         const one = Buffer.alloc(1200, 1).toString('base64');
         const two = Buffer.alloc(1200, 2).toString('base64');
         setTimeout(() => this.onmessage?.({ data: JSON.stringify({ serverContent: { modelTurn: { parts: [{ inlineData: { data: one, mimeType: 'audio/pcm;rate=24000' } }] } } }) }), 10);
-        setTimeout(() => this.onmessage?.({ data: JSON.stringify({ serverContent: { modelTurn: { parts: [{ inlineData: { data: two, mimeType: 'audio/pcm;rate=24000' } }] } } }) }), 710);
-        setTimeout(() => this.onmessage?.({ data: JSON.stringify({ serverContent: { generationComplete: true } }) }), 730);
-        setTimeout(() => this.onmessage?.({ data: JSON.stringify({ serverContent: { turnComplete: true } }) }), 750);
+        setTimeout(() => this.onmessage?.({ data: JSON.stringify({ serverContent: { modelTurn: { parts: [{ inlineData: { data: two, mimeType: 'audio/pcm;rate=24000' } }] } } }) }), 1110);
+        setTimeout(() => this.onmessage?.({ data: JSON.stringify({ serverContent: { generationComplete: true } }) }), 1130);
+        setTimeout(() => this.onmessage?.({ data: JSON.stringify({ serverContent: { turnComplete: true } }) }), 1150);
       }
     }
     close() { this.readyState = 3; }
   }
   const generated = await live.synthesizeGeminiLive('dua chunk dengan network jitter', 'Charon', {
     apiKey: 'test-key', webSocketFactory: () => new FakeSocket(), firstAudioTimeoutMs: 500,
-    streamIdleTimeoutMs: 1600, audioEndGraceMs: 650, maxOutputAudioMs: 6000, retryCount: 0
+    streamIdleTimeoutMs: 2200, audioEndGraceMs: 650, maxOutputAudioMs: 6000, retryCount: 0
   });
   let bytes = 0;
   for await (const chunk of generated.audioStream) bytes += Buffer.from(chunk).length;

@@ -45,7 +45,8 @@ const defaults = {
   speakerResetSeconds: 30,
   speakerLabel: {
     enabled: true,
-    gapMs: 100,
+    speed: 1.15,
+    gapMs: 75,
     maxWaitMs: 300,
     gain: 1.50,
     memoryCacheEntries: 32,
@@ -208,6 +209,7 @@ function normalizeSettings(parsed) {
     speakerResetSeconds: clampInt(parsed.speakerResetSeconds, defaults.speakerResetSeconds, 5, 300),
     speakerLabel: {
       enabled: speakerLabel.enabled !== false,
+      speed: clamp(speakerLabel.speed, defaults.speakerLabel.speed, 0.8, 1.5),
       gapMs: clampInt(speakerLabel.gapMs, defaults.speakerLabel.gapMs, 0, 500),
       maxWaitMs: clampInt(speakerLabel.maxWaitMs, defaults.speakerLabel.maxWaitMs, 0, 3000),
       gain: clamp(speakerLabel.gain, defaults.speakerLabel.gain, 0.25, 2.0),
