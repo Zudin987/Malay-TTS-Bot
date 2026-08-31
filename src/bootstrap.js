@@ -2,16 +2,16 @@ import 'dotenv/config';
 import { fatalLogSync, installLogger } from './logger.js';
 import { acquireSingleInstanceLock } from './single-instance.js';
 import { startStopRequestWatcher } from './stop-control.js';
-import { applyGeminiApiKeySelection } from './gemini-key-config.js';
+import { getGeminiApiKeyRoundRobinStatus } from './gemini-key-config.js';
 
 installLogger();
 
 try {
-  const keySelection = applyGeminiApiKeySelection(process.env);
-  if (keySelection.configuredCount > 1) {
-    console.log(`[gemini-keys] ${keySelection.configuredCount} keys configured; active slot ${keySelection.selectedSlot ?? 'none'}. Manual slot selection only; quota/rate-limit errors do not rotate keys.`);
-  } else if (keySelection.configuredCount === 1 && keySelection.selectedSlot !== keySelection.requestedSlot) {
-    console.warn(`[gemini-keys] Requested slot ${keySelection.requestedSlot} is empty; using configured slot ${keySelection.selectedSlot}.`);
+  const keyStatus = getGeminiApiKeyRoundRobinStatus();
+  if (keyStatus.configuredCount > 1) {
+    console.log(`[gemini-keys] ${keyStatus.configuredCount} keys configured; round-robin enabled across slots ${keyStatus.configuredSlots.join(', ')}; first slot ${keyStatus.startSlot ?? 'none'}.`);
+  } else if (keyStatus.configuredCount === 1) {
+    console.log(`[gemini-keys] One Gemini key configured in slot ${keyStatus.startSlot}; round-robin behaves as single-key mode.`);
   }
 
   if (!acquireSingleInstanceLock()) {
