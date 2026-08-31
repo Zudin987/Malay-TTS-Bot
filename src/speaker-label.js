@@ -20,7 +20,8 @@ export function getSpeakerLabelOptions() {
   const configured = settings.speakerLabel && typeof settings.speakerLabel === 'object' ? settings.speakerLabel : {};
   return {
     enabled: configured.enabled !== false,
-    gapMs: Math.max(0, Math.min(finiteNumber(configured.gapMs, 100), 500)),
+    speed: Math.max(0.8, Math.min(finiteNumber(configured.speed, 1.15), 1.5)),
+    gapMs: Math.max(0, Math.min(finiteNumber(configured.gapMs, 75), 500)),
     maxWaitMs: Math.max(0, Math.min(finiteNumber(configured.maxWaitMs, 300), 3000)),
     gain: Math.max(0.25, Math.min(finiteNumber(configured.gain, 1.5), 2)),
     memoryCacheEntries: Math.max(0, Math.min(Math.floor(finiteNumber(configured.memoryCacheEntries, 32)), 128)),

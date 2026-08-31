@@ -198,16 +198,18 @@ async function startFreshTurn(text, voiceName, options) {
     if (output && !output.destroyed && !output.writableEnded) output.end();
   };
   const effectiveAudioEndGraceMs = () => {
-    // The grace timer is only a fallback for rare turns where Gemini omits or
-    // delays generationComplete/turnComplete. A fixed 650 ms gap can clip a
-    // healthy next audio event during network jitter. Protect the first gap
-    // for at least 900 ms, then adapt to observed cadence, capped at 1200 ms
-    // unless the operator explicitly configured a larger base grace.
-    if (audioChunkCount <= 1) return Math.max(audioEndGraceMs, 900);
+    // This timer is only a fallback for rare turns where Gemini omits or delays
+    // generationComplete/turnComplete. Real Live traffic can occasionally have
+    // >1 s gaps between healthy audio chunks, so do not mistake normal network
+    // jitter for end-of-speech. Keep this well below streamIdleTimeoutMs so a
+    // genuinely markerless turn still releases promptly.
+    const floorMs = Math.max(audioEndGraceMs, 1300);
+    const ceilingMs = Math.max(floorMs, Math.min(1800, Math.max(1300, streamIdleTimeoutMs - 250)));
+    if (audioChunkCount <= 1) return floorMs;
     const observed = maximumObservedAudioGapMs > 0
-      ? Math.ceil(maximumObservedAudioGapMs * 1.35 + 120)
-      : audioEndGraceMs;
-    return Math.max(audioEndGraceMs, Math.min(1200, observed));
+      ? Math.ceil(maximumObservedAudioGapMs * 1.5 + 180)
+      : floorMs;
+    return Math.max(floorMs, Math.min(ceilingMs, observed));
   };
   const armAudioEndGrace = () => {
     if (!streamOutput || audioOutputEnded || settled || !seenAudio) return;
@@ -223,6 +225,8 @@ async function startFreshTurn(text, voiceName, options) {
   };
   const attachPartial = (error) => {
     if (chunks.length) error.partialAudioBuffer = Buffer.concat(chunks, audioBytes);
+    const transcript = transcriptParts.join(' ').replace(/\s+/gu, ' ').trim();
+    if (transcript) error.transcript = transcript;
     error.audioBytes = audioBytes;
     error.sampleRate = OUTPUT_SAMPLE_RATE;
     error.channels = OUTPUT_CHANNELS;

@@ -3,7 +3,8 @@
   "speakerResetSeconds": 30,
   "speakerLabel": {
     "enabled": true,
-    "gapMs": 100,
+    "speed": 1.15,
+    "gapMs": 75,
     "maxWaitMs": 300,
     "gain": 1.5,
     "memoryCacheEntries": 32,
