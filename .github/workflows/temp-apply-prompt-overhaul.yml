@@ -22,16 +22,27 @@ jobs:
           node-version: 24
       - name: Apply targeted source changes
         run: node scripts/temp-prompt-overhaul.mjs
-      - name: Preserve natural-pause style invariant
+      - name: Preserve prompt invariants
         run: |
           node --input-type=module - <<'NODE'
           import fs from 'node:fs';
-          const from = 'Calm, relaxed and steady at about 0.95x natural conversational pace. Use connected phrases, minimal emphasis, restrained pitch variation and stable sentence endings.';
-          const to = 'Calm, relaxed and steady at about 0.95x natural conversational pace. Use connected phrases with only brief natural clause pauses, minimal emphasis, restrained pitch variation and stable sentence endings.';
+
+          const styleFrom = 'Calm, relaxed and steady at about 0.95x natural conversational pace. Use connected phrases, minimal emphasis, restrained pitch variation and stable sentence endings.';
+          const styleTo = 'Calm, relaxed and steady at about 0.95x natural conversational pace. Use connected phrases with only brief natural clause pauses, minimal emphasis, restrained pitch variation and stable sentence endings.';
           for (const file of ['src/providers/gemini-live.js', 'src/config.js', 'config/settings.json']) {
-            const text = fs.readFileSync(file, 'utf8');
-            if (!text.includes(from)) throw new Error(`style target missing in ${file}`);
-            fs.writeFileSync(file, text.replaceAll(from, to));
+            let text = fs.readFileSync(file, 'utf8');
+            if (!text.includes(styleFrom)) throw new Error(`style target missing in ${file}`);
+            text = text.replaceAll(styleFrom, styleTo);
+            fs.writeFileSync(file, text);
+          }
+
+          const fidelityFrom = 'Preserve every lexical item and its order. Do not add, omit, answer, translate, complete, paraphrase, or rewrite content.';
+          const fidelityTo = 'Preserve every lexical item and its order. Never add or invent content. Do not omit, answer, translate, complete, paraphrase, or rewrite content.';
+          for (const file of ['src/providers/gemini-live.js', 'src/config.js', 'config/settings.json']) {
+            let text = fs.readFileSync(file, 'utf8');
+            if (!text.includes(fidelityFrom)) throw new Error(`fidelity target missing in ${file}`);
+            text = text.replaceAll(fidelityFrom, fidelityTo);
+            fs.writeFileSync(file, text);
           }
           NODE
       - name: Validate syntax and tests
