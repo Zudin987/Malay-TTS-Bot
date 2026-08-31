@@ -36,6 +36,8 @@ let lastProvider = null;
 const recentGeminiQuotaFailures = [];
 
 const geminiLimiter = { active: 0, queue: [], sequence: 0 };
+const FALLBACK_QUOTA_BACKOFF_AFTER = 3;
+const FALLBACK_QUOTA_BACKOFF_SECONDS = 30 * 60;
 
 export async function cleanupTempDirectory() {
   await fs.rm(tempDir, { recursive: true, force: true });
@@ -177,6 +179,31 @@ function noteAttempt(state, elapsedMs) {
   state.totalAttemptMs += ms;
 }
 
+function sanitizeProviderText(value) {
+  return String(value ?? '')
+    .replace(/([?&](?:key|api[_-]?key|apikey)=)[^&\s)]+/giu, '$1[redacted]')
+    .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/gu, '[redacted-api-key]')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/=\-]+/giu, 'Bearer [redacted]')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .slice(0, 1200);
+}
+
+function sanitizeProviderError(error) {
+  return sanitizeProviderText(error?.message || error || 'Unknown provider error.');
+}
+
+function logProviderFailure(providerName, error, phase = 'initial') {
+  if (error?.cancelled) return;
+  const metadata = [
+    error?.code != null ? `code=${sanitizeProviderText(error.code)}` : null,
+    error?.status != null ? `status=${sanitizeProviderText(error.status)}` : null,
+    error?.apiStatus != null ? `apiStatus=${sanitizeProviderText(error.apiStatus)}` : null,
+    error?.reason ? `reason=${sanitizeProviderText(error.reason)}` : null
+  ].filter(Boolean).join(' ');
+  console.warn(`[provider-fail:${providerName}] phase=${phase}${metadata ? ` ${metadata}` : ''} message=${sanitizeProviderError(error)}`);
+}
+
 function setProviderFailure(state, error, options = {}, { phase = 'initial', budget = false, key = 'unknown', configSignature = null } = {}) {
   // Budget/deadline failures must affect health even if a downstream provider
   // wrapped the abort as a cancellation. Explicit user/queue cancellation stays neutral.
@@ -196,9 +223,15 @@ function setProviderFailure(state, error, options = {}, { phase = 'initial', bud
     reason = 'daily quota (until Pacific reset)';
     kind = 'daily quota';
   } else if (error?.quotaLike) {
-    seconds = stepValue(state.consecutiveQuotaFailures, health.quotaFirstSeconds, health.quotaSecondSeconds, health.quotaThirdSeconds);
+    const persistentFallbackQuota = key === 'liveFallback'
+      && state.consecutiveQuotaFailures >= FALLBACK_QUOTA_BACKOFF_AFTER;
+    seconds = persistentFallbackQuota
+      ? FALLBACK_QUOTA_BACKOFF_SECONDS
+      : stepValue(state.consecutiveQuotaFailures, health.quotaFirstSeconds, health.quotaSecondSeconds, health.quotaThirdSeconds);
     state.cooldownUntil = Math.max(state.cooldownUntil, now + seconds * 1000);
-    reason = `quota/rate limit x${state.consecutiveQuotaFailures}`;
+    reason = persistentFallbackQuota
+      ? `quota/rate limit x${state.consecutiveQuotaFailures} (fallback probe in ${seconds}s)`
+      : `quota/rate limit x${state.consecutiveQuotaFailures}`;
     kind = 'quota/rate limit';
   } else if (error?.configLike && key !== 'google') {
     state.disabledUntilConfigChange = true;
@@ -229,7 +262,7 @@ function setProviderFailure(state, error, options = {}, { phase = 'initial', bud
   }
 
   state.cooldownReason = reason;
-  state.lastError = error?.message || String(error);
+  state.lastError = sanitizeProviderError(error);
   state.lastFailureKind = kind;
   state.failureCount += 1;
   state.lastFailureAt = now;
@@ -332,7 +365,7 @@ function observeCompletion(key, state, generated, providerName, requestStartedAt
     const budget = Boolean(error?.budgetLike || error?.name === 'TtsFailoverBudgetError');
     if (error?.cancelled && !budget) { releaseHalfOpenProbe(key, state); return; }
     setProviderFailure(state, error, options, { phase: 'midstream', budget, key, configSignature });
-    console.warn(`[${providerName}] Provider failed after first audio: ${error.message}`);
+    logProviderFailure(providerName, error, 'midstream');
   });
 }
 
@@ -447,7 +480,7 @@ function maybeDisableGeminiAuth(error) {
   for (const state of [providerStates.livePrimary, providerStates.liveFallback, providerStates.exactTts]) {
     state.cooldownUntil = Number.MAX_SAFE_INTEGER;
     state.cooldownReason = 'API key/access (until restart)';
-    state.lastError = error.message || String(error);
+    state.lastError = sanitizeProviderError(error);
     state.lastFailureKind = 'API key/access';
     state.lastFailureAt = now;
   }
@@ -462,7 +495,7 @@ function shareLiveTransportFailure(error) {
   const state = providerStates.liveFallback;
   state.cooldownUntil = Math.max(state.cooldownUntil, sharedLiveTransportUntil);
   state.cooldownReason = 'shared Live transport/setup';
-  state.lastError = `Skipped after primary Live setup/transport failure: ${error.message}`;
+  state.lastError = `Skipped after primary Live setup/transport failure: ${sanitizeProviderError(error)}`;
   state.lastFailureKind = 'transport/setup';
   state.lastFailureAt = Date.now();
 }
@@ -520,8 +553,10 @@ async function runAttempt({ key, providerName, windowMs, parentSignal, attempts,
       attempts.push({ provider: providerName, outcome: budget ? 'limiter-budget-skip' : 'limiter-cancelled', ms: elapsed, error: String(error?.name || 'Error') });
       return { result: null, error, elapsed };
     }
-    if (budget || !error?.cancelled) setProviderFailure(state, error, stateOptions(key), { phase: 'initial', budget, key, configSignature });
-    else releaseHalfOpenProbe(key, state);
+    if (budget || !error?.cancelled) {
+      setProviderFailure(state, error, stateOptions(key), { phase: 'initial', budget, key, configSignature });
+      if (!budget && !error?.cancelled) logProviderFailure(providerName, error, 'initial');
+    } else releaseHalfOpenProbe(key, state);
     maybeDisableGeminiAuth(geminiProvider ? error : null);
     attempts.push({ provider: providerName, outcome: budget ? 'budget-fail' : error?.cancelled ? 'cancelled' : error?.configLike ? 'config-fail' : 'failure', ms: elapsed, error: String(error?.name || 'Error') });
     return { result: null, error, elapsed };
@@ -703,4 +738,4 @@ export function getTtsProviderStatus() {
 }
 
 
-export const __test = { makeBudgetError, setProviderFailure, newProviderState, bufferGenerated, healthOptions, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe };
+export const __test = { makeBudgetError, setProviderFailure, newProviderState, bufferGenerated, healthOptions, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };
