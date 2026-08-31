@@ -19,6 +19,11 @@ Input: aku nak pergi ke kedai membeli beras
 Already spoken: aku nak pergi ke
 Recovery: kedai membeli beras
 
+Validation
+
+- Timing-sensitive release gate runs the complete Node 24 regression suite five consecutive times on both Windows and Ubuntu before release promotion.
+- Normal CI, dependency audit, FFmpeg/libopus probe and final clean-ZIP re-extraction remain required release gates.
+
 Compatibility
 
 - Provider order and request-scoped Gemini key round-robin remain unchanged.
