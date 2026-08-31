@@ -22,6 +22,19 @@ Provider order:
 
 The bot is designed to read eligible Discord messages aloud, not answer them. Usernames are spoken separately with Google Malay TTS.
 
+## Gemini API keys
+
+The bot accepts up to five configured Gemini API keys in `.env`:
+
+- `GEMINI_API_KEY` — slot 1 and the backward-compatible default
+- `GEMINI_API_KEY_2`
+- `GEMINI_API_KEY_3`
+- `GEMINI_API_KEY_4`
+- `GEMINI_API_KEY_5`
+- `GEMINI_API_KEY_SLOT=1` — selects the active slot at process startup
+
+Only one key is active at a time. Changing `GEMINI_API_KEY_SLOT` requires restarting the bot process. Quota/rate-limit errors do **not** automatically rotate to another key; the existing Gemini provider cooldown and Google fallback remain in control.
+
 ## Important
 
 - Keep `.env` private.
