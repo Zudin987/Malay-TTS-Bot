@@ -24,9 +24,10 @@ if not "%NODE_MAJOR%"=="24" (
 
 echo Installing bot dependencies with npm ci...
 call npm ci
-if errorlevel 1 (
+set "NPM_EXIT=%ERRORLEVEL%"
+if not "%NPM_EXIT%"=="0" (
   echo.
-  echo npm ci failed. Review the error above; no bot files were deleted.
+  echo npm ci failed with exit code %NPM_EXIT%. Review the error above; no bot files were deleted.
   pause
   exit /b 1
 )
@@ -46,9 +47,10 @@ if exist "data\guilds.json" (
 echo.
 echo Running health check...
 "C:\Malay-TTS-Bot\runtime\node-v24.19.0-win-x64\node.exe" "C:\Malay-TTS-Bot\src\doctor.js"
-if errorlevel 1 (
+set "DOCTOR_EXIT=%ERRORLEVEL%"
+if not "%DOCTOR_EXIT%"=="0" (
   echo.
-  echo Setup installed dependencies, but the health check found a problem.
+  echo Setup installed dependencies, but the health check failed with exit code %DOCTOR_EXIT%.
   echo Fix the FAIL item above, then run doctor.cmd again.
   pause
   exit /b 1
@@ -57,10 +59,11 @@ if errorlevel 1 (
 echo.
 echo Deploying slash commands including /changevoice and /restarttts...
 "C:\Malay-TTS-Bot\runtime\node-v24.19.0-win-x64\node.exe" "C:\Malay-TTS-Bot\deploy-commands.js"
-if errorlevel 1 (
+set "DEPLOY_EXIT=%ERRORLEVEL%"
+if not "%DEPLOY_EXIT%"=="0" (
   echo.
-  echo Dependencies are installed, but slash-command deployment failed.
-  echo Check .env, then run deploy-commands.cmd later.
+  echo Dependencies are installed, but slash-command deployment failed with exit code %DEPLOY_EXIT%.
+  echo Correct the Discord values in .env, then run deploy-commands.cmd later.
   pause
   exit /b 1
 )
