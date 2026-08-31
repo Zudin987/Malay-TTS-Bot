@@ -22,6 +22,22 @@ Provider order:
 
 The bot is designed to read eligible Discord messages aloud, not answer them. Usernames are spoken separately with Google Malay TTS.
 
+## Speaker name speed
+
+Speaker usernames can be made faster in `config/settings.json` without regenerating the cached Google Malay label audio:
+
+```json
+"speakerLabel": {
+  "enabled": true,
+  "speed": 1.15,
+  "gapMs": 75,
+  "maxWaitMs": 300,
+  "gain": 1.5
+}
+```
+
+`speakerLabel.speed` accepts **0.8x through 1.5x**. The default is **1.15x**. `gapMs` is the silence between the spoken username and the message; the default is **75 ms**.
+
 ## Gemini API keys
 
 The bot accepts up to five configured Gemini API keys in `.env`:
