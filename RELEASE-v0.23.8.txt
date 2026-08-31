@@ -1,0 +1,32 @@
+Malay TTS Bot v0.23.8 — Cutoff Recovery & Faster Speaker Labels
+
+Highlights
+
+- Added speakerLabel.speed in config/settings.json. Valid range is 0.8x to 1.5x; default is 1.15x.
+- Reduced the default speaker-label-to-message gap from 100 ms to 75 ms.
+- Speaker speed is applied during playback, so existing cached Google Malay username labels automatically use the new speed without regeneration.
+- Hardened recovery for Gemini Live sentences that stop after an audible prefix and previously never resume.
+- Partial Gemini Live output transcription is preserved when a turn fails or is cancelled.
+- When the output transcript is a verified prefix of the original message, recovery queues only the exact missing text suffix.
+- When transcript data is unavailable, severe cutoffs can use a buffered regenerated tail with conservative trimming instead of blindly replaying the whole sentence.
+- Late completion/cancellation information is now inspected for recoverable PCM/text tails rather than being discarded after the asynchronous completion grace.
+- Duplicate recovery scheduling is blocked per queue item.
+- Markerless Gemini Live audio now tolerates wider healthy network gaps (including tested 1.1 s inter-chunk gaps). generationComplete still closes audio immediately when Gemini sends it.
+
+Example regression covered
+
+Input: aku nak pergi ke kedai membeli beras
+Already spoken: aku nak pergi ke
+Recovery: kedai membeli beras
+
+Compatibility
+
+- Provider order and request-scoped Gemini key round-robin remain unchanged.
+- One Discord message remains one TTS item.
+- Gemini Live sessions remain fresh single-turn sessions.
+- Speaker labels remain separate cached Google Malay TTS and are never injected into Gemini message text.
+- No new runtime dependency or local AI/TTS component was added.
+
+Upgrade
+
+Preserve only .env and data\guilds.json. Replace the old C:\Malay-TTS-Bot files with the v0.23.8 clean package, restore those two files, then run setup-clean.cmd. Do not restore an older config\settings.json if you want the new speakerLabel.speed default and cutoff-recovery settings.
