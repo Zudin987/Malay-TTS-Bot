@@ -1,10 +1,19 @@
+import 'dotenv/config';
 import { fatalLogSync, installLogger } from './logger.js';
 import { acquireSingleInstanceLock } from './single-instance.js';
 import { startStopRequestWatcher } from './stop-control.js';
+import { getGeminiApiKeyRoundRobinStatus } from './gemini-key-config.js';
 
 installLogger();
 
 try {
+  const keyStatus = getGeminiApiKeyRoundRobinStatus();
+  if (keyStatus.configuredCount > 1) {
+    console.log(`[gemini-keys] ${keyStatus.configuredCount} keys configured; round-robin enabled across slots ${keyStatus.configuredSlots.join(', ')}; first slot ${keyStatus.startSlot ?? 'none'}.`);
+  } else if (keyStatus.configuredCount === 1) {
+    console.log(`[gemini-keys] One Gemini key configured in slot ${keyStatus.startSlot}; round-robin behaves as single-key mode.`);
+  }
+
   if (!acquireSingleInstanceLock()) {
     console.warn('Bot is already running. This second instance will exit.');
     process.exit(0);

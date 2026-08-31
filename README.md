@@ -22,6 +22,23 @@ Provider order:
 
 The bot is designed to read eligible Discord messages aloud, not answer them. Usernames are spoken separately with Google Malay TTS.
 
+## Gemini API keys
+
+The bot accepts up to five configured Gemini API keys in `.env`:
+
+- `GEMINI_API_KEY` — slot 1 and the backward-compatible default
+- `GEMINI_API_KEY_2`
+- `GEMINI_API_KEY_3`
+- `GEMINI_API_KEY_4`
+- `GEMINI_API_KEY_5`
+- `GEMINI_API_KEY_SLOT=1` — optional starting slot for the round-robin sequence
+
+With five populated slots, TTS items use keys in this order: **1 → 2 → 3 → 4 → 5 → 1**. A single TTS item keeps its assigned key for its whole Gemini provider chain, so a 3.1 Live failure that falls through to 2.5 Live or 3.1 TTS does not switch keys mid-message. The next TTS item advances to the next configured slot. Empty slots are skipped.
+
+If a key is rejected as invalid/revoked, that slot is removed from the runtime round-robin until `/restarttts`. Quota/rate-limit failures do not trigger an immediate second-key retry inside the same message; the normal provider cooldown and Google fallback still apply.
+
+The round-robin is intended for multiple keys from the same Google Cloud project. Keys in the same project share that project's Gemini quota, so this does not multiply project quota. Changing key values or the starting slot in `.env` requires restarting the bot process.
+
 ## Important
 
 - Keep `.env` private.

@@ -1,10 +1,16 @@
 import fs from 'node:fs/promises';
 import { performance } from 'node:perf_hooks';
-import { config, settings, tempDir } from './config.js';
+import { settings, tempDir } from './config.js';
 import { getOrAssignUserTtsVoice } from './store.js';
 import { synthesizeGemini, GEMINI_VOICES } from './providers/gemini.js';
 import { resetGeminiLiveSessions, synthesizeGeminiLive } from './providers/gemini-live.js';
 import { streamGoogleMalay } from './providers/google.js';
+import {
+  disableGeminiApiKeySlot,
+  getGeminiApiKeyRoundRobinStatus,
+  nextGeminiApiKey,
+  resetGeminiApiKeyRoundRobin
+} from './gemini-key-config.js';
 
 function newProviderState() {
   return {
@@ -36,6 +42,8 @@ let lastProvider = null;
 const recentGeminiQuotaFailures = [];
 
 const geminiLimiter = { active: 0, queue: [], sequence: 0 };
+const FALLBACK_QUOTA_BACKOFF_AFTER = 3;
+const FALLBACK_QUOTA_BACKOFF_SECONDS = 30 * 60;
 
 export async function cleanupTempDirectory() {
   await fs.rm(tempDir, { recursive: true, force: true });
@@ -177,6 +185,31 @@ function noteAttempt(state, elapsedMs) {
   state.totalAttemptMs += ms;
 }
 
+function sanitizeProviderText(value) {
+  return String(value ?? '')
+    .replace(/([?&](?:key|api[_-]?key|apikey)=)[^&\s)]+/giu, '$1[redacted]')
+    .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/gu, '[redacted-api-key]')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/=\-]+/giu, 'Bearer [redacted]')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .slice(0, 1200);
+}
+
+function sanitizeProviderError(error) {
+  return sanitizeProviderText(error?.message || error || 'Unknown provider error.');
+}
+
+function logProviderFailure(providerName, error, phase = 'initial') {
+  if (error?.cancelled) return;
+  const metadata = [
+    error?.code != null ? `code=${sanitizeProviderText(error.code)}` : null,
+    error?.status != null ? `status=${sanitizeProviderText(error.status)}` : null,
+    error?.apiStatus != null ? `apiStatus=${sanitizeProviderText(error.apiStatus)}` : null,
+    error?.reason ? `reason=${sanitizeProviderText(error.reason)}` : null
+  ].filter(Boolean).join(' ');
+  console.warn(`[provider-fail:${providerName}] phase=${phase}${metadata ? ` ${metadata}` : ''} message=${sanitizeProviderError(error)}`);
+}
+
 function setProviderFailure(state, error, options = {}, { phase = 'initial', budget = false, key = 'unknown', configSignature = null } = {}) {
   // Budget/deadline failures must affect health even if a downstream provider
   // wrapped the abort as a cancellation. Explicit user/queue cancellation stays neutral.
@@ -196,9 +229,15 @@ function setProviderFailure(state, error, options = {}, { phase = 'initial', bud
     reason = 'daily quota (until Pacific reset)';
     kind = 'daily quota';
   } else if (error?.quotaLike) {
-    seconds = stepValue(state.consecutiveQuotaFailures, health.quotaFirstSeconds, health.quotaSecondSeconds, health.quotaThirdSeconds);
+    const persistentFallbackQuota = key === 'liveFallback'
+      && state.consecutiveQuotaFailures >= FALLBACK_QUOTA_BACKOFF_AFTER;
+    seconds = persistentFallbackQuota
+      ? FALLBACK_QUOTA_BACKOFF_SECONDS
+      : stepValue(state.consecutiveQuotaFailures, health.quotaFirstSeconds, health.quotaSecondSeconds, health.quotaThirdSeconds);
     state.cooldownUntil = Math.max(state.cooldownUntil, now + seconds * 1000);
-    reason = `quota/rate limit x${state.consecutiveQuotaFailures}`;
+    reason = persistentFallbackQuota
+      ? `quota/rate limit x${state.consecutiveQuotaFailures} (fallback probe in ${seconds}s)`
+      : `quota/rate limit x${state.consecutiveQuotaFailures}`;
     kind = 'quota/rate limit';
   } else if (error?.configLike && key !== 'google') {
     state.disabledUntilConfigChange = true;
@@ -229,7 +268,7 @@ function setProviderFailure(state, error, options = {}, { phase = 'initial', bud
   }
 
   state.cooldownReason = reason;
-  state.lastError = error?.message || String(error);
+  state.lastError = sanitizeProviderError(error);
   state.lastFailureKind = kind;
   state.failureCount += 1;
   state.lastFailureAt = now;
@@ -332,7 +371,7 @@ function observeCompletion(key, state, generated, providerName, requestStartedAt
     const budget = Boolean(error?.budgetLike || error?.name === 'TtsFailoverBudgetError');
     if (error?.cancelled && !budget) { releaseHalfOpenProbe(key, state); return; }
     setProviderFailure(state, error, options, { phase: 'midstream', budget, key, configSignature });
-    console.warn(`[${providerName}] Provider failed after first audio: ${error.message}`);
+    logProviderFailure(providerName, error, 'midstream');
   });
 }
 
@@ -391,11 +430,11 @@ function exactProfile() {
   return profile;
 }
 
-function liveOptions(model, signal, windowMs) {
+function liveOptions(model, signal, windowMs, apiKey) {
   const configuredSetup = Number(settings.geminiLive?.setupTimeoutMs) || 2500;
   const configuredFirst = Number(settings.geminiLive?.firstAudioTimeoutMs) || 3500;
   return {
-    apiKey: config.geminiApiKey,
+    apiKey,
     model,
     firstAudioTimeoutMs: Math.max(500, Math.min(configuredFirst, windowMs)),
     streamIdleTimeoutMs: Number(settings.geminiLive?.streamIdleTimeoutMs) || 2800,
@@ -411,9 +450,9 @@ function liveOptions(model, signal, windowMs) {
   };
 }
 
-function exactOptions(signal, windowMs) {
+function exactOptions(signal, windowMs, apiKey) {
   return {
-    apiKey: config.geminiApiKey,
+    apiKey,
     model: settings.geminiTts?.model,
     timeoutMs: Math.max(500, Math.min(Number(settings.geminiTts?.timeoutMs) || 4000, windowMs)),
     streamIdleTimeoutMs: Number(settings.geminiTts?.streamIdleTimeoutMs) || 2500,
@@ -440,17 +479,26 @@ function googleOptions(signal, windowMs) {
   };
 }
 
-function maybeDisableGeminiAuth(error) {
-  if (!error?.authLike) return;
+function maybeDisableGeminiAuth(error, apiKeySlot = null) {
+  if (!error?.authLike) return false;
+  if (apiKeySlot != null) {
+    const keyStatus = disableGeminiApiKeySlot(apiKeySlot);
+    if (keyStatus.availableCount > 0) {
+      console.warn(`[gemini-keys] Disabled slot ${apiKeySlot} after API-key auth failure; ${keyStatus.availableCount} configured key(s) remain available.`);
+      return false;
+    }
+  }
+
   geminiAuthDisabled = true;
   const now = Date.now();
   for (const state of [providerStates.livePrimary, providerStates.liveFallback, providerStates.exactTts]) {
     state.cooldownUntil = Number.MAX_SAFE_INTEGER;
     state.cooldownReason = 'API key/access (until restart)';
-    state.lastError = error.message || String(error);
+    state.lastError = sanitizeProviderError(error);
     state.lastFailureKind = 'API key/access';
     state.lastFailureAt = now;
   }
+  return true;
 }
 
 function shareLiveTransportFailure(error) {
@@ -462,12 +510,12 @@ function shareLiveTransportFailure(error) {
   const state = providerStates.liveFallback;
   state.cooldownUntil = Math.max(state.cooldownUntil, sharedLiveTransportUntil);
   state.cooldownReason = 'shared Live transport/setup';
-  state.lastError = `Skipped after primary Live setup/transport failure: ${error.message}`;
+  state.lastError = `Skipped after primary Live setup/transport failure: ${sanitizeProviderError(error)}`;
   state.lastFailureKind = 'transport/setup';
   state.lastFailureAt = Date.now();
 }
 
-async function runAttempt({ key, providerName, windowMs, parentSignal, attempts, factory, options, geminiProvider = true, priority = 0 }) {
+async function runAttempt({ key, providerName, windowMs, parentSignal, attempts, factory, options, geminiProvider = true, priority = 0, apiKeySlot = null }) {
   const state = providerStates[key];
   const configSignature = providerConfigSignature(key);
   if (!providerReady(key, state, configSignature)) {
@@ -520,9 +568,21 @@ async function runAttempt({ key, providerName, windowMs, parentSignal, attempts,
       attempts.push({ provider: providerName, outcome: budget ? 'limiter-budget-skip' : 'limiter-cancelled', ms: elapsed, error: String(error?.name || 'Error') });
       return { result: null, error, elapsed };
     }
-    if (budget || !error?.cancelled) setProviderFailure(state, error, stateOptions(key), { phase: 'initial', budget, key, configSignature });
-    else releaseHalfOpenProbe(key, state);
-    maybeDisableGeminiAuth(geminiProvider ? error : null);
+    if (budget || !error?.cancelled) {
+      setProviderFailure(state, error, stateOptions(key), { phase: 'initial', budget, key, configSignature });
+      if (!budget && !error?.cancelled) logProviderFailure(providerName, error, 'initial');
+    } else releaseHalfOpenProbe(key, state);
+
+    const authGateDisabled = maybeDisableGeminiAuth(geminiProvider ? error : null, apiKeySlot);
+    if (geminiProvider && error?.authLike && !authGateDisabled) {
+      // A bad key slot should not cool down the provider for the other configured
+      // keys. The failing slot is removed from the round-robin until /restarttts.
+      state.cooldownUntil = 0;
+      state.cooldownReason = null;
+      state.consecutiveFailures = 0;
+      state.consecutiveQuotaFailures = 0;
+    }
+
     attempts.push({ provider: providerName, outcome: budget ? 'budget-fail' : error?.cancelled ? 'cancelled' : error?.configLike ? 'config-fail' : 'failure', ms: elapsed, error: String(error?.name || 'Error') });
     return { result: null, error, elapsed };
   } finally {
@@ -538,6 +598,10 @@ export async function synthesize(text, context = {}) {
   const started = performance.now();
   const voice = chooseVoice(context);
   const attempts = [];
+  const geminiKey = nextGeminiApiKey();
+  const requestApiKey = geminiKey?.key ?? null;
+  const requestApiKeySlot = geminiKey?.slot ?? null;
+  let requestGeminiUsable = Boolean(requestApiKey) && !geminiAuthDisabled;
   const configuredBudget = Math.max(2500, Math.min(Number(settings.geminiLive?.firstAudioBudgetMs) || 7000, 20_000));
   const deadline = started + configuredBudget;
   const remaining = () => Math.max(0, deadline - performance.now());
@@ -556,45 +620,50 @@ export async function synthesize(text, context = {}) {
       return { ...attempt, result: null, error };
     }
   };
-  const hasGemini = Boolean(config.geminiApiKey) && !geminiAuthDisabled;
+  const hasGemini = Boolean(requestApiKey) && !geminiAuthDisabled;
   const health = healthOptions();
 
-  if (hasGemini && !burstBypass() && settings.geminiLive?.enabled !== false && context.skipLive !== true && Date.now() >= sharedLiveTransportUntil) {
+  if (requestGeminiUsable && !burstBypass() && settings.geminiLive?.enabled !== false && context.skipLive !== true && Date.now() >= sharedLiveTransportUntil) {
     const rem = remaining();
     const window = Math.min(Number(settings.geminiLive?.firstAudioTimeoutMs) || 3500, health.primaryFirstAudioMs, Math.max(500, rem - (health.fallbackFirstAudioMs + health.exactFirstAudioMs + health.googleReserveMs)));
     let primary = await runAttempt({
       key: 'livePrimary', providerName: 'gemini-3.1-live', windowMs: window, parentSignal, attempts,
-      factory: (signal) => synthesizeGeminiLive(value, voice, liveOptions(String(settings.geminiLive?.primaryModel || 'gemini-3.1-flash-live-preview'), signal, window)),
-      priority: attemptPriority
+      factory: (signal) => synthesizeGeminiLive(value, voice, liveOptions(String(settings.geminiLive?.primaryModel || 'gemini-3.1-flash-live-preview'), signal, window, requestApiKey)),
+      priority: attemptPriority,
+      apiKeySlot: requestApiKeySlot
     });
     primary = await bufferSelected(primary, 'gemini-3.1-live');
     if (primary.result) return generatedResult(primary.result, 'gemini-3.1-live', primary.elapsed, (primary.firstAudioAt ?? performance.now()) - started, attempts);
+    if (primary.error?.authLike) requestGeminiUsable = false;
     if (primary.error?.setupLike && primary.error?.transportLike) shareLiveTransportFailure(primary.error);
     if (primary.error?.runawayLike) sharedLiveTransportUntil = Math.max(sharedLiveTransportUntil, Date.now() + 5000);
   }
 
-  if (hasGemini && !burstBypass() && !geminiAuthDisabled && settings.geminiLive?.enabled !== false && settings.geminiLive?.fallbackEnabled !== false && context.skipLive !== true && Date.now() >= sharedLiveTransportUntil) {
+  if (requestGeminiUsable && !burstBypass() && !geminiAuthDisabled && settings.geminiLive?.enabled !== false && settings.geminiLive?.fallbackEnabled !== false && context.skipLive !== true && Date.now() >= sharedLiveTransportUntil) {
     const rem = remaining();
     const window = Math.min(Number(settings.geminiLive?.firstAudioTimeoutMs) || 3500, health.fallbackFirstAudioMs, Math.max(400, rem - (health.exactFirstAudioMs + health.googleReserveMs)));
     let fallbackLive = await runAttempt({
       key: 'liveFallback', providerName: 'gemini-2.5-live', windowMs: window, parentSignal, attempts,
-      factory: (signal) => synthesizeGeminiLive(value, voice, liveOptions(String(settings.geminiLive?.fallbackModel || 'gemini-2.5-flash-native-audio-preview-12-2025'), signal, window)),
-      priority: attemptPriority
+      factory: (signal) => synthesizeGeminiLive(value, voice, liveOptions(String(settings.geminiLive?.fallbackModel || 'gemini-2.5-flash-native-audio-preview-12-2025'), signal, window, requestApiKey)),
+      priority: attemptPriority,
+      apiKeySlot: requestApiKeySlot
     });
     fallbackLive = await bufferSelected(fallbackLive, 'gemini-2.5-live');
     if (fallbackLive.result) return generatedResult(fallbackLive.result, 'gemini-2.5-live', fallbackLive.elapsed, (fallbackLive.firstAudioAt ?? performance.now()) - started, attempts);
-  } else if (hasGemini && !burstBypass() && settings.geminiLive?.fallbackEnabled !== false && Date.now() < sharedLiveTransportUntil) {
+    if (fallbackLive.error?.authLike) requestGeminiUsable = false;
+  } else if (requestGeminiUsable && !burstBypass() && settings.geminiLive?.fallbackEnabled !== false && Date.now() < sharedLiveTransportUntil) {
     noteSkipped(providerStates.liveFallback);
     attempts.push({ provider: 'gemini-2.5-live', outcome: 'shared-transport-skip', ms: 0 });
   }
 
-  if (hasGemini && !burstBypass() && !geminiAuthDisabled && settings.geminiTts?.enabled !== false) {
+  if (requestGeminiUsable && !burstBypass() && !geminiAuthDisabled && settings.geminiTts?.enabled !== false) {
     const rem = remaining();
     const window = Math.min(Number(settings.geminiTts?.timeoutMs) || 4000, health.exactFirstAudioMs, Math.max(350, rem - health.googleReserveMs));
     let exact = await runAttempt({
       key: 'exactTts', providerName: 'gemini-3.1-tts', windowMs: window, parentSignal, attempts,
-      factory: (signal) => synthesizeGemini(value, voice, exactOptions(signal, window)),
-      priority: attemptPriority
+      factory: (signal) => synthesizeGemini(value, voice, exactOptions(signal, window, requestApiKey)),
+      priority: attemptPriority,
+      apiKeySlot: requestApiKeySlot
     });
     exact = await bufferSelected(exact, 'gemini-3.1-tts');
     if (exact.result) return generatedResult(exact.result, 'gemini-3.1-tts', exact.elapsed, (exact.firstAudioAt ?? performance.now()) - started, attempts);
@@ -667,6 +736,7 @@ function publicProviderState(state) {
 
 export function restartTtsRuntime() {
   resetGeminiLiveSessions();
+  resetGeminiApiKeyRoundRobin();
   geminiAuthDisabled = false;
   sharedLiveTransportUntil = 0;
   geminiBurstUntil = 0;
@@ -679,8 +749,10 @@ export function restartTtsRuntime() {
 }
 
 export function getTtsProviderStatus() {
+  const geminiKeys = getGeminiApiKeyRoundRobinStatus();
   return {
-    geminiConfigured: Boolean(config.geminiApiKey),
+    geminiConfigured: geminiKeys.configuredCount > 0,
+    geminiKeyRoundRobin: geminiKeys,
     geminiAuthDisabled,
     geminiLiveEnabled: settings.geminiLive?.enabled !== false,
     geminiExactTtsEnabled: settings.geminiTts?.enabled !== false,
@@ -703,4 +775,4 @@ export function getTtsProviderStatus() {
 }
 
 
-export const __test = { makeBudgetError, setProviderFailure, newProviderState, bufferGenerated, healthOptions, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe };
+export const __test = { makeBudgetError, setProviderFailure, newProviderState, bufferGenerated, healthOptions, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };
