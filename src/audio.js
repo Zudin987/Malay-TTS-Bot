@@ -901,7 +901,13 @@ export function enqueue(guildId, text, metadata = {}) {
   // One Discord message is always one queue/TTS item. While a cold Discord
   // voice connection is still handshaking, start FIFO TTS prefetch immediately
   // but defer actual playback until subscribePlayer marks voiceReady.
-  if (state.queue.length >= maximum) dropForQueueOverflow(guildId, state, maximum);
+  if (state.queue.length >= maximum) {
+    if (metadata.rejectOnOverflow === true) {
+      cleanupCancelledQueuedItem(incoming);
+      return 'rejected-queue-full';
+    }
+    dropForQueueOverflow(guildId, state, maximum);
+  }
   state.queue.push(incoming);
   if (state.running || !state.voiceReady) {
     prefetchNext(guildId, state);

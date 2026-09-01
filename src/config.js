@@ -252,9 +252,9 @@ function normalizeSettings(parsed) {
       enabled: ask.enabled !== false,
       model: String(ask.model ?? defaults.ask.model).trim() || defaults.ask.model,
       timeoutMs: clampInt(ask.timeoutMs, defaults.ask.timeoutMs, 1500, 20_000),
-      maxQuestionCharacters: clampInt(ask.maxQuestionCharacters, defaults.ask.maxQuestionCharacters, 50, 1800),
+      maxQuestionCharacters: clampInt(ask.maxQuestionCharacters, defaults.ask.maxQuestionCharacters, 50, 1000),
       maxOutputTokens: clampInt(ask.maxOutputTokens, defaults.ask.maxOutputTokens, 32, 512),
-      maxAnswerCharacters: clampInt(ask.maxAnswerCharacters, defaults.ask.maxAnswerCharacters, 120, 1500),
+      maxAnswerCharacters: clampInt(ask.maxAnswerCharacters, defaults.ask.maxAnswerCharacters, 120, 1024),
       temperature: clamp(ask.temperature, defaults.ask.temperature, 0, 1.5),
       thinkingLevel: ['minimal', 'low', 'medium', 'high'].includes(String(ask.thinkingLevel ?? '').trim().toLowerCase())
         ? String(ask.thinkingLevel).trim().toLowerCase()
