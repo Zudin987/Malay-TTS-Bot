@@ -1,0 +1,12 @@
+Malay TTS Bot v0.23.19
+
+Changes
+- Fixes normal Discord messages sometimes being answered or explained instead of read aloud.
+- Normal user-authored chat now bypasses conversational Gemini Live completely.
+- Normal chat uses dedicated Gemini 3.1 TTS first, then Google Malay TTS fallback.
+- The routing does not rely on question marks or keyword heuristics, so prompt-like text such as "windows ke linux bagus" is still treated as literal speech.
+- /ask keeps the same strict dedicated-TTS routing introduced in v0.23.18.
+- Gemini Live remains in the codebase but is no longer used as the default read-aloud provider for user chat.
+
+Why
+Gemini Live is conversational and can interpret user text as a request to answer. For a read-aloud bot, literal fidelity is more important than the small latency advantage of Live.
