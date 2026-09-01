@@ -1,0 +1,98 @@
+name: Add /ask embed and TTS
+
+on:
+  push:
+    branches:
+      - release/v0.23.13
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[ask-card]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: release/v0.23.13
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Patch /ask card and spoken reply
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'EOF'
+          const fs = require('fs');
+
+          const commandsPath = 'src/commands.js';
+          let source = fs.readFileSync(commandsPath, 'utf8');
+          source = source.replace(
+            "import { cancelUserAudio, getAudioStatus } from './audio.js';",
+            "import { cancelMessageAudio, cancelUserAudio, enqueue, getAudioStatus } from './audio.js';"
+          );
+          source = source.replace(
+            "import { getTtsProviderStatus, restartTtsRuntime } from './tts.js';",
+            "import { getOrAssignTtsVoice, getTtsProviderStatus, restartTtsRuntime } from './tts.js';"
+          );
+
+          const oldAsk = `const askCommand = {\n  data: new SlashCommandBuilder()\n    .setName('ask')\n    .setDescription('Ask Gemini for a short chat-style answer')\n    .addStringOption((option) =>\n      option\n        .setName('question')\n        .setDescription('What you want to ask')\n        .setRequired(true)\n        .setMinLength(1)\n        .setMaxLength(1000)\n    ),\n\n  async execute(interaction) {\n    const question = interaction.options.getString('question', true);\n    await interaction.deferReply();\n    try {\n      const { answer } = await askGemini(question, { options: getAskOptions(settings.ask) });\n      await interaction.editReply({ content: answer, allowedMentions: { parse: [] } });\n    } catch (error) {\n      console.warn('[ask]', error?.code || error?.name || 'error', error?.status || '');\n      await interaction.editReply({ content: describeAskError(error), allowedMentions: { parse: [] } });\n    }\n  }\n};`;
+
+          const newAsk = `function askDisplayName(interaction) {\n  return String(interaction.member?.displayName || interaction.user?.globalName || interaction.user?.username || 'User').slice(0, 100);\n}\n\nfunction buildAskEmbed(interaction, question, answer) {\n  const askerName = askDisplayName(interaction);\n  return new EmbedBuilder()\n    .setAuthor({\n      name: \\`${'${askerName}'} ask\\`,\n      iconURL: interaction.user?.displayAvatarURL?.({ size: 64 })\n    })\n    .addFields(\n      { name: 'Question', value: String(question).slice(0, 1024), inline: false },\n      { name: 'AI reply', value: String(answer).slice(0, 1024), inline: false }\n    );\n}\n\nasync function queueAskAnswerTts(interaction, answer) {\n  if (isUserTtsOptedOut(interaction.guildId, interaction.user.id)) return 'opted-out';\n  const voiceChannel = interaction.member?.voice?.channel;\n  if (!voiceChannel || voiceChannel.type !== ChannelType.GuildVoice) return 'not-in-voice';\n\n  const currentChannelId = getRuntimeVoiceChannelId(interaction.guildId);\n  if (currentChannelId && String(currentChannelId) !== String(voiceChannel.id)) return 'other-channel';\n\n  const itemId = \\`ask:${'${interaction.id}'}\\`;\n  const assignedVoice = getOrAssignTtsVoice(interaction.guildId, interaction.user.id);\n  const connectionPromise = currentChannelId\n    ? null\n    : connectToVoiceChannel(interaction.guild, voiceChannel, { allowMove: false });\n  connectionPromise?.catch(() => {});\n\n  const enqueueStatus = enqueue(interaction.guildId, answer, {\n    messageId: itemId,\n    voiceChannelId: voiceChannel.id,\n    googleText: answer,\n    verificationText: answer,\n    messageCreatedAt: interaction.createdTimestamp || Date.now(),\n    userId: interaction.user.id,\n    voice: assignedVoice,\n    speakerLabel: null\n  });\n  if (enqueueStatus === 'rejected-other-channel') return enqueueStatus;\n\n  if (connectionPromise) {\n    try {\n      const result = await connectionPromise;\n      if (!result.connection) {\n        cancelMessageAudio(interaction.guildId, itemId);\n        return 'voice-unavailable';\n      }\n    } catch (error) {\n      cancelMessageAudio(interaction.guildId, itemId);\n      throw error;\n    }\n  }\n  return enqueueStatus;\n}\n\nconst askCommand = {\n  data: new SlashCommandBuilder()\n    .setName('ask')\n    .setDescription('Ask Gemini for a short chat-style answer')\n    .addStringOption((option) =>\n      option\n        .setName('question')\n        .setDescription('What you want to ask')\n        .setRequired(true)\n        .setMinLength(1)\n        .setMaxLength(1000)\n    ),\n\n  async execute(interaction) {\n    const question = interaction.options.getString('question', true);\n    await interaction.deferReply();\n    try {\n      const { answer } = await askGemini(question, { options: getAskOptions(settings.ask) });\n      const embed = buildAskEmbed(interaction, question, answer);\n      await interaction.editReply({ content: null, embeds: [embed], allowedMentions: { parse: [] } });\n      void queueAskAnswerTts(interaction, answer).catch((error) => {\n        console.warn('[ask-tts]', error?.message || error);\n      });\n    } catch (error) {\n      console.warn('[ask]', error?.code || error?.name || 'error', error?.status || '');\n      await interaction.editReply({ content: describeAskError(error), embeds: [], allowedMentions: { parse: [] } });\n    }\n  }\n};`;
+
+          if (!source.includes(oldAsk)) throw new Error('existing ask command block not found');
+          source = source.replace(oldAsk, newAsk);
+          fs.writeFileSync(commandsPath, source);
+
+          const testPath = 'test/ask-command.test.js';
+          let tests = fs.readFileSync(testPath, 'utf8');
+          tests += `\n\ntest('/ask renders a Q&A embed and speaks only the AI reply', () => {\n  const source = fs.readFileSync(new URL('../src/commands.js', import.meta.url), 'utf8');\n  assert.match(source, /name: \\`\\$\\{askerName\\} ask\\`/u);\n  assert.match(source, /\\{ name: 'Question', value:/u);\n  assert.match(source, /\\{ name: 'AI reply', value:/u);\n  assert.match(source, /editReply\\(\\{ content: null, embeds: \\[embed\\]/u);\n  assert.match(source, /enqueue\\(interaction\\.guildId, answer,/u);\n  assert.match(source, /googleText: answer/u);\n  assert.match(source, /verificationText: answer/u);\n  assert.match(source, /speakerLabel: null/u);\n  assert.match(source, /voiceChannel\\.type !== ChannelType\\.GuildVoice/u);\n  assert.match(source, /isUserTtsOptedOut\\(interaction\\.guildId, interaction\\.user\\.id\\)/u);\n});\n`;
+          fs.writeFileSync(testPath, tests);
+
+          const readmePath = 'README.md';
+          let readme = fs.readFileSync(readmePath, 'utf8');
+          readme = readme.replace(
+            'Use `/ask question:<text>` when you intentionally want an AI answer instead of read-aloud TTS. It uses `gemini-3.1-flash-lite` with minimal thinking and returns one compact public Discord message, normally 1–3 short sentences. It does not request images, embeds, tables, or long article-style output. Bot-authored `/ask` replies are ignored by the normal TTS message handler.',
+            'Use `/ask question:<text>` when you intentionally want an AI answer. It uses `gemini-3.1-flash-lite` with minimal thinking and returns a compact public Discord embed, normally 1–3 short sentences. The card shows `<username> ask`, a **Question** field, and an **AI reply** field. If the asker is in the active normal voice channel, only the AI reply is queued for TTS using that user’s assigned voice; the question and embed labels are not spoken. Bot-authored `/ask` replies are ignored by the normal message TTS handler.'
+          );
+          readme = readme.replace(
+            '`/ask` uses the existing Gemini key selection and makes only one Gemini request per command. A quota failure does not hop to another key inside the same `/ask` request.',
+            '`/ask` uses the existing Gemini key selection and makes only one text-generation request per command. A quota failure does not hop to another key inside the same `/ask` request. Speaking the resulting AI reply uses the normal TTS provider chain. `/ttsoptout` is respected for `/ask` voice playback.'
+          );
+          fs.writeFileSync(readmePath, readme);
+
+          const releasePath = 'RELEASE-v0.23.13.txt';
+          let release = fs.readFileSync(releasePath, 'utf8');
+          release = release.replace(
+            '- Default answers are concise chat replies, normally one to three short sentences.\n',
+            '- Default answers are concise chat replies, normally one to three short sentences.\n- Successful /ask answers are shown in a public Discord embed with `<username> ask`, `Question`, and `AI reply` sections.\n- When the asker is in the active normal voice channel, only the AI reply is queued through the existing TTS pipeline; the question and card labels are not spoken.\n'
+          );
+          release = release.replace(
+            '- The /ask system instruction forbids article-style headings, bullet/numbered lists, tables, citations, embeds, image generation, image suggestions, and unnecessary background.\n',
+            '- The /ask model instruction forbids article-style headings, bullet/numbered lists, tables, citations, image generation, image suggestions, and unnecessary background; the bot itself wraps the final answer in a fixed Discord embed card.\n'
+          );
+          release = release.replace(
+            '- Generated Discord mentions are disabled.\n',
+            '- Generated Discord mentions are disabled.\n- /ttsoptout is respected for /ask voice playback, and /ask will not move an already-connected bot into another voice channel.\n'
+          );
+          fs.writeFileSync(releasePath, release);
+          EOF
+
+          npm ci
+          npm test
+          npm audit --audit-level=high
+          node --check src/commands.js
+          node --check src/ask.js
+          node -e "const p=require('./package.json'),l=require('./package-lock.json'); if(p.version!=='0.23.13'||l.version!=='0.23.13'||l.packages[''].version!=='0.23.13') process.exit(1)"
+      - name: Commit /ask card and TTS
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/commands.js test/ask-command.test.js README.md RELEASE-v0.23.13.txt
+          git commit -m '[ask-card] Add embedded /ask reply with TTS'
+          git push origin HEAD:release/v0.23.13
