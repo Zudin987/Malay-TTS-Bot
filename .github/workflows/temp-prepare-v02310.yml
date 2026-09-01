@@ -1,0 +1,67 @@
+name: Temp prepare v0.23.10
+
+on:
+  push:
+    branches:
+      - release/v0.23.10
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: release/v0.23.10
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Prepare release metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm version 0.23.10 --no-git-tag-version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node -e "const fs=require('fs'); let s=fs.readFileSync('setup-clean.cmd','utf8'); if(!s.includes('clean setup v0.23.9')) throw Error('setup banner baseline missing'); fs.writeFileSync('setup-clean.cmd',s.replace('clean setup v0.23.9','clean setup v0.23.10')); let m=fs.readFileSync('MAINTENANCE.md','utf8'); if(!m.includes('Current stable baseline: **v0.23.9 — Fidelity Prompt Profiles**.')) throw Error('maintenance baseline missing'); fs.writeFileSync('MAINTENANCE.md',m.replace('Current stable baseline: **v0.23.9 — Fidelity Prompt Profiles**.','Current stable baseline: **v0.23.10 — Read-Aloud Guard & Recovery Fidelity**.'));"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @'
+          Malay TTS Bot v0.23.10 — Read-Aloud Guard & Recovery Fidelity
+
+          Main fixes
+          - Prevent Gemini Live from answering question-like Discord messages. Text containing a question mark or strongly assistant-like wording bypasses conversational Live and goes to exact Gemini TTS when healthy, otherwise Google Malay TTS.
+          - Prevent false duplicate tail playback when Gemini Live speaks the full message but returns only a partial output transcription. Transcript evidence alone can no longer queue a Google text-tail replay.
+          - Keep real cutoff recovery: a partial transcript can still recover the missing suffix when independent short-audio, playback-cutoff, timeout, or provider-failure evidence confirms a genuine truncation.
+
+          Regression coverage
+          - Exact reported case: "cer live sikit bertemu angin?" with a partial Live transcript must not replay "sikit bertemu angin?" after full audio.
+          - Question/assistant-like messages bypass Gemini Live.
+          - Confirmed short audio still schedules the missing text tail.
+          - Existing cutoff, speaker-label, provider-health, prompt-fidelity and setup regressions remain covered.
+
+          Upgrade
+          Preserve only .env and data\guilds.json from the existing installation. Use the new config\settings.json defaults from this release.
+          '@ | Set-Content -LiteralPath RELEASE-v0.23.10.txt -Encoding utf8
+      - name: Validate release metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node -e "const p=require('./package.json'),l=require('./package-lock.json'); if(p.version!=='0.23.10'||l.version!=='0.23.10'||l.packages[''].version!=='0.23.10') throw Error('version mismatch');"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm audit --audit-level=high
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Commit permanent release files
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json setup-clean.cmd MAINTENANCE.md RELEASE-v0.23.10.txt
+          git commit -m "Prepare v0.23.10 release metadata"
+          git push origin HEAD:release/v0.23.10
