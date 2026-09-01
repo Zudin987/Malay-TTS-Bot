@@ -1,7 +1,11 @@
 import fs from 'node:fs';
 
+function readNormalized(path) {
+  return fs.readFileSync(path, 'utf8').replace(/\r\n/gu, '\n');
+}
+
 function replaceOnce(path, before, after) {
-  const current = fs.readFileSync(path, 'utf8');
+  const current = readNormalized(path);
   const first = current.indexOf(before);
   if (first < 0) throw new Error(`Patch target missing in ${path}`);
   if (current.indexOf(before, first + before.length) >= 0) throw new Error(`Patch target is ambiguous in ${path}`);
@@ -36,7 +40,7 @@ replaceOnce(
   `  const voice = chooseVoice(context);\n  const attempts = [];\n  const bypassLiveForReadAloud = context.skipLive !== true && shouldBypassGeminiLiveForReadAloud(value);\n  const skipLive = context.skipLive === true || bypassLiveForReadAloud;\n`
 );
 
-let tts = fs.readFileSync('src/tts.js', 'utf8');
+let tts = readNormalized('src/tts.js');
 const liveCondition = "context.skipLive !== true";
 const occurrences = tts.split(liveCondition).length - 1;
 if (occurrences !== 2) throw new Error(`Expected 2 Live condition occurrences, got ${occurrences}`);
