@@ -23,6 +23,8 @@ test('question and assistant-like Discord text bypasses conversational Gemini Li
   ]) assert.equal(shouldBypassGeminiLiveForReadAloud(value), true, value);
   assert.equal(shouldBypassGeminiLiveForReadAloud('cer live sikit bertemu angin'), false);
   assert.equal(shouldBypassGeminiLiveForReadAloud('aku pergi ke kedai lepas ni'), false);
+  assert.equal(shouldBypassGeminiLiveForReadAloud('aku dah pergi ke kedai'), false);
+  assert.equal(shouldBypassGeminiLiveForReadAloud('baru pergi ke kedai'), false);
   assert.equal(shouldBypassGeminiLiveForReadAloud('aku tak tahu apa nak buat'), false);
   assert.equal(shouldBypassGeminiLiveForReadAloud('aku tahu mana tempat dia'), false);
 });
@@ -127,6 +129,19 @@ test('clearing the queue invalidates pending post-playback recovery observers', 
   assert.equal(audioTest.scheduleCompletionGraceCancel('test-guild', state, generated, { item, playedMs: 1100, playbackSpeed: 1 }), true);
   resolveCompletion({ audioBytes: partial.length, audioBuffer: partial, transcript: 'aku nak pergi' });
   await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(state.queue.length, 0);
+  assert.equal(state.suppressedCutoffReplays, 1);
+});
+
+
+test('punctuation pause inflation cannot turn complete fast speech into a recovery tail', () => {
+  const text = 'aku... nak... pergi... ke... kedai...';
+  const item = audioTest.createQueueItem(text, { verificationText: text });
+  const state = stateForRecovery();
+  const fullAudio = pcm(1100);
+  const generated = { audioFormat: 's16le', sampleRate: 24_000, channels: 1 };
+  const info = { audioBytes: fullAudio.length, audioBuffer: fullAudio, transcript: 'aku nak' };
+  assert.equal(audioTest.handleCompletionRecovery('test-guild', state, item, generated, 1100, 1, { info }), false);
   assert.equal(state.queue.length, 0);
   assert.equal(state.suppressedCutoffReplays, 1);
 });

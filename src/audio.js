@@ -341,13 +341,25 @@ function mp3DurationMs(buffer) {
   return frames && sampleRate ? samples / sampleRate * 1000 : 0;
 }
 
+function estimateRecoveryDurationMs(text) {
+  const value = String(text ?? '').trim();
+  if (!value) return 0;
+  const words = value.split(/\s+/u).filter(Boolean).length;
+  const lexicalCharacters = [...value.replace(/[^\p{L}\p{N}]/gu, '')].length;
+  const estimate = Math.max(words * 330, lexicalCharacters * 48);
+  return Math.max(650, Math.min(Math.round(estimate), 50_000));
+}
+
 function isSuspiciouslyShortPcm(item, generated, audioBytes) {
   const reference = String(item.verificationText || item.text || '').trim();
   const words = reference.split(/\s+/u).filter(Boolean).length;
   const characters = [...reference].length;
   if (words < 5 || characters < 20) return false;
   const actual = getPcmDurationMs(audioBytes, generated?.sampleRate, generated?.channels);
-  const expected = item.estimatedDurationMs || estimateSpeechDurationMs(item.text);
+  // Recovery must not inherit punctuation pause inflation from the queue ETA.
+  // A message full of ellipses can be spoken completely much faster than the
+  // display-oriented estimate without being truncated.
+  const expected = estimateRecoveryDurationMs(item.verificationText || item.text);
   return actual >= 250 && actual < expected * 0.35 && expected - actual >= 900;
 }
 function normalizeTranscriptWords(value) { return String(value ?? '').toLocaleLowerCase('en').match(/[\p{L}\p{N}]+/gu) ?? []; }
@@ -510,7 +522,7 @@ function handleCompletionRecovery(guildId, state, item, generated, playedMs, pla
   const actualMs = String(metadata.audioFormat || '').toLowerCase() === 's16le' && audioBytes > 0
     ? getPcmDurationMs(audioBytes, metadata.sampleRate, metadata.channels)
     : 0;
-  const expectedMs = Math.max(1, Number(item.estimatedDurationMs) || estimateSpeechDurationMs(item.text));
+  const expectedMs = Math.max(1, estimateRecoveryDurationMs(item.verificationText || item.text));
   const severeShort = actualMs >= 250 && actualMs < expectedMs * 0.75 && expectedMs - actualMs >= 650;
   // Strong-short is deliberately much stricter than severeShort. It is never
   // sufficient on its own for generic recovery; it only corroborates another
