@@ -4,7 +4,7 @@
 
 GitHub is the source of truth for development. `main` is stable/released code and `develop` is the active integration branch. Use focused feature/fix branches and pull requests for non-trivial changes.
 
-Current stable baseline: **v0.23.19 — Strict Normal TTS**.
+Current stable baseline: **v0.23.20 — Gemini TTS Repair**.
 
 ## Priorities
 
@@ -28,14 +28,12 @@ Never add heavy local AI, local TTS models, or architecture that materially incr
 
 ## Provider chain
 
-Keep the normal preference order unless an explicit release changes it:
+For normal Discord read-aloud and `/ask`, literal fidelity takes priority over conversational Live latency:
 
-1. Gemini 3.1 Flash Live
-2. Gemini 2.5 Native Audio Live
-3. Gemini 3.1 Flash TTS
-4. Google Malay TTS fallback
+1. Gemini 3.1 Flash TTS
+2. Google Malay TTS fallback
 
-Provider health may temporarily bypass known-bad/quota-limited providers, but recovery must restore the normal preference order after a successful half-open probe.
+Gemini Live providers remain in the codebase for non-read-aloud/internal compatibility, but user-authored read-aloud text must not be routed through a conversational Live model. Provider health may bypass a known-bad/quota-limited TTS provider and fall back to Google.
 
 ## Voice / speaker architecture
 
