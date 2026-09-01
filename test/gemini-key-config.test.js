@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { getGeminiApiKeySelection, createGeminiApiKeyRoundRobin } = await import('../src/gemini-key-config.js');
+const {
+  getGeminiApiKeySelection,
+  createGeminiApiKeyRoundRobin,
+  formatGeminiApiKeySelectionLog
+} = await import('../src/gemini-key-config.js');
 
 test('Gemini key config keeps legacy GEMINI_API_KEY as slot 1', () => {
   const selection = getGeminiApiKeySelection({ GEMINI_API_KEY: ' key-one ' });
@@ -9,6 +13,15 @@ test('Gemini key config keeps legacy GEMINI_API_KEY as slot 1', () => {
   assert.equal(selection.selectedSlot, 1);
   assert.equal(selection.configuredCount, 1);
   assert.deepEqual(selection.configuredSlots, [1]);
+});
+
+test('Gemini key selection log exposes only the slot number', () => {
+  const secret = 'never-log-this-key-material';
+  const line = formatGeminiApiKeySelectionLog({ slot: 4, key: secret });
+  assert.equal(line, '[gemini-key] slot=4');
+  assert.equal(line.includes(secret), false);
+  assert.equal(formatGeminiApiKeySelectionLog({ slot: null, key: secret }), null);
+  assert.equal(formatGeminiApiKeySelectionLog({ slot: 6, key: secret }), null);
 });
 
 test('round robin cycles five configured keys in slot order', () => {
