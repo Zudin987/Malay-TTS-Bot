@@ -1,17 +1,19 @@
 // Output-audio transcription is useful evidence, but it is not authoritative:
-// Gemini can speak the full line while returning a partial transcription. Never
-// replay a source-text tail from transcription alone. Require independent audio,
-// playback, timeout, or provider-failure evidence of a real cutoff.
+// Gemini can speak the full line while returning a partial transcription. A
+// duration estimate is also not authoritative by itself. Tail recovery therefore
+// requires corroborating evidence from a strong duration mismatch, playback,
+// timeout, or hard-cutoff signal.
 export function shouldRecoverTranscriptTail({
   suspiciousTranscript = false,
-  severeShort = false,
-  genuineFailure = false,
+  strongShort = false,
+  playbackFailure = false,
   timedOut = false,
   suspiciousDuration = false,
   playbackSuspicious = false,
   hardPlaybackCutoff = false
 } = {}) {
   if (!suspiciousTranscript) return false;
-  if (genuineFailure || hardPlaybackCutoff || severeShort) return true;
+  if (hardPlaybackCutoff || suspiciousDuration || strongShort) return true;
+  if (playbackFailure && playbackSuspicious) return true;
   return Boolean(timedOut && (suspiciousDuration || playbackSuspicious));
 }

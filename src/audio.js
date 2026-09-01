@@ -113,6 +113,8 @@ function createQueueItem(text, metadata = {}) {
     replayChannels: Number(metadata.replayChannels) || 1,
     resumeFraction: Math.max(0, Math.min(Number(metadata.resumeFraction) || 0, 0.98)),
     recoveryScheduled: false,
+    recoveryEpoch: Math.max(0, Number(metadata.recoveryEpoch) || 0),
+    runSerial: Math.max(0, Number(metadata.runSerial) || 0),
     generationMode: null
   };
 }
@@ -127,7 +129,8 @@ function getState(guildId) {
     streamingPrefetches: 0, cutoffRecoveries: 0, cutoffRecoverySuccesses: 0,
     cutoffRecoveryFailures: 0, suspiciousShortOutputs: 0, transcriptCutoffs: 0,
     playbackCutoffs: 0, mirrorReplays: 0, suppressedCutoffReplays: 0,
-    completionGraceTimeouts: 0, pipelineFailures: 0, lastSpeakerAnnouncement: null
+    completionGraceTimeouts: 0, pipelineFailures: 0, lastSpeakerAnnouncement: null,
+    recoveryEpoch: 0, runSerial: 0
   };
   player.on('error', (error) => console.error(`[player:${guildId}]`, error));
   states.set(guildId, state);
@@ -338,13 +341,25 @@ function mp3DurationMs(buffer) {
   return frames && sampleRate ? samples / sampleRate * 1000 : 0;
 }
 
+function estimateRecoveryDurationMs(text) {
+  const value = String(text ?? '').trim();
+  if (!value) return 0;
+  const words = value.split(/\s+/u).filter(Boolean).length;
+  const lexicalCharacters = [...value.replace(/[^\p{L}\p{N}]/gu, '')].length;
+  const estimate = Math.max(words * 330, lexicalCharacters * 48);
+  return Math.max(650, Math.min(Math.round(estimate), 50_000));
+}
+
 function isSuspiciouslyShortPcm(item, generated, audioBytes) {
   const reference = String(item.verificationText || item.text || '').trim();
   const words = reference.split(/\s+/u).filter(Boolean).length;
   const characters = [...reference].length;
   if (words < 5 || characters < 20) return false;
   const actual = getPcmDurationMs(audioBytes, generated?.sampleRate, generated?.channels);
-  const expected = item.estimatedDurationMs || estimateSpeechDurationMs(item.text);
+  // Recovery must not inherit punctuation pause inflation from the queue ETA.
+  // A message full of ellipses can be spoken completely much faster than the
+  // display-oriented estimate without being truncated.
+  const expected = estimateRecoveryDurationMs(item.verificationText || item.text);
   return actual >= 250 && actual < expected * 0.35 && expected - actual >= 900;
 }
 function normalizeTranscriptWords(value) { return String(value ?? '').toLocaleLowerCase('en').match(/[\p{L}\p{N}]+/gu) ?? []; }
@@ -448,6 +463,7 @@ function scheduleRecovery(guildId, state, item, error, { replay = null, fullRetr
     googleText: replacementText ? recoveryText : item.googleText,
     verificationText: recoveryText, forceBuffered: true,
     recoveryAttempt: item.recoveryAttempt + 1, isRecovery: true,
+    recoveryEpoch: item.recoveryEpoch,
     skipLive: regeneratedTail ? true : fullRetry ? Boolean(item.skipLive || String(error?.provider || '').includes('live')) : true,
     replayAudioBuffer: replay?.audioBuffer || null, replayAudioFormat: replay?.audioFormat || null,
     replayMimeType: replay?.mimeType || null, replaySampleRate: replay?.sampleRate || 24_000,
@@ -465,6 +481,12 @@ function scheduleRecovery(guildId, state, item, error, { replay = null, fullRetr
 
 function handleCompletionRecovery(guildId, state, item, generated, playedMs, playbackSpeed, { info = null, error = null, timedOut = false, triggerError = null } = {}) {
   if (!item || item.cancelled || state.disposed || item.recoveryScheduled) return false;
+  const staleEpoch = Number(item.recoveryEpoch ?? 0) !== Number(state.recoveryEpoch ?? item.recoveryEpoch ?? 0);
+  const staleSerial = Number(item.runSerial || 0) > 0 && Number(state.runSerial || 0) > Number(item.runSerial || 0);
+  if (staleEpoch || staleSerial) {
+    state.suppressedCutoffReplays = (Number(state.suppressedCutoffReplays) || 0) + 1;
+    return false;
+  }
   const metadata = {
     ...generated,
     audioFormat: error?.audioFormat || generated?.audioFormat,
@@ -476,38 +498,56 @@ function handleCompletionRecovery(guildId, state, item, generated, playedMs, pla
   const transcript = String(info?.transcript ?? error?.transcript ?? generated?.transcript ?? '').trim();
   const suspiciousDuration = String(metadata.audioFormat || '').toLowerCase() === 's16le' && audioBytes > 0 && isSuspiciouslyShortPcm(item, metadata, audioBytes);
   const suspiciousTranscript = isSuspiciousTranscript(item, transcript);
-  const coverage = info && audioBytes > 0
-    ? getPlaybackCoverage(metadata, { ...info, audioBytes }, { playbackDuration: playedMs }, playbackSpeed)
+  // Coverage is useful for both successful completion metadata and provider
+  // errors carrying a mirrored partialAudioBuffer. Do not discard that objective
+  // playback signal merely because the completion promise rejected.
+  const coverage = audioBytes > 0
+    ? getPlaybackCoverage(metadata, { ...(info || {}), audioBytes }, { playbackDuration: playedMs }, playbackSpeed)
     : null;
   if (suspiciousDuration) state.suspiciousShortOutputs = (Number(state.suspiciousShortOutputs) || 0) + 1;
   if (suspiciousTranscript) state.transcriptCutoffs = (Number(state.transcriptCutoffs) || 0) + 1;
   if (coverage?.suspicious) state.playbackCutoffs = (Number(state.playbackCutoffs) || 0) + 1;
 
-  const genuineFailure = Boolean(triggerError || (error && !error.cancelled));
-  if (playedMs <= replayThresholdMs() && genuineFailure) {
-    return scheduleRecovery(guildId, state, item, triggerError || error, { fullRetry: true });
-  }
-
-  const tail = buildPcmTail(audioBuffer, metadata, playedMs, playbackSpeed);
-  if (tail && (genuineFailure || timedOut || isHardPlaybackCutoff(coverage))) {
-    return scheduleRecovery(guildId, state, item, triggerError || error || new Error('Severe local playback cutoff.'), { replay: tail });
+  // Keep local playback failures distinct from provider-completion failures.
+  // A completion promise can reject after the audio stream already ended cleanly;
+  // that metadata-only failure is not, by itself, proof that speech was cut off.
+  const playbackFailure = Boolean(triggerError);
+  const completionFailure = Boolean(error && !error.cancelled);
+  const hardPlaybackCutoff = isHardPlaybackCutoff(coverage);
+  if (playedMs <= replayThresholdMs() && playbackFailure) {
+    return scheduleRecovery(guildId, state, item, triggerError, { fullRetry: true });
   }
 
   const textTail = buildTranscriptTextTail(item, transcript);
   const actualMs = String(metadata.audioFormat || '').toLowerCase() === 's16le' && audioBytes > 0
     ? getPcmDurationMs(audioBytes, metadata.sampleRate, metadata.channels)
     : 0;
-  const expectedMs = Math.max(1, Number(item.estimatedDurationMs) || estimateSpeechDurationMs(item.text));
+  const expectedMs = Math.max(1, estimateRecoveryDurationMs(item.verificationText || item.text));
   const severeShort = actualMs >= 250 && actualMs < expectedMs * 0.75 && expectedMs - actualMs >= 650;
+  // Strong-short is deliberately much stricter than severeShort. It is never
+  // sufficient on its own for generic recovery; it only corroborates another
+  // independent signal such as a partial transcript or provider failure. The
+  // 58% boundary preserves confirmed ~1.3s/1.1s cutoffs while rejecting normal
+  // fast complete speech that merely beats the duration estimator.
+  const strongShort = actualMs >= 250 && actualMs < expectedMs * 0.58 && expectedMs - actualMs >= 800;
+
+  const tail = buildPcmTail(audioBuffer, metadata, playedMs, playbackSpeed);
+  const pcmTailEvidence = playbackFailure
+    || hardPlaybackCutoff
+    || (timedOut && Boolean(coverage?.suspicious))
+    || (completionFailure && strongShort);
+  if (tail && pcmTailEvidence) {
+    return scheduleRecovery(guildId, state, item, triggerError || error || new Error('Severe local playback cutoff.'), { replay: tail });
+  }
 
   const transcriptTailRecovery = shouldRecoverTranscriptTail({
     suspiciousTranscript,
-    severeShort,
-    genuineFailure,
+    strongShort,
+    playbackFailure,
     timedOut,
     suspiciousDuration,
     playbackSuspicious: Boolean(coverage?.suspicious),
-    hardPlaybackCutoff: isHardPlaybackCutoff(coverage)
+    hardPlaybackCutoff
   });
   if (textTail && suspiciousTranscript && !transcriptTailRecovery) {
     state.suppressedCutoffReplays = (Number(state.suppressedCutoffReplays) || 0) + 1;
@@ -516,7 +556,11 @@ function handleCompletionRecovery(guildId, state, item, generated, playedMs, pla
     return scheduleRecovery(guildId, state, item, triggerError || error || new Error('Truncated completion transcript.'), { replacementText: textTail });
   }
 
-  if (playedMs > replayThresholdMs() && severeShort && (genuineFailure || timedOut || suspiciousDuration || !transcript)) {
+  const regeneratedTailEvidence = hardPlaybackCutoff
+    || (playbackFailure && severeShort)
+    || (timedOut && (strongShort || Boolean(coverage?.suspicious)))
+    || (completionFailure && strongShort);
+  if (playedMs > replayThresholdMs() && severeShort && regeneratedTailEvidence) {
     const heardSourceMs = Math.max(0, Number(playedMs) || 0) * Math.max(1, Number(playbackSpeed) || 1);
     const resumeFraction = Math.max(0.10, Math.min(heardSourceMs / expectedMs, 0.95));
     return scheduleRecovery(guildId, state, item, triggerError || error || new Error('Severely short streamed output.'), { resumeFraction });
@@ -842,6 +886,7 @@ export function enqueue(guildId, text, metadata = {}) {
   const state = getState(guildId);
   const maximum = getMaximumQueuedMessages();
   const incoming = createQueueItem(text, metadata);
+  incoming.recoveryEpoch = Number(state.recoveryEpoch) || 0;
   // During a cold voice handshake the first queued channel owns the pending
   // startup. Reject cross-channel arrivals before provider work begins so the
   // new voice/TTS overlap cannot waste quota on audio that can never play.
@@ -874,6 +919,8 @@ async function runQueue(guildId, state) {
   if (!canRunQueue(state)) return;
   const item = takeNextItem(state);
   if (!item) return;
+  item.runSerial = (Number(state.runSerial) || 0) + 1;
+  state.runSerial = item.runSerial;
   state.running = true;
   state.currentItem = item;
   const queueMs = Math.max(0, performance.now() - item.enqueuedAt);
@@ -1088,6 +1135,9 @@ export function cancelMessageAudio(guildId, messageId) {
 export function clearAudio(guildId) {
   const state = states.get(guildId);
   if (!state) return;
+  // Invalidate post-playback completion observers from the pre-clear queue.
+  // Otherwise a late metadata callback could resurrect audio after /clear.
+  state.recoveryEpoch = (Number(state.recoveryEpoch) || 0) + 1;
   if (state.currentItem) {
     state.currentItem.cancelled = true;
     if (!state.currentItem.abortController.signal.aborted) state.currentItem.abortController.abort(cancelledError('Audio cleared.'));
