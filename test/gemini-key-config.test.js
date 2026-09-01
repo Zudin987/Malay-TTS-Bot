@@ -16,7 +16,7 @@ test('Gemini key config keeps legacy GEMINI_API_KEY as slot 1', () => {
 });
 
 test('Gemini key selection log exposes only the slot number', () => {
-  const secret = 'AIza-this-must-never-appear';
+  const secret = 'never-log-this-key-material';
   const line = formatGeminiApiKeySelectionLog({ slot: 4, key: secret });
   assert.equal(line, '[gemini-key] slot=4');
   assert.equal(line.includes(secret), false);
