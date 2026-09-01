@@ -1,0 +1,68 @@
+name: Fix /ask config normalization
+
+on:
+  push:
+    branches:
+      - feature/ask-command
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: ${{ !contains(github.event.head_commit.message, '[ask-config]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feature/ask-command
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Patch and validate config normalization
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'EOF'
+          const fs = require('fs');
+          const path = 'src/config.js';
+          let source = fs.readFileSync(path, 'utf8');
+
+          const defaultMarker = "  intonation: { enabled: true },\n  geminiText: {";
+          const defaultInsert = `  intonation: { enabled: true },\n  ask: {\n    enabled: true,\n    model: 'gemini-3.1-flash-lite',\n    timeoutMs: 8000,\n    maxQuestionCharacters: 1000,\n    maxOutputTokens: 160,\n    maxAnswerCharacters: 450,\n    temperature: 0.35,\n    thinkingLevel: 'minimal'\n  },\n  geminiText: {`;
+          if (!source.includes(defaultMarker)) throw new Error('ask defaults marker missing');
+          source = source.replace(defaultMarker, defaultInsert);
+
+          const declarationMarker = "  const speakerLabel = isObject(parsed.speakerLabel) ? parsed.speakerLabel : {};\n  const geminiText = isObject(parsed.geminiText) ? parsed.geminiText : {};";
+          const declarationInsert = "  const speakerLabel = isObject(parsed.speakerLabel) ? parsed.speakerLabel : {};\n  const ask = isObject(parsed.ask) ? parsed.ask : {};\n  const geminiText = isObject(parsed.geminiText) ? parsed.geminiText : {};";
+          if (!source.includes(declarationMarker)) throw new Error('ask declaration marker missing');
+          source = source.replace(declarationMarker, declarationInsert);
+
+          const returnMarker = "    voiceLogEnabled: parsed.voiceLogEnabled === true,\n    intonation: { enabled: intonation.enabled !== false },\n    geminiText: {";
+          const returnInsert = `    voiceLogEnabled: parsed.voiceLogEnabled === true,\n    intonation: { enabled: intonation.enabled !== false },\n    ask: {\n      enabled: ask.enabled !== false,\n      model: String(ask.model ?? defaults.ask.model).trim() || defaults.ask.model,\n      timeoutMs: clampInt(ask.timeoutMs, defaults.ask.timeoutMs, 1500, 20_000),\n      maxQuestionCharacters: clampInt(ask.maxQuestionCharacters, defaults.ask.maxQuestionCharacters, 50, 1800),\n      maxOutputTokens: clampInt(ask.maxOutputTokens, defaults.ask.maxOutputTokens, 32, 512),\n      maxAnswerCharacters: clampInt(ask.maxAnswerCharacters, defaults.ask.maxAnswerCharacters, 120, 1500),\n      temperature: clamp(ask.temperature, defaults.ask.temperature, 0, 1.5),\n      thinkingLevel: ['minimal', 'low', 'medium', 'high'].includes(String(ask.thinkingLevel ?? '').trim().toLowerCase())\n        ? String(ask.thinkingLevel).trim().toLowerCase()\n        : defaults.ask.thinkingLevel,\n      systemInstruction: String(ask.systemInstruction ?? '').trim()\n    },\n    geminiText: {`;
+          if (!source.includes(returnMarker)) throw new Error('ask return marker missing');
+          source = source.replace(returnMarker, returnInsert);
+          fs.writeFileSync(path, source);
+
+          const testPath = 'test/ask-command.test.js';
+          let testSource = fs.readFileSync(testPath, 'utf8');
+          testSource += `\n\ntest('config normalization retains the /ask settings block', () => {\n  const source = fs.readFileSync(new URL('../src/config.js', import.meta.url), 'utf8');\n  assert.match(source, /const ask = isObject\\(parsed\\.ask\\)/u);\n  assert.match(source, /model: String\\(ask\\.model/u);\n  assert.match(source, /maxAnswerCharacters: clampInt\\(ask\\.maxAnswerCharacters/u);\n});\n`;
+          fs.writeFileSync(testPath, testSource);
+          EOF
+          npm ci
+          npm test
+          npm audit --audit-level=high
+          node --check src/config.js
+          node --check src/ask.js
+          node --check src/commands.js
+      - name: Commit fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/config.js test/ask-command.test.js
+          git commit -m '[ask-config] Normalize /ask settings'
+          git push origin HEAD:feature/ask-command
