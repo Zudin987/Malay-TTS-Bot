@@ -1,6 +1,7 @@
 import { ChannelType, Client, Collection, Events, GatewayIntentBits, MessageFlags } from 'discord.js';
 import { performance } from 'node:perf_hooks';
 import { cancelMessageAudio, enqueue } from './audio.js';
+import { handleAskStopButton } from './ask-response.js';
 import { commands } from './commands.js';
 import { config } from './config.js';
 import { prepareSpeechVariants } from './preprocess.js';
@@ -21,6 +22,19 @@ client.once(Events.ClientReady, (readyClient) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  if (interaction.isButton()) {
+    try {
+      if (await handleAskStopButton(interaction, cancelMessageAudio)) return;
+    } catch (error) {
+      console.error('[ask-stop-tts]', error);
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({ content: 'Could not stop that TTS item.', flags: MessageFlags.Ephemeral }).catch(() => {});
+      }
+      return;
+    }
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) return;
   if (!interaction.inGuild()) {
     await interaction.reply({ content: 'This bot only accepts commands inside its private Discord server.', flags: MessageFlags.Ephemeral }).catch(() => {});
