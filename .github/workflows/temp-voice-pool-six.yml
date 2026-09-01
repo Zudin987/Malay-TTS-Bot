@@ -24,7 +24,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Apply voice pool and regression test
+      - name: Apply voice pool and regression tests
         shell: bash
         run: |
           set -euo pipefail
@@ -40,19 +40,28 @@ jobs:
           elif new not in text:
               raise SystemExit('Expected Gemini voice pool block not found')
 
+          regression = Path('test/regression.test.js')
+          regression_text = regression.read_text(encoding='utf-8')
+          old_regression = """test('v0.23.5 voice pool is restricted to Charon, Enceladus, Aoede and Despina', () => {\n  assert.deepEqual(gemini.GEMINI_VOICES, ['Charon', 'Enceladus', 'Aoede', 'Despina']);\n  assert.equal(gemini.GEMINI_VOICE_OPTIONS.find((v) => v.name === 'Despina')?.style, 'Smooth');\n});"""
+          new_regression = """test('voice pool is restricted to the approved six Gemini voices', () => {\n  assert.deepEqual(gemini.GEMINI_VOICES, ['Charon', 'Orus', 'Schedar', 'Gacrux', 'Vindemiatrix', 'Despina']);\n  assert.equal(gemini.GEMINI_VOICE_OPTIONS.find((v) => v.name === 'Despina')?.style, 'Smooth');\n  assert.equal(gemini.GEMINI_VOICE_OPTIONS.find((v) => v.name === 'Vindemiatrix')?.style, 'Gentle');\n});"""
+          if old_regression in regression_text:
+              regression.write_text(regression_text.replace(old_regression, new_regression, 1), encoding='utf-8')
+          elif new_regression not in regression_text:
+              raise SystemExit('Expected legacy voice-pool regression block not found')
+
           test = Path('test/voice-pool.test.js')
           test.write_text("""import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { GEMINI_VOICE_OPTIONS, GEMINI_VOICES } from '../src/providers/gemini.js';\n\nconst expected = [\n  { name: 'Charon', gender: 'Male', style: 'Informative' },\n  { name: 'Orus', gender: 'Male', style: 'Firm' },\n  { name: 'Schedar', gender: 'Male', style: 'Even' },\n  { name: 'Gacrux', gender: 'Female', style: 'Mature' },\n  { name: 'Vindemiatrix', gender: 'Female', style: 'Gentle' },\n  { name: 'Despina', gender: 'Female', style: 'Smooth' }\n];\n\ntest('Gemini voice pool is the approved six voices in order', () => {\n  assert.deepEqual(GEMINI_VOICES, expected.map((voice) => voice.name));\n  assert.deepEqual(GEMINI_VOICE_OPTIONS.map((voice) => ({ ...voice })), expected);\n  assert.equal(new Set(GEMINI_VOICES).size, 6);\n});\n""", encoding='utf-8')
           PY
 
           npm test
 
-          if git diff --quiet -- src/providers/gemini.js test/voice-pool.test.js; then
+          if git diff --quiet -- src/providers/gemini.js test/regression.test.js test/voice-pool.test.js; then
             echo 'Voice pool already applied.'
             exit 0
           fi
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/providers/gemini.js test/voice-pool.test.js
+          git add src/providers/gemini.js test/regression.test.js test/voice-pool.test.js
           git commit -m 'Change Gemini voice pool to six selected voices'
           git push origin HEAD:change/voice-pool-six
