@@ -1,0 +1,23 @@
+Malay TTS Bot v0.23.22 — /ask Key Auth Failover
+
+Confirmed reliability fix
+- Fixes /ask five-key round-robin behavior when the selected Gemini credential is invalid, expired, revoked, or disabled.
+- /ask now disables only the credential-bad key slot and immediately retries the next healthy configured Gemini key for the same command.
+- The bad slot stays out of runtime rotation until /restarttts or process restart, matching normal TTS credential handling.
+- Quota/rate-limit failures still do not rotate keys inside one /ask request.
+- Model/project PERMISSION_DENIED failures still do not disable a credential slot or rotate to another key.
+
+Regression coverage
+- Adds deterministic tests for bad-key failover to a healthy slot.
+- Locks quota and permission non-rotation behavior.
+- Locks explicit keyEntry test/injection behavior so it remains single-key and side-effect free.
+
+Audit result
+- Re-audited queue ownership, streaming prefetch, provider cancellation, Gemini Live completion, exact-TTS backpressure handling, Google fallback, STOP TTS, privacy opt-out, speaker-label caching, voice reconnect, persistence, bootstrap/single-instance, shutdown, config clamping, logging, and setup/CI paths.
+- No additional confirmed major correctness bug justified architectural changes in this patch.
+- The normal-message provider order remains Gemini 3.1 Flash Live -> Gemini 2.5 Native Audio Live -> Gemini 3.1 Flash TTS -> Google Malay TTS.
+- /ask remains dedicated Gemini 3.1 Flash TTS -> Google Malay TTS for speech; it is never routed through conversational Live.
+- exactFirstAudioMs remains 1600ms.
+
+Upgrade
+Preserve .env and data\guilds.json. Do not copy runtime caches/logs/locks from an old install. Run setup-clean.cmd after extracting the clean package.
