@@ -14,6 +14,7 @@ import { synthesize } from './tts.js';
 import { settings } from './config.js';
 import { recordTtsMetrics } from './tts-metrics.js';
 import { buildAudioFilters } from './audio-filters.js';
+import { shouldRecoverTranscriptTail } from './recovery-evidence.js';
 import {
   buildSpeakerPreludePcm,
   getSpeakerLabelOptions,
@@ -499,7 +500,19 @@ function handleCompletionRecovery(guildId, state, item, generated, playedMs, pla
   const expectedMs = Math.max(1, Number(item.estimatedDurationMs) || estimateSpeechDurationMs(item.text));
   const severeShort = actualMs >= 250 && actualMs < expectedMs * 0.75 && expectedMs - actualMs >= 650;
 
-  if (textTail && suspiciousTranscript && (Boolean(info) || genuineFailure || (timedOut && severeShort))) {
+  const transcriptTailRecovery = shouldRecoverTranscriptTail({
+    suspiciousTranscript,
+    severeShort,
+    genuineFailure,
+    timedOut,
+    suspiciousDuration,
+    playbackSuspicious: Boolean(coverage?.suspicious),
+    hardPlaybackCutoff: isHardPlaybackCutoff(coverage)
+  });
+  if (textTail && suspiciousTranscript && !transcriptTailRecovery) {
+    state.suppressedCutoffReplays = (Number(state.suppressedCutoffReplays) || 0) + 1;
+  }
+  if (textTail && transcriptTailRecovery) {
     return scheduleRecovery(guildId, state, item, triggerError || error || new Error('Truncated completion transcript.'), { replacementText: textTail });
   }
 
