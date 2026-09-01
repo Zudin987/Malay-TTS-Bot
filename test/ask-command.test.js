@@ -94,3 +94,11 @@ test('quota failure does not retry another key inside /ask', async () => {
   assert.equal(calls, 1);
   assert.equal(describeAskError(new AskError('quota', 'x')), 'Gemini is rate-limited right now. Try again later.');
 });
+
+
+test('config normalization retains the /ask settings block', () => {
+  const source = fs.readFileSync(new URL('../src/config.js', import.meta.url), 'utf8');
+  assert.match(source, /const ask = isObject\(parsed\.ask\)/u);
+  assert.match(source, /model: String\(ask\.model/u);
+  assert.match(source, /maxAnswerCharacters: clampInt\(ask\.maxAnswerCharacters/u);
+});

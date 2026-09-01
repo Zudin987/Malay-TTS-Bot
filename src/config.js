@@ -65,6 +65,16 @@ const defaults = {
   fixedVolume: 0.6,
   voiceLogEnabled: false,
   intonation: { enabled: true },
+  ask: {
+    enabled: true,
+    model: 'gemini-3.1-flash-lite',
+    timeoutMs: 8000,
+    maxQuestionCharacters: 1000,
+    maxOutputTokens: 160,
+    maxAnswerCharacters: 450,
+    temperature: 0.35,
+    thinkingLevel: 'minimal'
+  },
   geminiText: {
     mode: 'light-clean',
     punctuationCapEnabled: true,
@@ -191,6 +201,7 @@ function normalizeSettings(parsed) {
 
   const intonation = isObject(parsed.intonation) ? parsed.intonation : {};
   const speakerLabel = isObject(parsed.speakerLabel) ? parsed.speakerLabel : {};
+  const ask = isObject(parsed.ask) ? parsed.ask : {};
   const geminiText = isObject(parsed.geminiText) ? parsed.geminiText : {};
   const diagnostics = isObject(parsed.diagnostics) ? parsed.diagnostics : {};
   const providerHealth = isObject(parsed.providerHealth) ? parsed.providerHealth : {};
@@ -237,6 +248,19 @@ function normalizeSettings(parsed) {
     fixedVolume: clamp(parsed.fixedVolume, defaults.fixedVolume, 0, 2),
     voiceLogEnabled: parsed.voiceLogEnabled === true,
     intonation: { enabled: intonation.enabled !== false },
+    ask: {
+      enabled: ask.enabled !== false,
+      model: String(ask.model ?? defaults.ask.model).trim() || defaults.ask.model,
+      timeoutMs: clampInt(ask.timeoutMs, defaults.ask.timeoutMs, 1500, 20_000),
+      maxQuestionCharacters: clampInt(ask.maxQuestionCharacters, defaults.ask.maxQuestionCharacters, 50, 1800),
+      maxOutputTokens: clampInt(ask.maxOutputTokens, defaults.ask.maxOutputTokens, 32, 512),
+      maxAnswerCharacters: clampInt(ask.maxAnswerCharacters, defaults.ask.maxAnswerCharacters, 120, 1500),
+      temperature: clamp(ask.temperature, defaults.ask.temperature, 0, 1.5),
+      thinkingLevel: ['minimal', 'low', 'medium', 'high'].includes(String(ask.thinkingLevel ?? '').trim().toLowerCase())
+        ? String(ask.thinkingLevel).trim().toLowerCase()
+        : defaults.ask.thinkingLevel,
+      systemInstruction: String(ask.systemInstruction ?? '').trim()
+    },
     geminiText: {
       mode: 'light-clean',
       punctuationCapEnabled: geminiText.punctuationCapEnabled !== false,
