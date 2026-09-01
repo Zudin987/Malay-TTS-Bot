@@ -4,6 +4,7 @@ import { settings, tempDir } from './config.js';
 import { getOrAssignUserTtsVoice } from './store.js';
 import { synthesizeGemini, GEMINI_VOICES } from './providers/gemini.js';
 import { resetGeminiLiveSessions, synthesizeGeminiLive } from './providers/gemini-live.js';
+import { shouldBypassGeminiLiveForReadAloud } from './live-readaloud-guard.js';
 import { streamGoogleMalay } from './providers/google.js';
 import {
   disableGeminiApiKeySlot,
@@ -600,6 +601,8 @@ export async function synthesize(text, context = {}) {
   const started = performance.now();
   const voice = chooseVoice(context);
   const attempts = [];
+  const bypassLiveForReadAloud = context.skipLive !== true && shouldBypassGeminiLiveForReadAloud(value);
+  const skipLive = context.skipLive === true || bypassLiveForReadAloud;
   const geminiKey = nextGeminiApiKey();
   const requestApiKey = geminiKey?.key ?? null;
   const requestApiKeySlot = geminiKey?.slot ?? null;
@@ -625,7 +628,14 @@ export async function synthesize(text, context = {}) {
   const hasGemini = Boolean(requestApiKey) && !geminiAuthDisabled;
   const health = healthOptions();
 
-  if (requestGeminiUsable && !burstBypass() && settings.geminiLive?.enabled !== false && context.skipLive !== true && Date.now() >= sharedLiveTransportUntil) {
+  if (bypassLiveForReadAloud) {
+    noteSkipped(providerStates.livePrimary);
+    noteSkipped(providerStates.liveFallback);
+    attempts.push({ provider: 'gemini-3.1-live', outcome: 'literal-readaloud-guard', ms: 0 });
+    attempts.push({ provider: 'gemini-2.5-live', outcome: 'literal-readaloud-guard', ms: 0 });
+  }
+
+  if (requestGeminiUsable && !burstBypass() && settings.geminiLive?.enabled !== false && skipLive !== true && Date.now() >= sharedLiveTransportUntil) {
     const rem = remaining();
     const window = Math.min(Number(settings.geminiLive?.firstAudioTimeoutMs) || 3500, health.primaryFirstAudioMs, Math.max(500, rem - (health.fallbackFirstAudioMs + health.exactFirstAudioMs + health.googleReserveMs)));
     let primary = await runAttempt({
@@ -641,7 +651,7 @@ export async function synthesize(text, context = {}) {
     if (primary.error?.runawayLike) sharedLiveTransportUntil = Math.max(sharedLiveTransportUntil, Date.now() + 5000);
   }
 
-  if (requestGeminiUsable && !burstBypass() && !geminiAuthDisabled && settings.geminiLive?.enabled !== false && settings.geminiLive?.fallbackEnabled !== false && context.skipLive !== true && Date.now() >= sharedLiveTransportUntil) {
+  if (requestGeminiUsable && !burstBypass() && !geminiAuthDisabled && settings.geminiLive?.enabled !== false && settings.geminiLive?.fallbackEnabled !== false && skipLive !== true && Date.now() >= sharedLiveTransportUntil) {
     const rem = remaining();
     const window = Math.min(Number(settings.geminiLive?.firstAudioTimeoutMs) || 3500, health.fallbackFirstAudioMs, Math.max(400, rem - (health.exactFirstAudioMs + health.googleReserveMs)));
     let fallbackLive = await runAttempt({
@@ -653,7 +663,7 @@ export async function synthesize(text, context = {}) {
     fallbackLive = await bufferSelected(fallbackLive, 'gemini-2.5-live');
     if (fallbackLive.result) return generatedResult(fallbackLive.result, 'gemini-2.5-live', fallbackLive.elapsed, (fallbackLive.firstAudioAt ?? performance.now()) - started, attempts);
     if (fallbackLive.error?.authLike) requestGeminiUsable = false;
-  } else if (requestGeminiUsable && !burstBypass() && settings.geminiLive?.fallbackEnabled !== false && Date.now() < sharedLiveTransportUntil) {
+  } else if (requestGeminiUsable && !burstBypass() && skipLive !== true && settings.geminiLive?.fallbackEnabled !== false && Date.now() < sharedLiveTransportUntil) {
     noteSkipped(providerStates.liveFallback);
     attempts.push({ provider: 'gemini-2.5-live', outcome: 'shared-transport-skip', ms: 0 });
   }
