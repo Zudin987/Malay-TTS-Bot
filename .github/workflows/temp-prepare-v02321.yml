@@ -1,0 +1,96 @@
+name: Prepare v0.23.21 Live-First Rollback
+
+on:
+  push:
+    branches:
+      - release/v0.23.21-live-first-rollback
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: release/v0.23.21-live-first-rollback
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24.19.0'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Prepare release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm version 0.23.21 --no-git-tag-version
+          node <<'NODE'
+          const fs = require('fs');
+          const setupPath = 'setup-clean.cmd';
+          let setup = fs.readFileSync(setupPath, 'utf8');
+          setup = setup.replace(/Malay TTS Bot clean setup v0\.23\.20/g, 'Malay TTS Bot clean setup v0.23.21');
+          if (!setup.includes('Malay TTS Bot clean setup v0.23.21')) throw new Error('setup banner update failed');
+          fs.writeFileSync(setupPath, setup);
+
+          const maintenancePath = 'MAINTENANCE.md';
+          let maintenance = fs.readFileSync(maintenancePath, 'utf8');
+          maintenance = maintenance.replace(
+            'Current stable baseline: **v0.23.20 — Gemini TTS Repair**.',
+            'Current stable baseline: **v0.23.21 — Live-First Rollback**.'
+          );
+          if (!maintenance.includes('Current stable baseline: **v0.23.21 — Live-First Rollback**.')) throw new Error('maintenance baseline update failed');
+          fs.writeFileSync(maintenancePath, maintenance);
+          NODE
+          cat > RELEASE-v0.23.21.txt <<'EOF'
+          Malay TTS Bot v0.23.21 — Live-First Rollback
+
+          Changes
+          - Reverts only the v0.23.19 normal-chat routing change.
+          - Normal Discord user messages are Gemini Live-first again: Gemini 3.1 Flash Live, Gemini 2.5 Native Audio Live, Gemini 3.1 Flash TTS, then Google Malay TTS fallback.
+          - Keeps /ask on dedicated Gemini 3.1 TTS first with Google Malay TTS fallback, so the displayed /ask answer is not sent back through conversational Live.
+          - Keeps the v0.23.20 Gemini TTS request repair and sanitized HTTP error logging.
+          - Keeps the six-voice pool, queue/recovery/audio settings, STOP TTS behavior, key rotation, and strict Live read-aloud prompt unchanged.
+
+          Trade-off
+          - Restores the lower-latency normal-chat behavior from v0.23.18.
+          - Also restores the known risk that Gemini Live can occasionally interpret prompt-like or question-like normal chat instead of reading it literally.
+
+          Config note
+          - The repository default exactFirstAudioMs remains 1600ms. A local manual 3000ms experiment is not baked into this rollback release.
+          EOF
+      - name: Validate release metadata and routing
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -e "const p=require('./package.json'); if(p.version!=='0.23.21') process.exit(1)"
+          node -e "const p=require('./package-lock.json'); if(p.version!=='0.23.21'||p.packages[''].version!=='0.23.21') process.exit(1)"
+          grep -Fq 'Malay TTS Bot clean setup v0.23.21' setup-clean.cmd
+          grep -Fq 'Current stable baseline: **v0.23.21 — Live-First Rollback**.' MAINTENANCE.md
+          grep -Fq 'return false;' src/live-readaloud-guard.js
+          grep -Fq 'skipLive: true' src/ask-response.js
+          test -f RELEASE-v0.23.21.txt
+      - name: Regression tests
+        run: npm test
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+      - name: JavaScript syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' f; do node --check "$f"; done < <(find . -path ./node_modules -prune -o -name '*.js' -print0)
+      - name: JSON validation
+        run: node -e "for (const f of ['package.json','package-lock.json','config/settings.json']) JSON.parse(require('fs').readFileSync(f,'utf8'))"
+      - name: Commit prepared release branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/temp-prepare-v02321.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package.json package-lock.json setup-clean.cmd MAINTENANCE.md RELEASE-v0.23.21.txt
+          git commit -m 'Release v0.23.21 — Live-First Rollback'
+          git push origin HEAD:release/v0.23.21-live-first-rollback
