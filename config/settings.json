@@ -145,5 +145,15 @@
     "fallbackFirstAudioMs": 1600,
     "exactFirstAudioMs": 1600,
     "googleReserveMs": 1200
+  },
+  "ask": {
+    "enabled": true,
+    "model": "gemini-3.1-flash-lite",
+    "timeoutMs": 8000,
+    "maxQuestionCharacters": 1000,
+    "maxOutputTokens": 160,
+    "maxAnswerCharacters": 450,
+    "temperature": 0.35,
+    "thinkingLevel": "minimal"
   }
 }

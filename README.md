@@ -20,7 +20,7 @@ Provider order:
 3. Gemini 3.1 Flash TTS
 4. Google Malay TTS fallback
 
-The bot is designed to read eligible Discord messages aloud, not answer them. Usernames are spoken separately with Google Malay TTS.
+Normal eligible Discord messages remain strict TTS-only and are not treated as questions for the bot to answer. The explicit `/ask` command is the separate opt-in chat-answer path. Usernames are spoken separately with Google Malay TTS.
 
 ## Speaker name speed
 
@@ -37,6 +37,12 @@ Speaker usernames can be made faster in `config/settings.json` without regenerat
 ```
 
 `speakerLabel.speed` accepts **0.8x through 1.5x**. The default is **1.15x**. `gapMs` is the silence between the spoken username and the message; the default is **75 ms**.
+
+## /ask short chat answers
+
+Use `/ask question:<text>` when you intentionally want an AI answer instead of read-aloud TTS. It uses `gemini-3.1-flash-lite` with minimal thinking and returns one compact public Discord message, normally 1–3 short sentences. It does not request images, embeds, tables, or long article-style output. Bot-authored `/ask` replies are ignored by the normal TTS message handler.
+
+`/ask` uses the existing Gemini key selection and makes only one Gemini request per command. A quota failure does not hop to another key inside the same `/ask` request.
 
 ## Gemini API keys
 
@@ -62,7 +68,7 @@ The round-robin is intended for multiple keys from the same Google Cloud project
 - Messages sent to Gemini/Google are processed by those providers under their applicable terms.
 - `/ttsoptout` is available for users who do not want eligible messages sent to TTS providers.
 
-Useful commands: `/join`, `/leave`, `/speaker`, `/changevoice`, `/name`, `/dictionary`, `/restarttts`, `/status`, `/ttsprivacy`, `/ttsoptout`.
+Useful commands: `/ask`, `/join`, `/leave`, `/speaker`, `/changevoice`, `/name`, `/dictionary`, `/restarttts`, `/status`, `/ttsprivacy`, `/ttsoptout`.
 
 [Maintenance](MAINTENANCE.md) · [Latest release](../../releases/latest)
 
