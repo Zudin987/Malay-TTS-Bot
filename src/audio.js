@@ -476,21 +476,24 @@ function handleCompletionRecovery(guildId, state, item, generated, playedMs, pla
   const transcript = String(info?.transcript ?? error?.transcript ?? generated?.transcript ?? '').trim();
   const suspiciousDuration = String(metadata.audioFormat || '').toLowerCase() === 's16le' && audioBytes > 0 && isSuspiciouslyShortPcm(item, metadata, audioBytes);
   const suspiciousTranscript = isSuspiciousTranscript(item, transcript);
-  const coverage = info && audioBytes > 0
-    ? getPlaybackCoverage(metadata, { ...info, audioBytes }, { playbackDuration: playedMs }, playbackSpeed)
+  // Coverage is useful for both successful completion metadata and provider
+  // errors carrying a mirrored partialAudioBuffer. Do not discard that objective
+  // playback signal merely because the completion promise rejected.
+  const coverage = audioBytes > 0
+    ? getPlaybackCoverage(metadata, { ...(info || {}), audioBytes }, { playbackDuration: playedMs }, playbackSpeed)
     : null;
   if (suspiciousDuration) state.suspiciousShortOutputs = (Number(state.suspiciousShortOutputs) || 0) + 1;
   if (suspiciousTranscript) state.transcriptCutoffs = (Number(state.transcriptCutoffs) || 0) + 1;
   if (coverage?.suspicious) state.playbackCutoffs = (Number(state.playbackCutoffs) || 0) + 1;
 
-  const genuineFailure = Boolean(triggerError || (error && !error.cancelled));
-  if (playedMs <= replayThresholdMs() && genuineFailure) {
-    return scheduleRecovery(guildId, state, item, triggerError || error, { fullRetry: true });
-  }
-
-  const tail = buildPcmTail(audioBuffer, metadata, playedMs, playbackSpeed);
-  if (tail && (genuineFailure || timedOut || isHardPlaybackCutoff(coverage))) {
-    return scheduleRecovery(guildId, state, item, triggerError || error || new Error('Severe local playback cutoff.'), { replay: tail });
+  // Keep local playback failures distinct from provider-completion failures.
+  // A completion promise can reject after the audio stream already ended cleanly;
+  // that metadata-only failure is not, by itself, proof that speech was cut off.
+  const playbackFailure = Boolean(triggerError);
+  const completionFailure = Boolean(error && !error.cancelled);
+  const hardPlaybackCutoff = isHardPlaybackCutoff(coverage);
+  if (playedMs <= replayThresholdMs() && playbackFailure) {
+    return scheduleRecovery(guildId, state, item, triggerError, { fullRetry: true });
   }
 
   const textTail = buildTranscriptTextTail(item, transcript);
@@ -499,15 +502,30 @@ function handleCompletionRecovery(guildId, state, item, generated, playedMs, pla
     : 0;
   const expectedMs = Math.max(1, Number(item.estimatedDurationMs) || estimateSpeechDurationMs(item.text));
   const severeShort = actualMs >= 250 && actualMs < expectedMs * 0.75 && expectedMs - actualMs >= 650;
+  // Strong-short is deliberately much stricter than severeShort. It is never
+  // sufficient on its own for generic recovery; it only corroborates another
+  // independent signal such as a partial transcript or provider failure. The
+  // 58% boundary preserves confirmed ~1.3s/1.1s cutoffs while rejecting normal
+  // fast complete speech that merely beats the duration estimator.
+  const strongShort = actualMs >= 250 && actualMs < expectedMs * 0.58 && expectedMs - actualMs >= 800;
+
+  const tail = buildPcmTail(audioBuffer, metadata, playedMs, playbackSpeed);
+  const pcmTailEvidence = playbackFailure
+    || hardPlaybackCutoff
+    || (timedOut && Boolean(coverage?.suspicious))
+    || (completionFailure && strongShort);
+  if (tail && pcmTailEvidence) {
+    return scheduleRecovery(guildId, state, item, triggerError || error || new Error('Severe local playback cutoff.'), { replay: tail });
+  }
 
   const transcriptTailRecovery = shouldRecoverTranscriptTail({
     suspiciousTranscript,
-    severeShort,
-    genuineFailure,
+    strongShort,
+    playbackFailure,
     timedOut,
     suspiciousDuration,
     playbackSuspicious: Boolean(coverage?.suspicious),
-    hardPlaybackCutoff: isHardPlaybackCutoff(coverage)
+    hardPlaybackCutoff
   });
   if (textTail && suspiciousTranscript && !transcriptTailRecovery) {
     state.suppressedCutoffReplays = (Number(state.suppressedCutoffReplays) || 0) + 1;
@@ -516,7 +534,11 @@ function handleCompletionRecovery(guildId, state, item, generated, playedMs, pla
     return scheduleRecovery(guildId, state, item, triggerError || error || new Error('Truncated completion transcript.'), { replacementText: textTail });
   }
 
-  if (playedMs > replayThresholdMs() && severeShort && (genuineFailure || timedOut || suspiciousDuration || !transcript)) {
+  const regeneratedTailEvidence = hardPlaybackCutoff
+    || (playbackFailure && severeShort)
+    || (timedOut && (strongShort || Boolean(coverage?.suspicious)))
+    || (completionFailure && strongShort);
+  if (playedMs > replayThresholdMs() && severeShort && regeneratedTailEvidence) {
     const heardSourceMs = Math.max(0, Number(playedMs) || 0) * Math.max(1, Number(playbackSpeed) || 1);
     const resumeFraction = Math.max(0.10, Math.min(heardSourceMs / expectedMs, 0.95));
     return scheduleRecovery(guildId, state, item, triggerError || error || new Error('Severely short streamed output.'), { resumeFraction });
