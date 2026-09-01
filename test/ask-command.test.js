@@ -220,8 +220,8 @@ test('/ask queue overflow is rejected without displacing existing audio', async 
 });
 
 test('/ask command posts the embed before detached TTS and normal MessageCreate ignores bot output', () => {
-  const commandsSource = fs.readFileSync(new URL('../src/commands.js', import.meta.url), 'utf8');
-  const indexSource = fs.readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
+  const commandsSource = fs.readFileSync(new URL('../src/commands.js', import.meta.url), 'utf8').replace(/\r\n?/gu, '\n');
+  const indexSource = fs.readFileSync(new URL('../src/index.js', import.meta.url), 'utf8').replace(/\r\n?/gu, '\n');
   const embedReply = commandsSource.indexOf("await interaction.editReply({\n        content: null,\n        embeds: [embed]");
   const detachedTts = commandsSource.indexOf('void queueAskAnswerTts(interaction, answer, askTtsDependencies)');
   assert.ok(embedReply >= 0 && detachedTts > embedReply);
