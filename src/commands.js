@@ -43,6 +43,7 @@ import { getTtsProviderStatus, restartTtsRuntime } from './tts.js';
 import { GEMINI_VOICES, GEMINI_VOICE_OPTIONS } from './providers/gemini.js';
 import { getSpeakerLabelPcm, getSpeakerLabelStatus } from './speaker-label.js';
 import { getFfmpegPath } from './ffmpeg.js';
+import { askGemini, describeAskError, getAskOptions } from './ask.js';
 
 const ephemeral = MessageFlags.Ephemeral;
 function formatMegabytes(bytes) {
@@ -77,6 +78,32 @@ function formatUptime(totalSeconds) {
   return parts.join(' ');
 }
 
+
+const askCommand = {
+  data: new SlashCommandBuilder()
+    .setName('ask')
+    .setDescription('Ask Gemini for a short chat-style answer')
+    .addStringOption((option) =>
+      option
+        .setName('question')
+        .setDescription('What you want to ask')
+        .setRequired(true)
+        .setMinLength(1)
+        .setMaxLength(1000)
+    ),
+
+  async execute(interaction) {
+    const question = interaction.options.getString('question', true);
+    await interaction.deferReply();
+    try {
+      const { answer } = await askGemini(question, { options: getAskOptions(settings.ask) });
+      await interaction.editReply({ content: answer, allowedMentions: { parse: [] } });
+    } catch (error) {
+      console.warn('[ask]', error?.code || error?.name || 'error', error?.status || '');
+      await interaction.editReply({ content: describeAskError(error), allowedMentions: { parse: [] } });
+    }
+  }
+};
 
 const ttsOptOutCommand = {
   data: new SlashCommandBuilder()
@@ -543,6 +570,7 @@ const statusCommand = {
 };
 
 export const commands = [
+  askCommand,
   ttsPrivacyCommand,
   ttsOptOutCommand,
   joinCommand,
