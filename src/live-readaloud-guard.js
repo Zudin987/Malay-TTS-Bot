@@ -1,10 +1,12 @@
-// Runtime policy: every normal Discord message gets Gemini Live first.
+// Fidelity policy: normal Discord chat is user-authored text that must be read
+// literally. Gemini Live is a conversational model and can occasionally treat a
+// question, comparison, or instruction-like sentence as something to answer.
 //
-// `src/tts.js` still honors an explicit context.skipLive flag for internal
-// recovery/fallback work, where replaying a recovered tail through Live could
-// create another conversational or duplicate response. User-authored text itself
-// is never classified by wording, punctuation, question form, or Malay particles.
-// Fidelity is enforced by the strict read-aloud prompt instead of provider routing.
+// Do not classify by wording or punctuation: a phrase such as
+// "windows ke linux bagus" is still conversational even without a question mark.
+// Dedicated Gemini TTS is the safe primary read-aloud provider; Google Malay TTS
+// remains the deterministic fallback. Gemini Live stays available in the codebase
+// for non-read-aloud uses, but normal user text must not be routed through it.
 export function shouldBypassGeminiLiveForReadAloud(_value) {
-  return false;
+  return true;
 }
