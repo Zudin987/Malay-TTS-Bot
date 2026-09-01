@@ -24,7 +24,7 @@ jobs:
       - name: Apply audited fix
         shell: pwsh
         run: |
-          node tools/temp-tighten-recovery-guard.mjs
+          node tools/temp-tighten-recovery-guard-v2.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Validate
         shell: pwsh
