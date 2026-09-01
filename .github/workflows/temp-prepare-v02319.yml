@@ -1,0 +1,86 @@
+name: Prepare v0.23.19
+
+on:
+  push:
+    branches:
+      - release/v0.23.19-strict-normal-tts
+    paths:
+      - .github/workflows/temp-prepare-v02319.yml
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: release/v0.23.19-strict-normal-tts
+          fetch-depth: 1
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Prepare release metadata and validate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          npm version 0.23.19 --no-git-tag-version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $setupPath = 'setup-clean.cmd'
+          $setup = Get-Content $setupPath -Raw
+          if (-not $setup.Contains('clean setup v0.23.18')) { throw 'Expected old setup banner not found.' }
+          $setup = $setup.Replace('clean setup v0.23.18', 'clean setup v0.23.19')
+          Set-Content -LiteralPath $setupPath -Value $setup -NoNewline -Encoding utf8
+
+          $maintenancePath = 'MAINTENANCE.md'
+          $maintenance = Get-Content $maintenancePath -Raw
+          $oldBaseline = 'Current stable baseline: **v0.23.18 — Literal /ask TTS**.'
+          $newBaseline = 'Current stable baseline: **v0.23.19 — Strict Normal TTS**.'
+          if (-not $maintenance.Contains($oldBaseline)) { throw 'Expected old maintenance baseline not found.' }
+          $maintenance = $maintenance.Replace($oldBaseline, $newBaseline)
+          Set-Content -LiteralPath $maintenancePath -Value $maintenance -NoNewline -Encoding utf8
+
+          @'
+          Malay TTS Bot v0.23.19
+
+          Changes
+          - Fixes normal Discord messages sometimes being answered or explained instead of read aloud.
+          - Normal user-authored chat now bypasses conversational Gemini Live completely.
+          - Normal chat uses dedicated Gemini 3.1 TTS first, then Google Malay TTS fallback.
+          - The routing does not rely on question marks or keyword heuristics, so prompt-like text such as "windows ke linux bagus" is still treated as literal speech.
+          - /ask keeps the same strict dedicated-TTS routing introduced in v0.23.18.
+          - Gemini Live remains in the codebase but is no longer used as the default read-aloud provider for user chat.
+
+          Why
+          Gemini Live is conversational and can interpret user text as a request to answer. For a read-aloud bot, literal fidelity is more important than the small latency advantage of Live.
+          '@ | Set-Content -LiteralPath 'RELEASE-v0.23.19.txt' -Encoding utf8
+
+          if ((node -p "require('./package.json').version").Trim() -ne '0.23.19') { throw 'package.json version mismatch.' }
+          $lock = Get-Content package-lock.json -Raw | ConvertFrom-Json -AsHashtable
+          if ($lock.version -ne '0.23.19' -or $lock.packages[''].version -ne '0.23.19') { throw 'package-lock version mismatch.' }
+          if (-not (Select-String -Path setup-clean.cmd -SimpleMatch 'clean setup v0.23.19')) { throw 'setup-clean banner mismatch.' }
+          if (-not (Test-Path RELEASE-v0.23.19.txt)) { throw 'Release note missing.' }
+
+          $guard = Get-Content src/live-readaloud-guard.js -Raw
+          if (-not $guard.Contains('return true;')) { throw 'Strict normal read-aloud guard missing.' }
+          $tests = Get-Content test/readaloud-guards.test.js -Raw
+          foreach ($phrase in @('mushoku tensei dah nak habis kan?', 'malaysia merdeka 31 bulan 8 ke?', 'windows ke linux bagus')) {
+            if (-not $tests.Contains($phrase)) { throw "Reported regression phrase missing: $phrase" }
+          }
+
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm audit --audit-level=high
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          Remove-Item '.github/workflows/temp-prepare-v02319.yml' -Force
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package.json package-lock.json setup-clean.cmd MAINTENANCE.md RELEASE-v0.23.19.txt .github/workflows/temp-prepare-v02319.yml
+          git commit -m 'Prepare v0.23.19 strict normal TTS release'
+          git push origin HEAD:release/v0.23.19-strict-normal-tts
