@@ -1,0 +1,15 @@
+Malay TTS Bot v0.23.21 — Live-First Rollback
+
+Changes
+- Reverts only the v0.23.19 normal-chat routing change.
+- Normal Discord user messages are Gemini Live-first again: Gemini 3.1 Flash Live, Gemini 2.5 Native Audio Live, Gemini 3.1 Flash TTS, then Google Malay TTS fallback.
+- Keeps /ask on dedicated Gemini 3.1 TTS first with Google Malay TTS fallback, so the displayed /ask answer is not sent back through conversational Live.
+- Keeps the v0.23.20 Gemini TTS request repair and sanitized HTTP error logging.
+- Keeps the six-voice pool, queue/recovery/audio settings, STOP TTS behavior, key rotation, and strict Live read-aloud prompt unchanged.
+
+Trade-off
+- Restores the lower-latency normal-chat behavior from v0.23.18.
+- Also restores the known risk that Gemini Live can occasionally interpret prompt-like or question-like normal chat instead of reading it literally.
+
+Config note
+- The repository default exactFirstAudioMs remains 1600ms. A local manual 3000ms experiment is not baked into this rollback release.
