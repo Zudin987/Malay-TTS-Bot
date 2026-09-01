@@ -153,7 +153,7 @@ const defaults = {
     fallbackModel: 'gemini-2.5-flash-native-audio-preview-12-2025',
     maxOutputAudioMs: 45000,
     firstAudioTimeoutMs: 3500,
-    streamIdleTimeoutMs: 2800,
+    streamIdleTimeoutMs: 3500,
     audioEndGraceMs: 650,
     firstAudioBudgetMs: 7000,
     retryCount: 0,
