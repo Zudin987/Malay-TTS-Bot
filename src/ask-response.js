@@ -116,7 +116,12 @@ export function buildAskTtsItem(interaction, answer, voiceChannel, voice) {
       userId: interaction.user.id,
       voice,
       speakerLabel: null,
-      rejectOnOverflow: true
+      rejectOnOverflow: true,
+      // /ask output is already generated text. Do not send it back through the
+      // conversational Live model, which can occasionally answer a question in
+      // the transcript instead of reading it. Use dedicated Gemini TTS first,
+      // then the deterministic Google fallback.
+      skipLive: true
     }
   };
 }
