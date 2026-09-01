@@ -4,7 +4,7 @@
 
 GitHub is the source of truth for development. `main` is stable/released code and `develop` is the active integration branch. Use focused feature/fix branches and pull requests for non-trivial changes.
 
-Current stable baseline: **v0.23.11 — Recovery Evidence & Stale-Tail Hardening**.
+Current stable baseline: **v0.23.12 — Gemini Live-First Read-Aloud**.
 
 ## Priorities
 
