@@ -1,8 +1,17 @@
 import fs from 'node:fs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ChannelType } from 'discord.js';
-import { ASK_ALLOWED_MENTIONS, buildAskEmbed, buildAskTtsItem, queueAskAnswerTts } from '../src/ask-response.js';
+import { ButtonStyle, ChannelType, MessageFlags } from 'discord.js';
+import {
+  ASK_ALLOWED_MENTIONS,
+  buildAskEmbed,
+  buildAskStopButtonId,
+  buildAskStopComponents,
+  buildAskTtsItem,
+  handleAskStopButton,
+  parseAskStopButtonId,
+  queueAskAnswerTts
+} from '../src/ask-response.js';
 import {
   AskError,
   askGemini,
@@ -123,6 +132,59 @@ test('/ask reply disables all Discord mention parsing', () => {
   assert.deepEqual(ASK_ALLOWED_MENTIONS, { parse: [], users: [], roles: [], repliedUser: false });
 });
 
+test('/ask stop button is a red owner-bound STOP TTS control', () => {
+  const customId = buildAskStopButtonId('interaction-7', 'user-1');
+  assert.deepEqual(parseAskStopButtonId(customId), { askInteractionId: 'interaction-7', ownerUserId: 'user-1' });
+  assert.equal(parseAskStopButtonId('something-else'), null);
+
+  const rows = buildAskStopComponents({ id: 'interaction-7', user: { id: 'user-1' } });
+  const json = rows[0].toJSON();
+  assert.equal(json.components.length, 1);
+  assert.equal(json.components[0].custom_id, customId);
+  assert.equal(json.components[0].label, 'STOP TTS');
+  assert.equal(json.components[0].style, ButtonStyle.Danger);
+  assert.equal(json.components[0].disabled, false);
+});
+
+test('/ask stop button cancels only its synthetic message id and disables itself', async () => {
+  const calls = [];
+  const interaction = {
+    customId: buildAskStopButtonId('interaction-8', 'user-1'),
+    guildId: 'guild-1',
+    user: { id: 'user-1' },
+    update: async (payload) => { calls.push(['update', payload]); },
+    reply: async (payload) => { calls.push(['reply', payload]); }
+  };
+  const handled = await handleAskStopButton(interaction, (guildId, messageId) => {
+    calls.push(['cancel', guildId, messageId]);
+    return true;
+  });
+  assert.equal(handled, true);
+  assert.deepEqual(calls[0], ['cancel', 'guild-1', 'ask:interaction-8']);
+  assert.equal(calls[1][0], 'update');
+  const button = calls[1][1].components[0].toJSON().components[0];
+  assert.equal(button.label, 'TTS stopped');
+  assert.equal(button.disabled, true);
+});
+
+test('/ask stop button cannot be used by another member', async () => {
+  let cancelled = false;
+  let reply = null;
+  const handled = await handleAskStopButton({
+    customId: buildAskStopButtonId('interaction-8', 'user-1'),
+    guildId: 'guild-1',
+    user: { id: 'user-2' },
+    reply: async (payload) => { reply = payload; }
+  }, () => {
+    cancelled = true;
+    return true;
+  });
+  assert.equal(handled, true);
+  assert.equal(cancelled, false);
+  assert.match(reply.content, /Only the person who used \/ask/u);
+  assert.equal(reply.flags, MessageFlags.Ephemeral);
+});
+
 test('/ask TTS item contains only the generated answer and a synthetic interaction id', () => {
   const interaction = { id: 'interaction-7', createdTimestamp: 1234, user: { id: 'user-1' } };
   const voiceChannel = { id: 'voice-1' };
@@ -161,6 +223,31 @@ test('/ask TTS queues only the answer in the asker voice channel', async () => {
   assert.equal(calls[0][3].verificationText, 'AI answer only.');
   assert.equal(calls[1][0], 'connect');
   assert.deepEqual(calls[1][2], { allowMove: false });
+});
+
+test('/ask TTS publishes STOP TTS button only after the item is accepted', async () => {
+  const edits = [];
+  const voiceChannel = { id: 'voice-1', type: ChannelType.GuildVoice };
+  const interaction = {
+    id: 'interaction-10', guildId: 'guild-1', guild: {}, createdTimestamp: 1,
+    user: { id: 'user-1' }, member: { voice: { channel: voiceChannel } },
+    editReply: async (payload) => { edits.push(payload); }
+  };
+  const status = await queueAskAnswerTts(interaction, 'answer', {
+    isOptedOut: () => false,
+    getRuntimeVoiceChannelId: () => 'voice-1',
+    getAudioStatus: () => ({ queued: 0, maximumQueued: 10 }),
+    getVoice: () => 'Charon',
+    enqueue: () => 'started',
+    connect: async () => ({ connection: {}, status: 'already-connected' }),
+    cancel: () => false
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(status, 'started');
+  assert.equal(edits.length, 1);
+  const button = edits[0].components[0].toJSON().components[0];
+  assert.equal(button.label, 'STOP TTS');
+  assert.equal(button.style, ButtonStyle.Danger);
 });
 
 test('/ask TTS never moves to another active voice channel', async () => {
@@ -227,6 +314,21 @@ test('/ask command posts the embed before detached TTS and normal MessageCreate 
   assert.ok(embedReply >= 0 && detachedTts > embedReply);
   assert.match(commandsSource, /allowedMentions: ASK_ALLOWED_MENTIONS/u);
   assert.match(indexSource, /message\.author\.bot \|\| message\.webhookId/u);
+});
+
+test('/ask STOP TTS routing targets one message and preserves the rest of the queue', () => {
+  const indexSource = fs.readFileSync(new URL('../src/index.js', import.meta.url), 'utf8').replace(/\r\n?/gu, '\n');
+  const audioSource = fs.readFileSync(new URL('../src/audio.js', import.meta.url), 'utf8').replace(/\r\n?/gu, '\n');
+  assert.match(indexSource, /interaction\.isButton\(\)/u);
+  assert.match(indexSource, /handleAskStopButton\(interaction, cancelMessageAudio\)/u);
+
+  const start = audioSource.indexOf('export function cancelMessageAudio');
+  const end = audioSource.indexOf('export function clearAudio', start);
+  assert.ok(start >= 0 && end > start);
+  const cancelBlock = audioSource.slice(start, end);
+  assert.match(cancelBlock, /state\.player\.stop\(true\)/u);
+  assert.doesNotMatch(cancelBlock, /queue\.length\s*=\s*0/u);
+  assert.match(audioSource, /state\.currentItem = null; state\.running = false;\n    if \(!state\.disposed\) void runQueue\(guildId, state\);/u);
 });
 
 test('/ask limits align with Discord embed field limits and include ellipsis inside the cap', () => {
