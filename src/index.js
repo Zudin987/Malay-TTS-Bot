@@ -18,7 +18,7 @@ let fatalExiting = false;
 
 client.once(Events.ClientReady, (readyClient) => {
   console.log(`Logged in as ${readyClient.user.tag}`);
-  console.log('Gemini TTS ready with Google Malay fallback. Fresh one-turn Live sessions; message combining disabled.');
+  console.log('Gemini TTS configured with Google Malay fallback. Fresh one-turn Live sessions; message combining disabled.');
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
