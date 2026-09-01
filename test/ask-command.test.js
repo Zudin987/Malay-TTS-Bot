@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { ChannelType } from 'discord.js';
+import { ASK_ALLOWED_MENTIONS, buildAskEmbed, buildAskTtsItem, queueAskAnswerTts } from '../src/ask-response.js';
 import {
   AskError,
   askGemini,
@@ -101,4 +103,137 @@ test('config normalization retains the /ask settings block', () => {
   assert.match(source, /const ask = isObject\(parsed\.ask\)/u);
   assert.match(source, /model: String\(ask\.model/u);
   assert.match(source, /maxAnswerCharacters: clampInt\(ask\.maxAnswerCharacters/u);
+});
+
+
+test('/ask embed uses display name, exact question, and exact generated answer', () => {
+  const interaction = {
+    member: { displayName: 'MrEz' },
+    user: { username: 'fallback-user' }
+  };
+  const embed = buildAskEmbed(interaction, 'apa beza ram dengan storage?', 'RAM sementara. Storage kekal.').toJSON();
+  assert.equal(embed.title, 'MrEz ask');
+  assert.deepEqual(embed.fields, [
+    { name: 'Question', value: 'apa beza ram dengan storage?', inline: false },
+    { name: 'AI reply', value: 'RAM sementara. Storage kekal.', inline: false }
+  ]);
+});
+
+test('/ask reply disables all Discord mention parsing', () => {
+  assert.deepEqual(ASK_ALLOWED_MENTIONS, { parse: [], users: [], roles: [], repliedUser: false });
+});
+
+test('/ask TTS item contains only the generated answer and a synthetic interaction id', () => {
+  const interaction = { id: 'interaction-7', createdTimestamp: 1234, user: { id: 'user-1' } };
+  const voiceChannel = { id: 'voice-1' };
+  const item = buildAskTtsItem(interaction, 'Jawapan sahaja.', voiceChannel, 'Charon');
+  assert.equal(item.text, 'Jawapan sahaja.');
+  assert.equal(item.metadata.messageId, 'ask:interaction-7');
+  assert.equal(item.metadata.googleText, 'Jawapan sahaja.');
+  assert.equal(item.metadata.verificationText, 'Jawapan sahaja.');
+  assert.equal(item.metadata.speakerLabel, null);
+  assert.equal(item.metadata.rejectOnOverflow, true);
+  assert.equal('question' in item.metadata, false);
+  assert.equal('isRecovery' in item.metadata, false);
+});
+
+test('/ask TTS queues only the answer in the asker voice channel', async () => {
+  const calls = [];
+  const voiceChannel = { id: 'voice-1', type: ChannelType.GuildVoice };
+  const interaction = {
+    id: 'interaction-8', guildId: 'guild-1', guild: { id: 'guild-1' },
+    createdTimestamp: 5678, user: { id: 'user-1' }, member: { voice: { channel: voiceChannel } }
+  };
+  const status = await queueAskAnswerTts(interaction, 'AI answer only.', {
+    isOptedOut: () => false,
+    getRuntimeVoiceChannelId: () => 'voice-1',
+    getAudioStatus: () => ({ queued: 0, maximumQueued: 10 }),
+    getVoice: () => 'Charon',
+    enqueue: (guildId, text, metadata) => { calls.push(['enqueue', guildId, text, metadata]); return 'started'; },
+    connect: async (_guild, channel, options) => { calls.push(['connect', channel.id, options]); return { connection: {}, status: 'already-connected' }; },
+    cancel: () => { throw new Error('cancel should not be called'); }
+  });
+  assert.equal(status, 'started');
+  assert.equal(calls[0][0], 'enqueue');
+  assert.equal(calls[0][2], 'AI answer only.');
+  assert.equal(calls[0][3].voiceChannelId, 'voice-1');
+  assert.equal(calls[0][3].googleText, 'AI answer only.');
+  assert.equal(calls[0][3].verificationText, 'AI answer only.');
+  assert.equal(calls[1][0], 'connect');
+  assert.deepEqual(calls[1][2], { allowMove: false });
+});
+
+test('/ask TTS never moves to another active voice channel', async () => {
+  let touched = false;
+  const status = await queueAskAnswerTts({
+    id: 'i', guildId: 'g', guild: {}, user: { id: 'u' },
+    member: { voice: { channel: { id: 'voice-b', type: ChannelType.GuildVoice } } }
+  }, 'answer', {
+    isOptedOut: () => false,
+    getRuntimeVoiceChannelId: () => 'voice-a',
+    getAudioStatus: () => ({ queued: 0, maximumQueued: 10 }),
+    getVoice: () => 'Charon',
+    enqueue: () => { touched = true; },
+    connect: async () => { touched = true; },
+    cancel: () => { touched = true; }
+  });
+  assert.equal(status, 'other-channel');
+  assert.equal(touched, false);
+});
+
+test('/ask text response remains independent when voice connection fails', async () => {
+  const cancelled = [];
+  const voiceChannel = { id: 'voice-1', type: ChannelType.GuildVoice };
+  const interaction = {
+    id: 'interaction-9', guildId: 'guild-1', guild: {}, user: { id: 'user-1' },
+    member: { voice: { channel: voiceChannel } }
+  };
+  const status = await queueAskAnswerTts(interaction, 'Still visible in the embed.', {
+    isOptedOut: () => false,
+    getRuntimeVoiceChannelId: () => null,
+    getAudioStatus: () => ({ queued: 0, maximumQueued: 10 }),
+    getVoice: () => 'Charon',
+    enqueue: () => 'prefetching-for-voice',
+    connect: async () => ({ connection: null, status: 'voice-unavailable' }),
+    cancel: (guildId, messageId) => cancelled.push([guildId, messageId])
+  });
+  assert.equal(status, 'voice-unavailable');
+  assert.deepEqual(cancelled, [['guild-1', 'ask:interaction-9']]);
+});
+
+test('/ask queue overflow is rejected without displacing existing audio', async () => {
+  let touched = false;
+  const status = await queueAskAnswerTts({
+    id: 'i', guildId: 'g', guild: {}, user: { id: 'u' },
+    member: { voice: { channel: { id: 'v', type: ChannelType.GuildVoice } } }
+  }, 'answer', {
+    isOptedOut: () => false,
+    getRuntimeVoiceChannelId: () => 'v',
+    getAudioStatus: () => ({ queued: 10, maximumQueued: 10 }),
+    getVoice: () => 'Charon',
+    enqueue: () => { touched = true; },
+    connect: async () => { touched = true; },
+    cancel: () => { touched = true; }
+  });
+  assert.equal(status, 'queue-full');
+  assert.equal(touched, false);
+});
+
+test('/ask command posts the embed before detached TTS and normal MessageCreate ignores bot output', () => {
+  const commandsSource = fs.readFileSync(new URL('../src/commands.js', import.meta.url), 'utf8');
+  const indexSource = fs.readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
+  const embedReply = commandsSource.indexOf("await interaction.editReply({\n        content: null,\n        embeds: [embed]");
+  const detachedTts = commandsSource.indexOf('void queueAskAnswerTts(interaction, answer, askTtsDependencies)');
+  assert.ok(embedReply >= 0 && detachedTts > embedReply);
+  assert.match(commandsSource, /allowedMentions: ASK_ALLOWED_MENTIONS/u);
+  assert.match(indexSource, /message\.author\.bot \|\| message\.webhookId/u);
+});
+
+test('/ask limits align with Discord embed field limits and include ellipsis inside the cap', () => {
+  const limited = getAskOptions({ maxQuestionCharacters: 1800, maxAnswerCharacters: 1500 });
+  assert.equal(limited.maxQuestionCharacters, 1000);
+  assert.equal(limited.maxAnswerCharacters, 1024);
+  const compact = compactAskAnswer('A'.repeat(1400), 1024);
+  assert.ok(Array.from(compact).length <= 1024);
+  assert.match(compact, /…$/u);
 });

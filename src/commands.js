@@ -33,17 +33,18 @@ import {
 } from './voice.js';
 
 import { getLastSettingsError, loadSettings, settings } from './config.js';
-import { cancelUserAudio, getAudioStatus } from './audio.js';
+import { cancelMessageAudio, cancelUserAudio, enqueue, getAudioStatus } from './audio.js';
 import { getPeakLimiterOptions } from './audio-filters.js';
 import { getAcronymSize } from './acronyms.js';
 import { getMalayDictionarySize } from './malay-dictionary.js';
 import { getGameDictionarySize } from './game-dictionary.js';
 import { getTtsMetrics } from './tts-metrics.js';
-import { getTtsProviderStatus, restartTtsRuntime } from './tts.js';
+import { getOrAssignTtsVoice, getTtsProviderStatus, restartTtsRuntime } from './tts.js';
 import { GEMINI_VOICES, GEMINI_VOICE_OPTIONS } from './providers/gemini.js';
 import { getSpeakerLabelPcm, getSpeakerLabelStatus } from './speaker-label.js';
 import { getFfmpegPath } from './ffmpeg.js';
 import { askGemini, describeAskError, getAskOptions } from './ask.js';
+import { ASK_ALLOWED_MENTIONS, buildAskEmbed, queueAskAnswerTts } from './ask-response.js';
 
 const ephemeral = MessageFlags.Ephemeral;
 function formatMegabytes(bytes) {
@@ -79,6 +80,16 @@ function formatUptime(totalSeconds) {
 }
 
 
+const askTtsDependencies = {
+  isOptedOut: isUserTtsOptedOut,
+  getRuntimeVoiceChannelId,
+  getAudioStatus,
+  getVoice: getOrAssignTtsVoice,
+  connect: connectToVoiceChannel,
+  enqueue,
+  cancel: cancelMessageAudio
+};
+
 const askCommand = {
   data: new SlashCommandBuilder()
     .setName('ask')
@@ -97,10 +108,22 @@ const askCommand = {
     await interaction.deferReply();
     try {
       const { answer } = await askGemini(question, { options: getAskOptions(settings.ask) });
-      await interaction.editReply({ content: answer, allowedMentions: { parse: [] } });
+      const embed = buildAskEmbed(interaction, question, answer);
+      await interaction.editReply({
+        content: null,
+        embeds: [embed],
+        allowedMentions: ASK_ALLOWED_MENTIONS
+      });
+      void queueAskAnswerTts(interaction, answer, askTtsDependencies).catch((error) => {
+        console.warn('[ask-tts]', error?.message || error);
+      });
     } catch (error) {
       console.warn('[ask]', error?.code || error?.name || 'error', error?.status || '');
-      await interaction.editReply({ content: describeAskError(error), allowedMentions: { parse: [] } });
+      await interaction.editReply({
+        content: describeAskError(error),
+        embeds: [],
+        allowedMentions: ASK_ALLOWED_MENTIONS
+      });
     }
   }
 };

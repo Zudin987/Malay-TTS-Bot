@@ -40,9 +40,11 @@ Speaker usernames can be made faster in `config/settings.json` without regenerat
 
 ## /ask short chat answers
 
-Use `/ask question:<text>` when you intentionally want an AI answer instead of read-aloud TTS. It uses `gemini-3.1-flash-lite` with minimal thinking and returns one compact public Discord message, normally 1–3 short sentences. It does not request images, embeds, tables, or long article-style output. Bot-authored `/ask` replies are ignored by the normal TTS message handler.
+Use `/ask question:<text>` when you intentionally want an AI answer. It uses `gemini-3.1-flash-lite` with minimal thinking and returns one compact public Discord embed, normally 1–3 short sentences. The embed title is `<display name> ask` and contains **Question** and **AI reply** fields. The model itself still cannot request images, embeds, tables, or long article-style output.
 
-`/ask` uses the existing Gemini key selection and makes only one Gemini request per command. A quota failure does not hop to another key inside the same `/ask` request.
+After the embed is posted, the same AI reply is also queued through the normal TTS provider chain when the asker is in the active normal voice channel. Only the AI answer is spoken: not the username, title, question, or field labels. `/ttsoptout`, voice-channel ownership, queue limits, and normal Live-first read-aloud safeguards still apply. TTS failure never removes the already-posted answer. Bot-authored `/ask` replies are ignored by the normal MessageCreate TTS handler.
+
+`/ask` uses the existing Gemini key selection and makes only one text-generation request per command. A quota failure does not hop to another key inside the same `/ask` request; speaking the resulting answer uses the normal TTS provider chain.
 
 ## Gemini API keys
 

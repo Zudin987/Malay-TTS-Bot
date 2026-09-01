@@ -42,9 +42,9 @@ export function getAskOptions(source = undefined) {
     enabled: raw.enabled !== false,
     model: String(raw.model || DEFAULT_MODEL).trim() || DEFAULT_MODEL,
     timeoutMs: clamp(finiteNumber(raw.timeoutMs, 8000), 1500, 20000),
-    maxQuestionCharacters: Math.floor(clamp(finiteNumber(raw.maxQuestionCharacters, 1000), 50, 1800)),
+    maxQuestionCharacters: Math.floor(clamp(finiteNumber(raw.maxQuestionCharacters, 1000), 50, 1000)),
     maxOutputTokens: Math.floor(clamp(finiteNumber(raw.maxOutputTokens, 160), 32, 512)),
-    maxAnswerCharacters: Math.floor(clamp(finiteNumber(raw.maxAnswerCharacters, 450), 120, 1500)),
+    maxAnswerCharacters: Math.floor(clamp(finiteNumber(raw.maxAnswerCharacters, 450), 120, 1024)),
     temperature: clamp(finiteNumber(raw.temperature, 0.35), 0, 1.5),
     thinkingLevel: ['minimal', 'low', 'medium', 'high'].includes(String(raw.thinkingLevel || '').toLowerCase())
       ? String(raw.thinkingLevel).toLowerCase()
@@ -54,7 +54,7 @@ export function getAskOptions(source = undefined) {
 }
 
 export function compactAskAnswer(value, maxCharacters = 450) {
-  const limit = Math.floor(clamp(finiteNumber(maxCharacters, 450), 120, 1500));
+  const limit = Math.floor(clamp(finiteNumber(maxCharacters, 450), 120, 1024));
   let text = String(value ?? '')
     .replace(/!\[[^\]]*\]\([^)]*\)/gu, '')
     .replace(/^\s{0,3}#{1,6}\s*/gmu, '')
@@ -78,7 +78,8 @@ export function compactAskAnswer(value, maxCharacters = 450) {
   }
   if (cut < 1) cut = limit;
   text = preview.slice(0, cut).trimEnd();
-  return `${text}…`;
+  const body = Array.from(text).slice(0, Math.max(1, limit - 1)).join('').trimEnd();
+  return `${body}…`;
 }
 
 export function buildAskRequest(question, options = getAskOptions()) {
