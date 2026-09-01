@@ -113,6 +113,8 @@ function createQueueItem(text, metadata = {}) {
     replayChannels: Number(metadata.replayChannels) || 1,
     resumeFraction: Math.max(0, Math.min(Number(metadata.resumeFraction) || 0, 0.98)),
     recoveryScheduled: false,
+    recoveryEpoch: Math.max(0, Number(metadata.recoveryEpoch) || 0),
+    runSerial: Math.max(0, Number(metadata.runSerial) || 0),
     generationMode: null
   };
 }
@@ -127,7 +129,8 @@ function getState(guildId) {
     streamingPrefetches: 0, cutoffRecoveries: 0, cutoffRecoverySuccesses: 0,
     cutoffRecoveryFailures: 0, suspiciousShortOutputs: 0, transcriptCutoffs: 0,
     playbackCutoffs: 0, mirrorReplays: 0, suppressedCutoffReplays: 0,
-    completionGraceTimeouts: 0, pipelineFailures: 0, lastSpeakerAnnouncement: null
+    completionGraceTimeouts: 0, pipelineFailures: 0, lastSpeakerAnnouncement: null,
+    recoveryEpoch: 0, runSerial: 0
   };
   player.on('error', (error) => console.error(`[player:${guildId}]`, error));
   states.set(guildId, state);
@@ -448,6 +451,7 @@ function scheduleRecovery(guildId, state, item, error, { replay = null, fullRetr
     googleText: replacementText ? recoveryText : item.googleText,
     verificationText: recoveryText, forceBuffered: true,
     recoveryAttempt: item.recoveryAttempt + 1, isRecovery: true,
+    recoveryEpoch: item.recoveryEpoch,
     skipLive: regeneratedTail ? true : fullRetry ? Boolean(item.skipLive || String(error?.provider || '').includes('live')) : true,
     replayAudioBuffer: replay?.audioBuffer || null, replayAudioFormat: replay?.audioFormat || null,
     replayMimeType: replay?.mimeType || null, replaySampleRate: replay?.sampleRate || 24_000,
@@ -465,6 +469,12 @@ function scheduleRecovery(guildId, state, item, error, { replay = null, fullRetr
 
 function handleCompletionRecovery(guildId, state, item, generated, playedMs, playbackSpeed, { info = null, error = null, timedOut = false, triggerError = null } = {}) {
   if (!item || item.cancelled || state.disposed || item.recoveryScheduled) return false;
+  const staleEpoch = Number(item.recoveryEpoch ?? 0) !== Number(state.recoveryEpoch ?? item.recoveryEpoch ?? 0);
+  const staleSerial = Number(item.runSerial || 0) > 0 && Number(state.runSerial || 0) > Number(item.runSerial || 0);
+  if (staleEpoch || staleSerial) {
+    state.suppressedCutoffReplays = (Number(state.suppressedCutoffReplays) || 0) + 1;
+    return false;
+  }
   const metadata = {
     ...generated,
     audioFormat: error?.audioFormat || generated?.audioFormat,
@@ -864,6 +874,7 @@ export function enqueue(guildId, text, metadata = {}) {
   const state = getState(guildId);
   const maximum = getMaximumQueuedMessages();
   const incoming = createQueueItem(text, metadata);
+  incoming.recoveryEpoch = Number(state.recoveryEpoch) || 0;
   // During a cold voice handshake the first queued channel owns the pending
   // startup. Reject cross-channel arrivals before provider work begins so the
   // new voice/TTS overlap cannot waste quota on audio that can never play.
@@ -896,6 +907,8 @@ async function runQueue(guildId, state) {
   if (!canRunQueue(state)) return;
   const item = takeNextItem(state);
   if (!item) return;
+  item.runSerial = (Number(state.runSerial) || 0) + 1;
+  state.runSerial = item.runSerial;
   state.running = true;
   state.currentItem = item;
   const queueMs = Math.max(0, performance.now() - item.enqueuedAt);
@@ -1110,6 +1123,9 @@ export function cancelMessageAudio(guildId, messageId) {
 export function clearAudio(guildId) {
   const state = states.get(guildId);
   if (!state) return;
+  // Invalidate post-playback completion observers from the pre-clear queue.
+  // Otherwise a late metadata callback could resurrect audio after /clear.
+  state.recoveryEpoch = (Number(state.recoveryEpoch) || 0) + 1;
   if (state.currentItem) {
     state.currentItem.cancelled = true;
     if (!state.currentItem.abortController.signal.aborted) state.currentItem.abortController.abort(cancelledError('Audio cleared.'));
