@@ -1,0 +1,10 @@
+Malay TTS Bot v0.23.17
+
+Changes
+- Replaces the four-voice Gemini pool with six selected voices: Charon, Orus, Schedar, Gacrux, Vindemiatrix, and Despina.
+- /changevoice now exposes those six voices with their style labels: informative, firm, even, mature, gentle, and smooth.
+- Existing Charon and Despina assignments remain valid. Saved Enceladus or Aoede assignments are automatically reassigned by the existing least-used current-voice logic.
+- Keeps provider order, round-robin API-key rotation, queue/fallback logic, /ask STOP TTS, latency settings, and strict lexical read-aloud behavior unchanged.
+
+Why
+Expand the curated voice selection while preserving the existing TTS architecture, latency behavior, and no-extra-words fidelity rules.

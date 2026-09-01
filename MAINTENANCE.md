@@ -4,7 +4,7 @@
 
 GitHub is the source of truth for development. `main` is stable/released code and `develop` is the active integration branch. Use focused feature/fix branches and pull requests for non-trivial changes.
 
-Current stable baseline: **v0.23.13 — Concise /ask Chat**.
+Current stable baseline: **v0.23.17 — Six-Voice Pool**.
 
 ## Priorities
 
@@ -41,10 +41,12 @@ Provider health may temporarily bypass known-bad/quota-limited providers, but re
 
 Gemini voice pool:
 
-- Charon
-- Enceladus
-- Aoede
-- Despina
+- Charon — Male · Informative
+- Orus — Male · Firm
+- Schedar — Male · Even
+- Gacrux — Female · Mature
+- Vindemiatrix — Female · Gentle
+- Despina — Female · Smooth
 
 Speaker username must **not** be included in Gemini message text. The speaker label is generated separately with Google Malay TTS, cached locally, played first, then the configured short gap, then the user's Gemini message.
 
