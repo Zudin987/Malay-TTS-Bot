@@ -1,0 +1,55 @@
+name: Apply six-voice pool
+
+on:
+  push:
+    branches:
+      - change/voice-pool-six
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: change/voice-pool-six
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Apply voice pool and regression test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/providers/gemini.js')
+          text = path.read_text(encoding='utf-8')
+          old = """export const GEMINI_VOICE_OPTIONS = Object.freeze([\n  Object.freeze({ name: 'Charon', gender: 'Male', style: 'Informative' }),\n  Object.freeze({ name: 'Enceladus', gender: 'Male', style: 'Breathy' }),\n  Object.freeze({ name: 'Aoede', gender: 'Female', style: 'Breezy' }),\n  Object.freeze({ name: 'Despina', gender: 'Female', style: 'Smooth' })\n]);"""
+          new = """export const GEMINI_VOICE_OPTIONS = Object.freeze([\n  Object.freeze({ name: 'Charon', gender: 'Male', style: 'Informative' }),\n  Object.freeze({ name: 'Orus', gender: 'Male', style: 'Firm' }),\n  Object.freeze({ name: 'Schedar', gender: 'Male', style: 'Even' }),\n  Object.freeze({ name: 'Gacrux', gender: 'Female', style: 'Mature' }),\n  Object.freeze({ name: 'Vindemiatrix', gender: 'Female', style: 'Gentle' }),\n  Object.freeze({ name: 'Despina', gender: 'Female', style: 'Smooth' })\n]);"""
+          if old in text:
+              path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          elif new not in text:
+              raise SystemExit('Expected Gemini voice pool block not found')
+
+          test = Path('test/voice-pool.test.js')
+          test.write_text("""import test from 'node:test';\nimport assert from 'node:assert/strict';\n\nimport { GEMINI_VOICE_OPTIONS, GEMINI_VOICES } from '../src/providers/gemini.js';\n\nconst expected = [\n  { name: 'Charon', gender: 'Male', style: 'Informative' },\n  { name: 'Orus', gender: 'Male', style: 'Firm' },\n  { name: 'Schedar', gender: 'Male', style: 'Even' },\n  { name: 'Gacrux', gender: 'Female', style: 'Mature' },\n  { name: 'Vindemiatrix', gender: 'Female', style: 'Gentle' },\n  { name: 'Despina', gender: 'Female', style: 'Smooth' }\n];\n\ntest('Gemini voice pool is the approved six voices in order', () => {\n  assert.deepEqual(GEMINI_VOICES, expected.map((voice) => voice.name));\n  assert.deepEqual(GEMINI_VOICE_OPTIONS.map((voice) => ({ ...voice })), expected);\n  assert.equal(new Set(GEMINI_VOICES).size, 6);\n});\n""", encoding='utf-8')
+          PY
+
+          npm test
+
+          if git diff --quiet -- src/providers/gemini.js test/voice-pool.test.js; then
+            echo 'Voice pool already applied.'
+            exit 0
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/providers/gemini.js test/voice-pool.test.js
+          git commit -m 'Change Gemini voice pool to six selected voices'
+          git push origin HEAD:change/voice-pool-six
