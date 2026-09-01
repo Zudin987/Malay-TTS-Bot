@@ -1,6 +1,6 @@
 {
   "name": "malay-tts-bot",
-  "version": "0.23.12",
+  "version": "0.23.13",
   "private": true,
   "description": "Lean private Discord Malaysian Malay TTS bot with latency-first adaptive Gemini/Google failover, quota-aware circuit breakers, four curated voices, strict one-turn Live sessions, streaming FIFO prefetch and cached speaker labels.",
   "type": "module",
