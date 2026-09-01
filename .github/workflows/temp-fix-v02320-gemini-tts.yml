@@ -66,6 +66,14 @@ jobs:
           if old not in s:
               raise SystemExit('startup log anchor not found')
           p.write_text(s.replace(old, new, 1))
+
+          p = Path('test/regression.test.js')
+          s = p.read_text()
+          old = """  assert.ok(body.system_instruction.includes('SPEECH_TEXT_START_'));\n  assert.ok(body.input.includes('ujian panjang'));\n"""
+          new = """  assert.equal(body.system_instruction, undefined);\n  assert.ok(body.input.includes('SPEECH_TEXT_START_'));\n  assert.ok(body.input.includes('ujian panjang'));\n"""
+          if old not in s:
+              raise SystemExit('old exact-TTS request-shape regression anchor not found')
+          p.write_text(s.replace(old, new, 1))
           PY
 
           cat > test/gemini-tts-request.test.js <<'EOF'
@@ -145,7 +153,7 @@ jobs:
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/providers/gemini.js src/index.js test/gemini-tts-request.test.js
+          git add src/providers/gemini.js src/index.js test/regression.test.js test/gemini-tts-request.test.js
           git commit -m 'Repair Gemini 3.1 TTS request and error diagnostics'
           git rm .github/workflows/temp-fix-v02320-gemini-tts.yml
           git commit -m 'Remove temporary Gemini TTS repair workflow'
