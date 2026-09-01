@@ -1,0 +1,43 @@
+name: Temp apply read-aloud hotfix
+
+on:
+  push:
+    branches:
+      - fix/live-question-and-false-tail
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-test:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fix/live-question-and-false-tail
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Apply permanent fix
+        shell: pwsh
+        run: node tools/temp-fix-readaloud-guard.mjs
+      - name: Validate
+        shell: pwsh
+        run: |
+          npm ci
+          npm test
+          npm audit --audit-level=high
+          node --check src/audio.js
+          node --check src/tts.js
+          node --check src/live-readaloud-guard.js
+          node --check src/recovery-evidence.js
+      - name: Commit permanent files
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/audio.js src/tts.js src/live-readaloud-guard.js src/recovery-evidence.js test/readaloud-guards.test.js
+          git commit -m "Fix Live question answering and false tail replay"
+          git push origin HEAD:fix/live-question-and-false-tail
