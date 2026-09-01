@@ -93,10 +93,19 @@ export function createGeminiApiKeyRoundRobin(env = process.env) {
   };
 }
 
+export function formatGeminiApiKeySelectionLog(entry) {
+  const slot = Number(entry?.slot);
+  if (!Number.isInteger(slot) || slot < 1 || slot > MAX_GEMINI_API_KEYS) return null;
+  return `[gemini-key] slot=${slot}`;
+}
+
 const runtimeRoundRobin = createGeminiApiKeyRoundRobin(process.env);
 
 export function nextGeminiApiKey() {
-  return runtimeRoundRobin.next();
+  const entry = runtimeRoundRobin.next();
+  const line = formatGeminiApiKeySelectionLog(entry);
+  if (line) console.log(line);
+  return entry;
 }
 
 export function disableGeminiApiKeySlot(slot) {
