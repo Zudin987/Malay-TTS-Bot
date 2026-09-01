@@ -744,9 +744,10 @@ test('prelude/setup failure aborts overlapped provider work that was never hande
 });
 
 
-test('v0.23.5 voice pool is restricted to Charon, Enceladus, Aoede and Despina', () => {
-  assert.deepEqual(gemini.GEMINI_VOICES, ['Charon', 'Enceladus', 'Aoede', 'Despina']);
+test('voice pool is restricted to the approved six Gemini voices', () => {
+  assert.deepEqual(gemini.GEMINI_VOICES, ['Charon', 'Orus', 'Schedar', 'Gacrux', 'Vindemiatrix', 'Despina']);
   assert.equal(gemini.GEMINI_VOICE_OPTIONS.find((v) => v.name === 'Despina')?.style, 'Smooth');
+  assert.equal(gemini.GEMINI_VOICE_OPTIONS.find((v) => v.name === 'Vindemiatrix')?.style, 'Gentle');
 });
 
 test('Gemini HTTP classification keeps generic 403 model-specific and 401 globally auth-like', () => {
