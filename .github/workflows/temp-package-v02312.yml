@@ -1,0 +1,194 @@
+name: Package and Release v0.23.12 Clean
+
+on:
+  push:
+    branches:
+      - package/v0.23.12
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: b2cc7c947c3e0333d70eed774dca1bf85628923e
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Validate exact stable source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sha = (git rev-parse HEAD).Trim()
+          if ($sha -ne 'b2cc7c947c3e0333d70eed774dca1bf85628923e') { throw "Unexpected source SHA: $sha" }
+          if ((node -p "require('./package.json').version").Trim() -ne '0.23.12') { throw 'package.json is not v0.23.12' }
+          $lock = Get-Content package-lock.json -Raw | ConvertFrom-Json -AsHashtable
+          if ($lock.version -ne '0.23.12' -or $lock.packages[''].version -ne '0.23.12') { throw 'package-lock version mismatch.' }
+          if (-not (Select-String -Path setup-clean.cmd -SimpleMatch 'clean setup v0.23.12')) { throw 'setup-clean banner mismatch.' }
+          if (-not (Test-Path RELEASE-v0.23.12.txt)) { throw 'v0.23.12 release note missing.' }
+
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm audit --audit-level=high
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          Get-ChildItem -Recurse -Filter *.js |
+            Where-Object { $_.FullName -notmatch '[\\/]node_modules[\\/]' } |
+            ForEach-Object {
+              node --check $_.FullName
+              if ($LASTEXITCODE -ne 0) { throw "Syntax failed: $($_.FullName)" }
+            }
+          $jsonFiles = @('package.json','package-lock.json') + @(Get-ChildItem config -Filter *.json | ForEach-Object FullName)
+          foreach ($file in $jsonFiles) { Get-Content $file -Raw | ConvertFrom-Json -AsHashtable | Out-Null }
+
+      - name: FFmpeg and libopus probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $probe = Join-Path $env:RUNNER_TEMP 'malay-tts-probe.ogg'
+          ffmpeg -hide_banner -loglevel error -f lavfi -i 'sine=frequency=440:duration=0.20' -af 'volume=0.600,alimiter=limit=0.562341:attack=1.0:release=60.0:level=false' -c:a libopus -f ogg -y $probe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ffmpeg -hide_banner -loglevel error -i $probe -f null -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build clean package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $env:RUNNER_TEMP 'Malay-TTS-Bot-v0.23.12-Clean'
+          $zip = Join-Path $env:RUNNER_TEMP 'Malay-TTS-Bot-v0.23.12-Clean.zip'
+          Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item $zip -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $stage | Out-Null
+
+          $files = git ls-files
+          foreach ($file in $files) {
+            if ($file -like '.github/*') { continue }
+            if ($file -eq '.gitignore') { continue }
+            if ($file -like 'RELEASE-v*.txt' -and $file -ne 'RELEASE-v0.23.12.txt') { continue }
+            if ($file -like 'data/*' -and $file -ne 'data/.gitkeep') { continue }
+            $dest = Join-Path $stage $file
+            $parent = Split-Path $dest -Parent
+            if ($parent) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+            Copy-Item -LiteralPath $file -Destination $dest -Force
+          }
+
+          $runtimeRoot = Join-Path $stage 'runtime'
+          New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
+          $nodeZip = Join-Path $env:RUNNER_TEMP 'node-v24.19.0-win-x64.zip'
+          Invoke-WebRequest -Uri 'https://nodejs.org/dist/v24.19.0/node-v24.19.0-win-x64.zip' -OutFile $nodeZip
+          Expand-Archive -LiteralPath $nodeZip -DestinationPath $runtimeRoot -Force
+          $nodeDir = Join-Path $runtimeRoot 'node-v24.19.0-win-x64'
+          if (-not (Test-Path (Join-Path $nodeDir 'node.exe'))) { throw 'Portable Node executable missing.' }
+          if ((& (Join-Path $nodeDir 'node.exe') --version).Trim() -ne 'v24.19.0') { throw 'Portable Node version mismatch.' }
+
+          $forbidden = @('.env','data/guilds.json','data/guilds.json.bak','data/bot.lock','data/stop.request','data/speaker-label-cache','bot.log','bot-old.log','node_modules','.git','.github','temp')
+          foreach ($item in $forbidden) { if (Test-Path (Join-Path $stage $item)) { throw "Forbidden package item exists: $item" } }
+          foreach ($required in @('src/audio.js','src/live-readaloud-guard.js','src/recovery-evidence.js','src/gemini-speech-text.js','RELEASE-v0.23.12.txt','config/settings.json','setup-clean.cmd')) {
+            if (-not (Test-Path (Join-Path $stage $required))) { throw "Required package file missing: $required" }
+          }
+          $releaseFiles = @(Get-ChildItem $stage -Filter 'RELEASE-v*.txt')
+          if ($releaseFiles.Count -ne 1 -or $releaseFiles[0].Name -ne 'RELEASE-v0.23.12.txt') { throw 'Unexpected release-note set in clean package.' }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+          if (-not (Test-Path $zip)) { throw 'Clean ZIP was not created.' }
+
+      - name: Re-extract and validate actual ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'Malay-TTS-Bot-v0.23.12-Clean.zip'
+          $verify = Join-Path $env:RUNNER_TEMP 'verify-v0.23.12'
+          Remove-Item $verify -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $verify | Out-Null
+          Expand-Archive -LiteralPath $zip -DestinationPath $verify -Force
+
+          $nodeDir = Join-Path $verify 'runtime/node-v24.19.0-win-x64'
+          $node = Join-Path $nodeDir 'node.exe'
+          $npmCli = Join-Path $nodeDir 'node_modules/npm/bin/npm-cli.js'
+          if ((& $node --version).Trim() -ne 'v24.19.0') { throw 'Extracted portable Node version mismatch.' }
+
+          Push-Location $verify
+          try {
+            & $node $npmCli ci
+            if ($LASTEXITCODE -ne 0) { throw "Extracted npm ci failed: $LASTEXITCODE" }
+            & $node $npmCli test
+            if ($LASTEXITCODE -ne 0) { throw "Extracted test suite failed: $LASTEXITCODE" }
+            & $node $npmCli audit --audit-level=high
+            if ($LASTEXITCODE -ne 0) { throw "Extracted npm audit failed: $LASTEXITCODE" }
+
+            Get-ChildItem -Recurse -Filter *.js |
+              Where-Object { $_.FullName -notmatch '[\\/]node_modules[\\/]' -and $_.FullName -notmatch '[\\/]runtime[\\/]' } |
+              ForEach-Object {
+                & $node --check $_.FullName
+                if ($LASTEXITCODE -ne 0) { throw "Extracted syntax failed: $($_.FullName)" }
+              }
+            $jsonFiles = @('package.json','package-lock.json') + @(Get-ChildItem config -Filter *.json | ForEach-Object FullName)
+            foreach ($file in $jsonFiles) { Get-Content $file -Raw | ConvertFrom-Json -AsHashtable | Out-Null }
+
+            $pkg = Get-Content package.json -Raw | ConvertFrom-Json -AsHashtable
+            $lock = Get-Content package-lock.json -Raw | ConvertFrom-Json -AsHashtable
+            if ($pkg.version -ne '0.23.12') { throw "Extracted package version mismatch: $($pkg.version)" }
+            if ($lock.version -ne '0.23.12' -or $lock.packages[''].version -ne '0.23.12') { throw 'Extracted lockfile version mismatch.' }
+            if (-not (Select-String -Path setup-clean.cmd -SimpleMatch 'clean setup v0.23.12')) { throw 'Extracted setup banner mismatch.' }
+
+            $guard = Get-Content src/live-readaloud-guard.js -Raw
+            if (-not $guard.Contains('return false;')) { throw 'Live-first user-text policy missing.' }
+            $recovery = Get-Content src/recovery-evidence.js -Raw
+            if (-not $recovery.Contains('shouldRecoverTranscriptTail')) { throw 'Recovery evidence guard missing.' }
+            $audio = Get-Content src/audio.js -Raw
+            if (-not $audio.Contains('recoveryEpoch') -or -not $audio.Contains('runSerial')) { throw 'v0.23.11 stale-recovery barriers missing.' }
+          } finally { Pop-Location }
+
+          Remove-Item (Join-Path $verify 'node_modules') -Recurse -Force -ErrorAction SilentlyContinue
+          $forbidden = @('.env','data/guilds.json','data/guilds.json.bak','data/bot.lock','data/stop.request','data/speaker-label-cache','bot.log','bot-old.log','node_modules','.git','.github','temp')
+          foreach ($item in $forbidden) { if (Test-Path (Join-Path $verify $item)) { throw "Forbidden extracted package item exists: $item" } }
+          $releaseFiles = @(Get-ChildItem $verify -Filter 'RELEASE-v*.txt')
+          if ($releaseFiles.Count -ne 1 -or $releaseFiles[0].Name -ne 'RELEASE-v0.23.12.txt') { throw 'Unexpected extracted release-note set.' }
+
+      - name: Create checksum
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'Malay-TTS-Bot-v0.23.12-Clean.zip'
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksum = Join-Path $env:RUNNER_TEMP 'Malay-TTS-Bot-v0.23.12-Clean.sha256.txt'
+          Set-Content -LiteralPath $checksum -Value "$hash  Malay-TTS-Bot-v0.23.12-Clean.zip" -Encoding ascii
+          Write-Host "ZIP_BYTES=$((Get-Item $zip).Length)"
+          Write-Host "SHA256=$hash"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Malay-TTS-Bot-v0.23.12-Clean
+          path: |
+            ${{ runner.temp }}/Malay-TTS-Bot-v0.23.12-Clean.zip
+            ${{ runner.temp }}/Malay-TTS-Bot-v0.23.12-Clean.sha256.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (gh release view v0.23.12 --repo Zudin987/Malay-TTS-Bot *> $null) { throw 'v0.23.12 release already exists; refusing to overwrite it.' }
+          $zip = Join-Path $env:RUNNER_TEMP 'Malay-TTS-Bot-v0.23.12-Clean.zip'
+          $checksum = Join-Path $env:RUNNER_TEMP 'Malay-TTS-Bot-v0.23.12-Clean.sha256.txt'
+          gh release create v0.23.12 $zip $checksum --repo Zudin987/Malay-TTS-Bot --target b2cc7c947c3e0333d70eed774dca1bf85628923e --title 'Malay TTS Bot v0.23.12 — Gemini Live-First Read-Aloud' --notes-file RELEASE-v0.23.12.txt --latest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh release view v0.23.12 --repo Zudin987/Malay-TTS-Bot --json url,tagName,name
