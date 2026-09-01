@@ -1,4 +1,8 @@
-import { nextGeminiApiKey } from './gemini-key-config.js';
+import {
+  disableGeminiApiKeySlot,
+  getGeminiApiKeyRoundRobinStatus,
+  nextGeminiApiKey
+} from './gemini-key-config.js';
 
 const API_ROOT = 'https://generativelanguage.googleapis.com/v1beta/models';
 const DEFAULT_MODEL = 'gemini-3.1-flash-lite';
@@ -27,12 +31,13 @@ function trimCodePoints(value, maxCharacters) {
 }
 
 export class AskError extends Error {
-  constructor(code, message, { status = null, apiStatus = null } = {}) {
+  constructor(code, message, { status = null, apiStatus = null, keyAuthLike = false } = {}) {
     super(message);
     this.name = 'AskError';
     this.code = code;
     this.status = status;
     this.apiStatus = apiStatus;
+    this.keyAuthLike = Boolean(keyAuthLike);
   }
 }
 
@@ -111,8 +116,11 @@ function apiFailure(status, payload) {
   if (status === 429 || /RESOURCE_EXHAUSTED|quota|rate.?limit/iu.test(haystack)) {
     return new AskError('quota', 'Gemini is rate-limited right now.', { status, apiStatus });
   }
-  if (status === 401 || status === 403 || /UNAUTHENTICATED|PERMISSION_DENIED/iu.test(haystack)) {
-    return new AskError('auth', 'Gemini /ask is not available right now.', { status, apiStatus });
+  const keyAuthLike = status === 401
+    || apiStatus === 'UNAUTHENTICATED'
+    || /api.?key.{0,50}(invalid|expired|revoked|disabled)|invalid.{0,30}api.?key/iu.test(haystack);
+  if (keyAuthLike || status === 403 || /PERMISSION_DENIED/iu.test(haystack)) {
+    return new AskError('auth', 'Gemini /ask is not available right now.', { status, apiStatus, keyAuthLike });
   }
   return new AskError('api', `Gemini /ask returned HTTP ${status}.`, { status, apiStatus });
 }
@@ -128,47 +136,79 @@ export function describeAskError(error) {
   return 'Gemini /ask failed. Try again.';
 }
 
+function runtimeKeyManager() {
+  return {
+    next: nextGeminiApiKey,
+    disable: disableGeminiApiKeySlot,
+    status: getGeminiApiKeyRoundRobinStatus
+  };
+}
+
 export async function askGemini(question, {
   fetchImpl = globalThis.fetch,
   keyEntry = null,
+  keyManager = null,
   options = getAskOptions()
 } = {}) {
   if (!options.enabled) throw new AskError('disabled', '/ask is disabled.');
   if (typeof fetchImpl !== 'function') throw new AskError('api', 'Fetch is unavailable.');
-  const selectedKey = keyEntry ?? nextGeminiApiKey();
+
+  const manager = keyManager ?? runtimeKeyManager();
+  const automaticSelection = keyEntry == null;
+  let selectedKey = keyEntry ?? manager.next();
   if (!selectedKey?.key) throw new AskError('no-key', 'No Gemini API key is configured.');
+  const availableAtStart = automaticSelection
+    ? Math.max(1, Number(manager.status?.()?.availableCount) || 1)
+    : 1;
+  let credentialAttempts = 0;
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), options.timeoutMs);
-  timer.unref?.();
-  let response;
-  try {
-    response = await fetchImpl(`${API_ROOT}/${encodeURIComponent(options.model)}:generateContent`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': selectedKey.key,
-        'x-goog-api-client': 'malay-tts-bot/ask'
-      },
-      body: JSON.stringify(buildAskRequest(question, options)),
-      signal: controller.signal
-    });
-  } catch (error) {
-    if (controller.signal.aborted || error?.name === 'AbortError') {
-      throw new AskError('timeout', `Gemini /ask timed out after ${options.timeoutMs}ms.`);
+  while (selectedKey?.key) {
+    credentialAttempts += 1;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+    timer.unref?.();
+    let response;
+    try {
+      response = await fetchImpl(`${API_ROOT}/${encodeURIComponent(options.model)}:generateContent`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': selectedKey.key,
+          'x-goog-api-client': 'malay-tts-bot/ask'
+        },
+        body: JSON.stringify(buildAskRequest(question, options)),
+        signal: controller.signal
+      });
+    } catch (error) {
+      if (controller.signal.aborted || error?.name === 'AbortError') {
+        throw new AskError('timeout', `Gemini /ask timed out after ${options.timeoutMs}ms.`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
     }
-    throw error;
-  } finally {
-    clearTimeout(timer);
+
+    let payload = null;
+    try { payload = await response.json(); } catch {}
+    if (!response.ok) {
+      const failure = apiFailure(response.status, payload);
+      if (automaticSelection && failure.keyAuthLike && selectedKey.slot != null && credentialAttempts < availableAtStart) {
+        const status = manager.disable(selectedKey.slot);
+        if (Number(status?.availableCount) > 0) {
+          selectedKey = manager.next();
+          if (selectedKey?.key) continue;
+        }
+      }
+      throw failure;
+    }
+
+    const answer = compactAskAnswer(responseText(payload), options.maxAnswerCharacters);
+    if (!answer) {
+      const blocked = payload?.promptFeedback?.blockReason || payload?.candidates?.[0]?.finishReason === 'SAFETY';
+      throw new AskError(blocked ? 'blocked' : 'api', blocked ? 'Gemini blocked the request.' : 'Gemini returned no text.');
+    }
+    return { answer, model: options.model, keySlot: selectedKey.slot ?? null };
   }
 
-  let payload = null;
-  try { payload = await response.json(); } catch {}
-  if (!response.ok) throw apiFailure(response.status, payload);
-  const answer = compactAskAnswer(responseText(payload), options.maxAnswerCharacters);
-  if (!answer) {
-    const blocked = payload?.promptFeedback?.blockReason || payload?.candidates?.[0]?.finishReason === 'SAFETY';
-    throw new AskError(blocked ? 'blocked' : 'api', blocked ? 'Gemini blocked the request.' : 'Gemini returned no text.');
-  }
-  return { answer, model: options.model, keySlot: selectedKey.slot ?? null };
+  throw new AskError('no-key', 'No Gemini API key is configured.');
 }
