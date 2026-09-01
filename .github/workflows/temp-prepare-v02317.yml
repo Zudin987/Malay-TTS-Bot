@@ -47,8 +47,9 @@ jobs:
           $newBaseline = 'Current stable baseline: **v0.23.17 — Six-Voice Pool**.'
           if (-not $maintenance.Contains($oldBaseline)) { throw 'Expected old maintenance baseline not found.' }
           $maintenance = $maintenance.Replace($oldBaseline, $newBaseline)
-          $oldVoices = "- Charon`n- Enceladus`n- Aoede`n- Despina"
-          $newVoices = "- Charon — Male · Informative`n- Orus — Male · Firm`n- Schedar — Male · Even`n- Gacrux — Female · Mature`n- Vindemiatrix — Female · Gentle`n- Despina — Female · Smooth"
+          $nl = if ($maintenance.Contains("`r`n")) { "`r`n" } else { "`n" }
+          $oldVoices = @('- Charon','- Enceladus','- Aoede','- Despina') -join $nl
+          $newVoices = @('- Charon — Male · Informative','- Orus — Male · Firm','- Schedar — Male · Even','- Gacrux — Female · Mature','- Vindemiatrix — Female · Gentle','- Despina — Female · Smooth') -join $nl
           if (-not $maintenance.Contains($oldVoices)) { throw 'Expected old maintenance voice pool not found.' }
           $maintenance = $maintenance.Replace($oldVoices, $newVoices)
           Set-Content -LiteralPath $maintenancePath -Value $maintenance -NoNewline -Encoding utf8
