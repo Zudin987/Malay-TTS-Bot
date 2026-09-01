@@ -2,7 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { shouldBypassGeminiLiveForReadAloud } from '../src/live-readaloud-guard.js';
 import { shouldRecoverTranscriptTail } from '../src/recovery-evidence.js';
-import { __test as audioTest } from '../src/audio.js';
+
+// audio.js imports the normal runtime config, which intentionally requires the
+// Discord credentials to exist. These values are test-only placeholders and are
+// set before dynamically importing audio.js so CI never needs real credentials.
+process.env.DISCORD_TOKEN ||= 'test-discord-token';
+process.env.DISCORD_CLIENT_ID ||= '123456789012345678';
+const { __test: audioTest } = await import('../src/audio.js');
 
 test('question and assistant-like Discord text bypasses conversational Gemini Live', () => {
   assert.equal(shouldBypassGeminiLiveForReadAloud('cer live sikit bertemu angin?'), true);
