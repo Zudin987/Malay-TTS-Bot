@@ -1,0 +1,54 @@
+name: Prepare v0.23.16
+
+on:
+  push:
+    branches:
+      - release/v0.23.16-midstream-timeout
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: release/v0.23.16-midstream-timeout
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Apply focused release changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm version 0.23.16 --no-git-tag-version
+          node <<'NODE'
+          const fs = require('fs');
+
+          function replaceExact(path, from, to, expected = 1) {
+            const before = fs.readFileSync(path, 'utf8');
+            const count = before.split(from).length - 1;
+            if (count !== expected) throw new Error(`${path}: expected ${expected} occurrence(s) of ${from}, found ${count}`);
+            fs.writeFileSync(path, before.replaceAll(from, to));
+          }
+
+          replaceExact('config/settings.json', '"streamIdleTimeoutMs": 2800', '"streamIdleTimeoutMs": 3500');
+          replaceExact('src/config.js', 'streamIdleTimeoutMs: 2800,', 'streamIdleTimeoutMs: 3500,');
+
+          if (fs.existsSync('setup-clean.cmd')) {
+            const before = fs.readFileSync('setup-clean.cmd', 'utf8');
+            fs.writeFileSync('setup-clean.cmd', before.replaceAll('v0.23.15', 'v0.23.16'));
+          }
+
+          fs.writeFileSync('test/live-midstream-timeout.test.js', `import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport fs from 'node:fs';\n\nconst settings = JSON.parse(fs.readFileSync(new URL('../config/settings.json', import.meta.url), 'utf8'));\nconst configSource = fs.readFileSync(new URL('../src/config.js', import.meta.url), 'utf8');\n\ntest('Gemini Live midstream idle timeout is 3500ms without changing exact TTS timeout', () => {\n  assert.equal(settings.geminiLive.streamIdleTimeoutMs, 3500);\n  assert.equal(settings.geminiTts.streamIdleTimeoutMs, 2500);\n  assert.match(configSource, /geminiLive:[\\s\\S]*?streamIdleTimeoutMs: 3500,/);\n  assert.match(configSource, /geminiTts:[\\s\\S]*?streamIdleTimeoutMs: 2500,/);\n});\n`);
+
+          fs.writeFileSync('RELEASE-v0.23.16.txt', `Malay TTS Bot v0.23.16\n\nChanges\n- Raises Gemini Live midstream idle timeout from 2800ms to 3500ms.\n- Keeps first-audio budgets, provider order, Google reserve, queue logic, round-robin key rotation, FFmpeg settings, and retry counts unchanged.\n- Includes the gentle natural intonation profile already merged after v0.23.15: mild prosody/emotion only, with strict lexical fidelity and no added words, fillers, interjections, laughter, sighs, sound effects, or other unwritten vocal content.\n- Retains the /ask STOP TTS button and safe [gemini-key] slot=N debug logging from v0.23.15.\n\nWhy\nRuntime logs showed repeated Gemini 3.1 Live midstream stalls hitting the previous 2800ms watchdog. 3500ms gives the stream 700ms more recovery time before fallback while keeping the watchdog relatively aggressive.\n`);
+          NODE
+          git rm .github/workflows/temp-prepare-v02316.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json config/settings.json src/config.js setup-clean.cmd test/live-midstream-timeout.test.js RELEASE-v0.23.16.txt
+          git commit -m "Release v0.23.16 midstream timeout tuning"
+          git push origin HEAD:release/v0.23.16-midstream-timeout
