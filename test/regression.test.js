@@ -310,7 +310,8 @@ test('Gemini exact TTS first-audio timeout does not become a whole-stream cutoff
   const body = JSON.parse(captured.body);
   assert.equal(body.store, false);
   assert.equal(body.stream, true);
-  assert.ok(body.system_instruction.includes('SPEECH_TEXT_START_'));
+  assert.equal(body.system_instruction, undefined);
+  assert.ok(body.input.includes('SPEECH_TEXT_START_'));
   assert.ok(body.input.includes('ujian panjang'));
   assert.equal(captured.headers['Api-Revision'], '2026-05-20');
 });
