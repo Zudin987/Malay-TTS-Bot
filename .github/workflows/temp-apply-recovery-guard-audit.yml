@@ -1,0 +1,51 @@
+name: Temp apply recovery guard audit
+
+on:
+  push:
+    branches:
+      - fix/recovery-evidence-and-live-guard
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-test:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fix/recovery-evidence-and-live-guard
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - name: Apply audited fix
+        shell: pwsh
+        run: |
+          node tools/temp-tighten-recovery-guard.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Validate
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm audit --audit-level=high
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --check src/audio.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --check src/live-readaloud-guard.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --check src/recovery-evidence.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Commit permanent fix
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/audio.js src/live-readaloud-guard.js src/recovery-evidence.js test/readaloud-guards.test.js
+          git commit -m "Tighten recovery evidence and Live literal guard"
+          git push origin HEAD:fix/recovery-evidence-and-live-guard
