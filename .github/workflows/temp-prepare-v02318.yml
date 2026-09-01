@@ -1,0 +1,82 @@
+name: Prepare v0.23.18
+
+on:
+  push:
+    branches:
+      - release/v0.23.18-ask-literal-tts
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: release/v0.23.18-ask-literal-tts
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Prepare release metadata and validate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          npm version 0.23.18 --no-git-tag-version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $setupPath = 'setup-clean.cmd'
+          $setup = Get-Content $setupPath -Raw
+          if (-not $setup.Contains('clean setup v0.23.17')) { throw 'Expected old setup banner not found.' }
+          $setup = $setup.Replace('clean setup v0.23.17', 'clean setup v0.23.18')
+          Set-Content -LiteralPath $setupPath -Value $setup -NoNewline -Encoding utf8
+
+          $maintenancePath = 'MAINTENANCE.md'
+          $maintenance = Get-Content $maintenancePath -Raw
+          $oldBaseline = 'Current stable baseline: **v0.23.17 — Six-Voice Pool**.'
+          $newBaseline = 'Current stable baseline: **v0.23.18 — Literal /ask TTS**.'
+          if (-not $maintenance.Contains($oldBaseline)) { throw 'Expected old maintenance baseline not found.' }
+          $maintenance = $maintenance.Replace($oldBaseline, $newBaseline)
+          Set-Content -LiteralPath $maintenancePath -Value $maintenance -NoNewline -Encoding utf8
+
+          @'
+          Malay TTS Bot v0.23.18
+
+          Changes
+          - Fixes a rare /ask mismatch where Gemini Live could interpret the displayed AI reply as conversational input and speak a different answer.
+          - /ask speech now skips Gemini Live and uses the dedicated Gemini 3.1 TTS model first, with Google Malay TTS as fallback.
+          - The exact displayed AI reply remains the only text queued for /ask speech and verification.
+          - Normal Discord message TTS remains Live-first with the existing provider order and latency behavior.
+          - STOP TTS behavior is unchanged. Discord does not expose pixel-level ActionRow/button alignment, so the small visual offset relative to the embed remains client-controlled.
+
+          Why
+          Generated /ask text is already final content. Sending it back through a conversational Live model can occasionally cause semantic interpretation instead of literal read-aloud. Dedicated TTS is the safer path for exact spoken parity with the embed.
+          '@ | Set-Content -LiteralPath 'RELEASE-v0.23.18.txt' -Encoding utf8
+
+          if ((node -p "require('./package.json').version").Trim() -ne '0.23.18') { throw 'package.json version mismatch.' }
+          $lock = Get-Content package-lock.json -Raw | ConvertFrom-Json -AsHashtable
+          if ($lock.version -ne '0.23.18' -or $lock.packages[''].version -ne '0.23.18') { throw 'package-lock version mismatch.' }
+          if (-not (Select-String -Path setup-clean.cmd -SimpleMatch 'clean setup v0.23.18')) { throw 'setup-clean banner mismatch.' }
+          if (-not (Test-Path RELEASE-v0.23.18.txt)) { throw 'Release note missing.' }
+
+          $askResponse = Get-Content src/ask-response.js -Raw
+          if (-not $askResponse.Contains('skipLive: true')) { throw '/ask literal-TTS guard missing.' }
+          if (-not (Test-Path test/ask-literal-tts.test.js)) { throw '/ask literal-TTS regression test missing.' }
+
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm audit --audit-level=high
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          Remove-Item '.github/workflows/temp-prepare-v02318.yml' -Force
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package.json package-lock.json setup-clean.cmd MAINTENANCE.md RELEASE-v0.23.18.txt .github/workflows/temp-prepare-v02318.yml
+          git commit -m 'Prepare v0.23.18 literal ask TTS release'
+          git push origin HEAD:release/v0.23.18-ask-literal-tts
