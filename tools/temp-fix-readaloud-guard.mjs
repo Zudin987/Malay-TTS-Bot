@@ -40,12 +40,17 @@ replaceOnce(
   `  const voice = chooseVoice(context);\n  const attempts = [];\n  const bypassLiveForReadAloud = context.skipLive !== true && shouldBypassGeminiLiveForReadAloud(value);\n  const skipLive = context.skipLive === true || bypassLiveForReadAloud;\n`
 );
 
-let tts = readNormalized('src/tts.js');
-const liveCondition = "context.skipLive !== true";
-const occurrences = tts.split(liveCondition).length - 1;
-if (occurrences !== 2) throw new Error(`Expected 2 Live condition occurrences, got ${occurrences}`);
-tts = tts.split(liveCondition).join("skipLive !== true");
-fs.writeFileSync('src/tts.js', tts);
+replaceOnce(
+  'src/tts.js',
+  `  if (requestGeminiUsable && !burstBypass() && settings.geminiLive?.enabled !== false && context.skipLive !== true && Date.now() >= sharedLiveTransportUntil) {\n`,
+  `  if (requestGeminiUsable && !burstBypass() && settings.geminiLive?.enabled !== false && skipLive !== true && Date.now() >= sharedLiveTransportUntil) {\n`
+);
+
+replaceOnce(
+  'src/tts.js',
+  `  if (requestGeminiUsable && !burstBypass() && !geminiAuthDisabled && settings.geminiLive?.enabled !== false && settings.geminiLive?.fallbackEnabled !== false && context.skipLive !== true && Date.now() >= sharedLiveTransportUntil) {\n`,
+  `  if (requestGeminiUsable && !burstBypass() && !geminiAuthDisabled && settings.geminiLive?.enabled !== false && settings.geminiLive?.fallbackEnabled !== false && skipLive !== true && Date.now() >= sharedLiveTransportUntil) {\n`
+);
 
 replaceOnce(
   'src/tts.js',
