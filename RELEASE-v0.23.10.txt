@@ -1,0 +1,15 @@
+Malay TTS Bot v0.23.10 — Read-Aloud Guard & Recovery Fidelity
+
+Main fixes
+- Prevent Gemini Live from answering question-like Discord messages. Text containing a question mark or strongly assistant-like wording bypasses conversational Live and goes to exact Gemini TTS when healthy, otherwise Google Malay TTS.
+- Prevent false duplicate tail playback when Gemini Live speaks the full message but returns only a partial output transcription. Transcript evidence alone can no longer queue a Google text-tail replay.
+- Keep real cutoff recovery: a partial transcript can still recover the missing suffix when independent short-audio, playback-cutoff, timeout, or provider-failure evidence confirms a genuine truncation.
+
+Regression coverage
+- Exact reported case: "cer live sikit bertemu angin?" with a partial Live transcript must not replay "sikit bertemu angin?" after full audio.
+- Question/assistant-like messages bypass Gemini Live.
+- Confirmed short audio still schedules the missing text tail.
+- Existing cutoff, speaker-label, provider-health, prompt-fidelity and setup regressions remain covered.
+
+Upgrade
+Preserve only .env and data\guilds.json from the existing installation. Use the new config\settings.json defaults from this release.
