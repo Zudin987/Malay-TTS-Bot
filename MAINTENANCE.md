@@ -28,12 +28,14 @@ Never add heavy local AI, local TTS models, or architecture that materially incr
 
 ## Provider chain
 
-For normal Discord read-aloud and `/ask`, literal fidelity takes priority over conversational Live latency:
+Keep the normal preference order unless an explicit release changes it:
 
-1. Gemini 3.1 Flash TTS
-2. Google Malay TTS fallback
+1. Gemini 3.1 Flash Live
+2. Gemini 2.5 Native Audio Live
+3. Gemini 3.1 Flash TTS
+4. Google Malay TTS fallback
 
-Gemini Live providers remain in the codebase for non-read-aloud/internal compatibility, but user-authored read-aloud text must not be routed through a conversational Live model. Provider health may bypass a known-bad/quota-limited TTS provider and fall back to Google.
+`/ask` is the exception: its already-generated answer skips conversational Live and uses dedicated Gemini 3.1 TTS first, then Google Malay TTS fallback. Provider health may temporarily bypass known-bad/quota-limited providers, but recovery must restore the normal preference order after a successful half-open probe.
 
 ## Voice / speaker architecture
 
