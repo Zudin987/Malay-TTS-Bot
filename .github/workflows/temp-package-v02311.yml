@@ -49,7 +49,7 @@ jobs:
             }
 
           $jsonFiles = @('package.json','package-lock.json') + @(Get-ChildItem config -Filter *.json | ForEach-Object FullName)
-          foreach ($file in $jsonFiles) { Get-Content $file -Raw | ConvertFrom-Json | Out-Null }
+          foreach ($file in $jsonFiles) { Get-Content $file -Raw | ConvertFrom-Json -AsHashtable | Out-Null }
 
       - name: FFmpeg and libopus probe
         shell: pwsh
@@ -145,7 +145,7 @@ jobs:
               }
 
             $jsonFiles = @('package.json','package-lock.json') + @(Get-ChildItem config -Filter *.json | ForEach-Object FullName)
-            foreach ($file in $jsonFiles) { Get-Content $file -Raw | ConvertFrom-Json | Out-Null }
+            foreach ($file in $jsonFiles) { Get-Content $file -Raw | ConvertFrom-Json -AsHashtable | Out-Null }
 
             $pkg = Get-Content package.json -Raw | ConvertFrom-Json -AsHashtable
             $lock = Get-Content package-lock.json -Raw | ConvertFrom-Json -AsHashtable
