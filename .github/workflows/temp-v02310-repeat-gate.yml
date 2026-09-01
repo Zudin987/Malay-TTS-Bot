@@ -1,0 +1,50 @@
+name: Temp v0.23.10 repeated regression gate
+
+on:
+  push:
+    branches:
+      - release/v0.23.10
+
+permissions:
+  contents: read
+
+jobs:
+  repeat-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: release/v0.23.10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Five consecutive full regression passes
+        shell: pwsh
+        run: |
+          1..5 | ForEach-Object {
+            Write-Host "=== Windows full suite pass $_/5 ==="
+            npm test
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+  repeat-ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: release/v0.23.10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Five consecutive full regression passes
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in 1 2 3 4 5; do
+            echo "=== Ubuntu full suite pass $i/5 ==="
+            npm test
+          done
