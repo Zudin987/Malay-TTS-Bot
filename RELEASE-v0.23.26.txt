@@ -1,0 +1,18 @@
+Malay TTS Bot v0.23.26 - Speech Filter Hardening
+
+What changed
+- Normal TTS now filters bare-domain links across modern and uncommon TLDs instead of relying on a small fixed TLD list.
+- Common filename/code tokens such as app.js, config.json, notes.txt, archive.zip and photo.png are preserved as normal chat rather than being mistaken for bare-domain links.
+- Inline code using single backticks is now silent. If normal text surrounds inline code, only the normal text is spoken.
+- Still-image attachment fallback recognition now includes HEIC, HEIF, JXL, TIFF/TIF and JFIF when Discord does not provide MIME metadata.
+- Link-only, file-only, GIF-only, video-only, emoji-only and fenced-code-only posts remain completely silent.
+- Image-only posts still say "hantar gambar"; mentions/tags and /ask remain speakable.
+
+Preserved behavior
+- Normal provider order remains Gemini 3.1 Flash Live -> Gemini 2.5 Native Audio Live -> Gemini 3.1 Flash TTS -> Google Malay TTS.
+- /ask remains Gemini 3.1 Flash TTS -> Google Malay TTS with buffered validation/fallback and does not use conversational Live.
+- Normal first-audio windows remain 2500/1600/1600ms, overall budget remains 7000ms, Google reserve remains 1200ms, and /ask exact-TTS configured timeout remains 4000ms.
+- 10-key round-robin, six-voice pool, strict no-added-words prompts, privacy opt-out, STOP TTS, speaker labels, queue behavior and normal chat latency are unchanged.
+
+Upgrade
+Preserve .env and data\guilds.json. Do not copy old runtime caches, logs, locks, node_modules, or config/settings.json over the new release. Extract the clean package to C:\Malay-TTS-Bot, restore only .env and data\guilds.json, then run setup-clean.cmd.
