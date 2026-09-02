@@ -2,14 +2,14 @@ name: Patch ask exact TTS budget
 
 on:
   push:
-    branches: [fix/ask-exact-tts-budget]
+    branches:
+      - fix/ask-exact-tts-budget
 
 permissions:
   contents: write
 
 jobs:
   patch:
-    if: ${{ github.actor != 'github-actions[bot]' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -18,29 +18,38 @@ jobs:
           fetch-depth: 0
 
       - name: Apply focused /ask exact-TTS budget fix
-        shell: python
+        shell: bash
         run: |
+          python - <<'PY'
           from pathlib import Path
 
           tts = Path('src/tts.js')
           text = tts.read_text(encoding='utf-8')
 
-          health_anchor = """function stepValue(count, first, second, third) {\n"""
-          helper = """function exactFirstAudioWindowCap(context = {}, health = healthOptions()) {\n  // Explicit skipLive is the dedicated exact-TTS path used by /ask. Normal\n  // Live-first chat keeps the short exact fallback window for latency.\n  return context.skipLive === true\n    ? Math.max(500, Number(settings.geminiTts?.timeoutMs) || 4000)\n    : health.exactFirstAudioMs;\n}\n\n"""
+          health_anchor = "function stepValue(count, first, second, third) {\n"
+          helper = """function exactFirstAudioWindowCap(context = {}, health = healthOptions()) {
+            // Explicit skipLive is the dedicated exact-TTS path used by /ask. Normal
+            // Live-first chat keeps the short exact fallback window for latency.
+            return context.skipLive === true
+              ? Math.max(500, Number(settings.geminiTts?.timeoutMs) || 4000)
+              : health.exactFirstAudioMs;
+          }
+
+          """
           if helper not in text:
               if health_anchor not in text:
                   raise SystemExit('health helper anchor not found')
               text = text.replace(health_anchor, helper + health_anchor, 1)
 
-          old_window = """    const window = Math.min(Number(settings.geminiTts?.timeoutMs) || 4000, health.exactFirstAudioMs, Math.max(350, rem - health.googleReserveMs));\n"""
-          new_window = """    const exactWindowCap = exactFirstAudioWindowCap(context, health);\n    const window = Math.min(Number(settings.geminiTts?.timeoutMs) || 4000, exactWindowCap, Math.max(350, rem - health.googleReserveMs));\n"""
+          old_window = "    const window = Math.min(Number(settings.geminiTts?.timeoutMs) || 4000, health.exactFirstAudioMs, Math.max(350, rem - health.googleReserveMs));\n"
+          new_window = "    const exactWindowCap = exactFirstAudioWindowCap(context, health);\n    const window = Math.min(Number(settings.geminiTts?.timeoutMs) || 4000, exactWindowCap, Math.max(350, rem - health.googleReserveMs));\n"
           if new_window not in text:
               if old_window not in text:
                   raise SystemExit('exact window anchor not found')
               text = text.replace(old_window, new_window, 1)
 
-          old_export = """export const __test = { makeBudgetError, setProviderFailure, newProviderState, bufferGenerated, healthOptions, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };\n"""
-          new_export = """export const __test = { makeBudgetError, setProviderFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };\n"""
+          old_export = "export const __test = { makeBudgetError, setProviderFailure, newProviderState, bufferGenerated, healthOptions, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };\n"
+          new_export = "export const __test = { makeBudgetError, setProviderFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };\n"
           if new_export not in text:
               if old_export not in text:
                   raise SystemExit('__test export anchor not found')
@@ -51,22 +60,23 @@ jobs:
           tests = test_file.read_text(encoding='utf-8')
           regression = """
 
-test('/ask exact TTS gets the full configured timeout while normal chat keeps the short fallback window', () => {
-  const health = tts.__test.healthOptions();
+          test('/ask exact TTS gets the full configured timeout while normal chat keeps the short fallback window', () => {
+            const health = tts.__test.healthOptions();
 
-  assert.equal(health.exactFirstAudioMs, 1600);
-  assert.equal(tts.__test.exactFirstAudioWindowCap({}, health), 1600);
-  assert.equal(tts.__test.exactFirstAudioWindowCap({ skipLive: true }, health), 4000);
-});
-"""
+            assert.equal(health.exactFirstAudioMs, 1600);
+            assert.equal(tts.__test.exactFirstAudioWindowCap({}, health), 1600);
+            assert.equal(tts.__test.exactFirstAudioWindowCap({ skipLive: true }, health), 4000);
+          });
+          """
+          regression = '\n'.join(line[10:] if line.startswith('          ') else line for line in regression.splitlines()) + '\n'
           if regression.strip() not in tests:
               tests = tests.rstrip() + regression
               test_file.write_text(tests, encoding='utf-8')
 
           commands = Path('src/commands.js')
           cmd = commands.read_text(encoding='utf-8')
-          old_status = """`First-audio budget ${settings.geminiLive?.firstAudioBudgetMs}ms • windows ${settings.providerHealth?.primaryFirstAudioMs}/${settings.providerHealth?.fallbackFirstAudioMs}/${settings.providerHealth?.exactFirstAudioMs}ms • Google reserve ${settings.providerHealth?.googleReserveMs}ms`,"""
-          new_status = """`First-audio budget ${settings.geminiLive?.firstAudioBudgetMs}ms • windows ${settings.providerHealth?.primaryFirstAudioMs}/${settings.providerHealth?.fallbackFirstAudioMs}/${settings.providerHealth?.exactFirstAudioMs}ms • /ask exact ≤${settings.geminiTts?.timeoutMs}ms • Google reserve ${settings.providerHealth?.googleReserveMs}ms`,"""
+          old_status = "`First-audio budget ${settings.geminiLive?.firstAudioBudgetMs}ms • windows ${settings.providerHealth?.primaryFirstAudioMs}/${settings.providerHealth?.fallbackFirstAudioMs}/${settings.providerHealth?.exactFirstAudioMs}ms • Google reserve ${settings.providerHealth?.googleReserveMs}ms`,"
+          new_status = "`First-audio budget ${settings.geminiLive?.firstAudioBudgetMs}ms • windows ${settings.providerHealth?.primaryFirstAudioMs}/${settings.providerHealth?.fallbackFirstAudioMs}/${settings.providerHealth?.exactFirstAudioMs}ms • /ask exact ≤${settings.geminiTts?.timeoutMs}ms • Google reserve ${settings.providerHealth?.googleReserveMs}ms`,"
           if new_status not in cmd:
               if old_status not in cmd:
                   raise SystemExit('status line anchor not found')
@@ -75,16 +85,16 @@ test('/ask exact TTS gets the full configured timeout while normal chat keeps th
 
           readme = Path('README.md')
           rd = readme.read_text(encoding='utf-8')
-          old_readme = """After the embed is posted, the same AI reply is also queued through the normal TTS provider chain when the asker is in the active normal voice channel. Only the AI answer is spoken: not the username, title, question, or field labels. `/ttsoptout`, voice-channel ownership, queue limits, and normal Live-first read-aloud safeguards still apply. TTS failure never removes the already-posted answer. Bot-authored `/ask` replies are ignored by the normal MessageCreate TTS handler.\n"""
-          new_readme = old_readme + "\nFor `/ask` playback, conversational Live is intentionally skipped. Dedicated Gemini 3.1 TTS gets its configured first-audio timeout (4 seconds by default) before Google fallback; normal Live-first chat keeps the shorter exact-TTS fallback window.\n"
-          if new_readme not in rd:
+          old_readme = "After the embed is posted, the same AI reply is also queued through the normal TTS provider chain when the asker is in the active normal voice channel. Only the AI answer is spoken: not the username, title, question, or field labels. `/ttsoptout`, voice-channel ownership, queue limits, and normal Live-first read-aloud safeguards still apply. TTS failure never removes the already-posted answer. Bot-authored `/ask` replies are ignored by the normal MessageCreate TTS handler.\n"
+          extra = "\nFor `/ask` playback, conversational Live is intentionally skipped. Dedicated Gemini 3.1 TTS gets its configured first-audio timeout (4 seconds by default) before Google fallback; normal Live-first chat keeps the shorter exact-TTS fallback window.\n"
+          if extra.strip() not in rd:
               if old_readme not in rd:
                   raise SystemExit('README anchor not found')
-              rd = rd.replace(old_readme, new_readme, 1)
+              rd = rd.replace(old_readme, old_readme + extra, 1)
               readme.write_text(rd, encoding='utf-8')
 
-          workflow = Path('.github/workflows/patch-ask-exact-budget.yml')
-          workflow.unlink()
+          Path('.github/workflows/patch-ask-exact-budget.yml').unlink()
+          PY
 
       - name: Verify focused tests
         run: |
