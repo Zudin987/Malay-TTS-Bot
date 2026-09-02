@@ -85,6 +85,14 @@ function healthOptions() {
   };
 }
 
+function exactFirstAudioWindowCap(context = {}, health = healthOptions()) {
+  // Explicit skipLive is the dedicated exact-TTS path used by /ask. Normal
+  // Live-first chat keeps the short exact fallback window for latency.
+  return context.skipLive === true
+    ? Math.max(500, Number(settings.geminiTts?.timeoutMs) || 4000)
+    : health.exactFirstAudioMs;
+}
+
 function stepValue(count, first, second, third) {
   if (count <= 1) return first;
   if (count === 2) return second;
@@ -670,7 +678,8 @@ export async function synthesize(text, context = {}) {
 
   if (requestGeminiUsable && !burstBypass() && !geminiAuthDisabled && settings.geminiTts?.enabled !== false) {
     const rem = remaining();
-    const window = Math.min(Number(settings.geminiTts?.timeoutMs) || 4000, health.exactFirstAudioMs, Math.max(350, rem - health.googleReserveMs));
+    const exactWindowCap = exactFirstAudioWindowCap(context, health);
+    const window = Math.min(Number(settings.geminiTts?.timeoutMs) || 4000, exactWindowCap, Math.max(350, rem - health.googleReserveMs));
     let exact = await runAttempt({
       key: 'exactTts', providerName: 'gemini-3.1-tts', windowMs: window, parentSignal, attempts,
       factory: (signal) => synthesizeGemini(value, voice, exactOptions(signal, window, requestApiKey)),
@@ -787,4 +796,4 @@ export function getTtsProviderStatus() {
 }
 
 
-export const __test = { makeBudgetError, setProviderFailure, newProviderState, bufferGenerated, healthOptions, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };
+export const __test = { makeBudgetError, setProviderFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };
