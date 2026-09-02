@@ -17,24 +17,29 @@ test('Gemini key config keeps legacy GEMINI_API_KEY as slot 1', () => {
 
 test('Gemini key selection log exposes only the slot number', () => {
   const secret = 'never-log-this-key-material';
-  const line = formatGeminiApiKeySelectionLog({ slot: 4, key: secret });
-  assert.equal(line, '[gemini-key] slot=4');
+  const line = formatGeminiApiKeySelectionLog({ slot: 10, key: secret });
+  assert.equal(line, '[gemini-key] slot=10');
   assert.equal(line.includes(secret), false);
   assert.equal(formatGeminiApiKeySelectionLog({ slot: null, key: secret }), null);
-  assert.equal(formatGeminiApiKeySelectionLog({ slot: 6, key: secret }), null);
+  assert.equal(formatGeminiApiKeySelectionLog({ slot: 11, key: secret }), null);
 });
 
-test('round robin cycles five configured keys in slot order', () => {
+test('round robin cycles ten configured keys in slot order', () => {
   const ring = createGeminiApiKeyRoundRobin({
     GEMINI_API_KEY: 'key-one',
     GEMINI_API_KEY_2: 'key-two',
     GEMINI_API_KEY_3: 'key-three',
     GEMINI_API_KEY_4: 'key-four',
-    GEMINI_API_KEY_5: 'key-five'
+    GEMINI_API_KEY_5: 'key-five',
+    GEMINI_API_KEY_6: 'key-six',
+    GEMINI_API_KEY_7: 'key-seven',
+    GEMINI_API_KEY_8: 'key-eight',
+    GEMINI_API_KEY_9: 'key-nine',
+    GEMINI_API_KEY_10: 'key-ten'
   });
 
-  const sequence = Array.from({ length: 7 }, () => ring.next()?.slot);
-  assert.deepEqual(sequence, [1, 2, 3, 4, 5, 1, 2]);
+  const sequence = Array.from({ length: 12 }, () => ring.next()?.slot);
+  assert.deepEqual(sequence, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 1, 2]);
   assert.equal(ring.status().lastSlot, 2);
   assert.equal(ring.status().nextSlot, 3);
 });
@@ -50,15 +55,25 @@ test('GEMINI_API_KEY_SLOT chooses the round-robin starting slot', () => {
   assert.deepEqual([ring.next()?.slot, ring.next()?.slot, ring.next()?.slot, ring.next()?.slot], [3, 1, 2, 3]);
 });
 
+test('slot 10 can be selected as the round-robin starting slot', () => {
+  const ring = createGeminiApiKeyRoundRobin({
+    GEMINI_API_KEY: 'key-one',
+    GEMINI_API_KEY_10: 'key-ten',
+    GEMINI_API_KEY_SLOT: '10'
+  });
+
+  assert.deepEqual([ring.next()?.slot, ring.next()?.slot, ring.next()?.slot], [10, 1, 10]);
+});
+
 test('round robin skips empty numbered slots without creating phantom keys', () => {
   const ring = createGeminiApiKeyRoundRobin({
     GEMINI_API_KEY: 'key-one',
     GEMINI_API_KEY_3: 'key-three',
-    GEMINI_API_KEY_5: 'key-five'
+    GEMINI_API_KEY_10: 'key-ten'
   });
 
-  assert.deepEqual([ring.next()?.slot, ring.next()?.slot, ring.next()?.slot, ring.next()?.slot], [1, 3, 5, 1]);
-  assert.deepEqual(ring.status().configuredSlots, [1, 3, 5]);
+  assert.deepEqual([ring.next()?.slot, ring.next()?.slot, ring.next()?.slot, ring.next()?.slot], [1, 3, 10, 1]);
+  assert.deepEqual(ring.status().configuredSlots, [1, 3, 10]);
 });
 
 test('single-key round robin remains backward-compatible', () => {
@@ -87,7 +102,7 @@ test('auth-disabled key slots are skipped until the ring is reset', () => {
 });
 
 test('invalid or empty start slot safely begins at the first configured key', () => {
-  for (const value of ['0', '6', 'abc', '', '-1', '2']) {
+  for (const value of ['0', '11', 'abc', '', '-1', '2']) {
     const ring = createGeminiApiKeyRoundRobin({
       GEMINI_API_KEY: 'key-one',
       GEMINI_API_KEY_3: 'key-three',

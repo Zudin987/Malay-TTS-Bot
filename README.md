@@ -44,20 +44,25 @@ Use `/ask question:<text>` when you intentionally want an AI answer. It uses `ge
 
 After the embed is posted, the same AI reply is also queued through the normal TTS provider chain when the asker is in the active normal voice channel. Only the AI answer is spoken: not the username, title, question, or field labels. `/ttsoptout`, voice-channel ownership, queue limits, and normal Live-first read-aloud safeguards still apply. TTS failure never removes the already-posted answer. Bot-authored `/ask` replies are ignored by the normal MessageCreate TTS handler.
 
-`/ask` uses the existing Gemini key selection and makes only one text-generation request per command. A quota failure does not hop to another key inside the same `/ask` request; speaking the resulting answer uses the normal TTS provider chain.
+`/ask` uses the existing Gemini key round-robin. Under normal conditions it makes one text-generation request per command. If the selected slot fails with a credential-auth error, that slot is disabled and `/ask` retries the next healthy configured key. Quota/rate-limit and model/project permission failures do not rotate to another key inside the same `/ask`; speaking the resulting answer uses the normal TTS provider chain.
 
 ## Gemini API keys
 
-The bot accepts up to five configured Gemini API keys in `.env`:
+The bot accepts up to ten configured Gemini API keys in `.env`:
 
 - `GEMINI_API_KEY` — slot 1 and the backward-compatible default
 - `GEMINI_API_KEY_2`
 - `GEMINI_API_KEY_3`
 - `GEMINI_API_KEY_4`
 - `GEMINI_API_KEY_5`
+- `GEMINI_API_KEY_6`
+- `GEMINI_API_KEY_7`
+- `GEMINI_API_KEY_8`
+- `GEMINI_API_KEY_9`
+- `GEMINI_API_KEY_10`
 - `GEMINI_API_KEY_SLOT=1` — optional starting slot for the round-robin sequence
 
-With five populated slots, TTS items use keys in this order: **1 → 2 → 3 → 4 → 5 → 1**. A single TTS item keeps its assigned key for its whole Gemini provider chain, so a 3.1 Live failure that falls through to 2.5 Live or 3.1 TTS does not switch keys mid-message. The next TTS item advances to the next configured slot. Empty slots are skipped.
+With all ten slots populated, TTS items use keys in this order: **1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 1**. A single TTS item keeps its assigned key for its whole Gemini provider chain, so a 3.1 Live failure that falls through to 2.5 Live or 3.1 TTS does not switch keys mid-message. The next TTS item advances to the next configured slot. Empty slots are skipped.
 
 If a key is rejected as invalid/revoked, that slot is removed from the runtime round-robin until `/restarttts`. Quota/rate-limit failures do not trigger an immediate second-key retry inside the same message; the normal provider cooldown and Google fallback still apply.
 
