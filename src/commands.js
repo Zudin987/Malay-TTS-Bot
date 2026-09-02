@@ -501,7 +501,8 @@ const statusCommand = {
           : state.cooldownActive
             ? `cooldown ${state.cooldownRemainingSeconds ?? '∞'}s (${state.cooldownReason || 'error'})`
             : (standby ? 'standby' : 'ready');
-      return `${name}: ${availability} • first ${state.firstAudioSuccessCount}/${state.startedCount} • done ${state.successCount} • fail ${state.failureCount} • skip ${state.skippedCount} • budget ${state.budgetMissCount}`;
+      const runaway = state.runawayIncidentCount > 0 ? ` • runaway ${state.runawayIncidentCount}` : '';
+      return `${name}: ${availability} • first ${state.firstAudioSuccessCount}/${state.startedCount} • done ${state.successCount} • fail ${state.failureCount} • skip ${state.skippedCount} • budget ${state.budgetMissCount}${runaway}`;
     };
 
     const timingText = timing.last ? [
@@ -533,6 +534,9 @@ const statusCommand = {
             providerLine('Google ms', provider.google, true),
             provider.burstBypassActive ? `Burst bypass: Google-first for ${provider.burstBypassRemainingSeconds}s` : 'Burst bypass: inactive',
             `Gemini concurrency: ${provider.geminiLimiter.active}/${provider.geminiLimiter.max} active • ${provider.geminiLimiter.queued} waiting${provider.halfOpenProbeKey ? ` • probe ${provider.halfOpenProbeKey}` : ''}`,
+            provider.geminiLimiter.waitCount > 0
+              ? `Limiter waits: ${provider.geminiLimiter.waitCount} • avg ${Math.round(provider.geminiLimiter.totalWaitMs / provider.geminiLimiter.waitCount)}ms • max ${Math.round(provider.geminiLimiter.maxWaitMs)}ms • prefetch deferred ${provider.geminiLimiter.prefetchDeferredCount}`
+              : 'Limiter waits: none',
             `Completed totals: Gemini ${provider.geminiSuccessCount} • Google ${provider.fallbackCount} • last ${provider.lastProvider ?? 'none'}`
           ].join('\n')
         },
@@ -541,7 +545,7 @@ const statusCommand = {
           value: [
             `${audio.playing ? 'Playing' : 'Idle'} • ${audio.queued}/${audio.maximumQueued} queued • backlog ~${formatDelay(audio.estimatedBacklogMs)} • prefetch ${audio.prefetched}/${audio.prefetchTarget}`,
             `Speed ${Math.round(audio.catchUpSpeed * 100)}% • dropped ${audio.droppedMessages} • stale skipped ${audio.staleSkippedMessages}`,
-            `Recovery ${audio.cutoffRecoverySuccesses}/${audio.cutoffRecoveries} • PCM-tail ${audio.mirrorReplays} • duplicate replay prevented ${audio.suppressedCutoffReplays} • pipeline failures ${audio.pipelineFailures}`,
+            `Recovery ${audio.cutoffRecoverySuccesses}/${audio.cutoffRecoveries} • PCM-tail ${audio.mirrorReplays} • duplicate replay prevented ${audio.suppressedCutoffReplays} • runaway recovery suppressed ${audio.runawayRecoveriesSuppressed} • pipeline failures ${audio.pipelineFailures}`,
             `One Discord message = one TTS item. Message combining removed.`
           ].join('\n')
         },

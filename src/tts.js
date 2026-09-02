@@ -18,7 +18,7 @@ function newProviderState() {
     cooldownUntil: 0, cooldownReason: null, startedCount: 0,
     firstAudioSuccessCount: 0, successCount: 0, failureCount: 0,
     initialFailureCount: 0, midstreamFailureCount: 0, skippedCount: 0,
-    budgetMissCount: 0, lastFailureAt: 0, lastError: null,
+    runawayIncidentCount: 0, budgetMissCount: 0, lastFailureAt: 0, lastError: null,
     lastFailureKind: null, lastAttemptMs: 0, maxAttemptMs: 0, totalAttemptMs: 0,
     consecutiveFailures: 0, consecutiveQuotaFailures: 0,
     halfOpenProbeInFlight: false,
@@ -42,7 +42,10 @@ let fallbackCount = 0;
 let lastProvider = null;
 const recentGeminiQuotaFailures = [];
 
-const geminiLimiter = { active: 0, queue: [], sequence: 0 };
+const geminiLimiter = {
+  active: 0, queue: [], sequence: 0,
+  waitCount: 0, totalWaitMs: 0, maxWaitMs: 0, prefetchDeferredCount: 0
+};
 const FALLBACK_QUOTA_BACKOFF_AFTER = 3;
 const FALLBACK_QUOTA_BACKOFF_SECONDS = 30 * 60;
 
@@ -317,13 +320,17 @@ function pumpGeminiLimiter() {
       entry.cleanup?.();
       pumpGeminiLimiter();
     };
+    const waitMs = Math.max(0, performance.now() - entry.enqueuedAt);
+    geminiLimiter.waitCount += 1;
+    geminiLimiter.totalWaitMs += waitMs;
+    geminiLimiter.maxWaitMs = Math.max(geminiLimiter.maxWaitMs, waitMs);
     entry.resolve(release);
   }
 }
 
 function acquireGeminiSlot(priority = 0, signal = null) {
   return new Promise((resolve, reject) => {
-    const entry = { priority, sequence: geminiLimiter.sequence++, signal, resolve, reject, cleanup: null };
+    const entry = { priority, sequence: geminiLimiter.sequence++, signal, resolve, reject, cleanup: null, enqueuedAt: performance.now() };
     if (signal) {
       const onAbort = () => {
         const index = geminiLimiter.queue.indexOf(entry);
@@ -370,6 +377,45 @@ function attemptSignal(parentSignal, maxMs, providerName) {
   };
 }
 
+function recordRunawayMidstreamFailure(state, error, key = 'unknown') {
+  const now = Date.now();
+  state.runawayIncidentCount += 1;
+  state.failureCount += 1;
+  state.midstreamFailureCount += 1;
+  state.lastFailureAt = now;
+  state.lastError = sanitizeProviderError(error);
+  state.lastFailureKind = 'runaway/model-behavior';
+  // First audio was healthy; runaway extra speech is model behavior, not
+  // evidence that the provider cannot serve the next message. Do not apply
+  // the normal provider cooldown or increment consecutive health failures.
+  releaseHalfOpenProbe(key, state);
+}
+
+function shouldIsolateLiveMidstreamFailure(error, key) {
+  if (key !== 'livePrimary' && key !== 'liveFallback') return false;
+  // Quota, credentials, access and invalid request/config errors describe a
+  // real condition that can affect the next fresh Live turn. Temporary errors
+  // after first audio do not: each Discord message opens a new one-turn session.
+  return !error?.cancelled
+    && !error?.budgetLike
+    && !error?.dailyQuotaLike
+    && !error?.quotaLike
+    && !error?.authLike
+    && !error?.permissionLike
+    && !error?.configLike;
+}
+
+function recordIsolatedLiveMidstreamFailure(state, error, key = 'unknown') {
+  state.failureCount += 1;
+  state.midstreamFailureCount += 1;
+  state.lastFailureAt = Date.now();
+  state.lastError = sanitizeProviderError(error);
+  state.lastFailureKind = error?.transportLike ? 'midstream/transport' : 'midstream/temporary';
+  // Do not increment consecutiveFailures or apply a provider cooldown. Recovery
+  // still handles the current audio; the next message gets a fresh Live turn.
+  releaseHalfOpenProbe(key, state);
+}
+
 function observeCompletion(key, state, generated, providerName, requestStartedAt, options, geminiProvider, configSignature) {
   const completion = generated?.completion;
   if (!completion || typeof completion.then !== 'function') {
@@ -377,6 +423,16 @@ function observeCompletion(key, state, generated, providerName, requestStartedAt
     return;
   }
   completion.then(() => markCompleted(state, requestStartedAt, geminiProvider, key)).catch((error) => {
+    if (error?.runawayLike) {
+      recordRunawayMidstreamFailure(state, error, key);
+      console.warn(`[provider-runaway:${providerName}] phase=midstream isolated=true message=${sanitizeProviderError(error)}`);
+      return;
+    }
+    if (shouldIsolateLiveMidstreamFailure(error, key)) {
+      recordIsolatedLiveMidstreamFailure(state, error, key);
+      console.warn(`[provider-midstream:${providerName}] isolated=true message=${sanitizeProviderError(error)}`);
+      return;
+    }
     const budget = Boolean(error?.budgetLike || error?.name === 'TtsFailoverBudgetError');
     if (error?.cancelled && !budget) { releaseHalfOpenProbe(key, state); return; }
     setProviderFailure(state, error, options, { phase: 'midstream', budget, key, configSignature });
@@ -526,7 +582,11 @@ function shareLiveTransportFailure(error) {
   state.lastFailureAt = Date.now();
 }
 
-async function runAttempt({ key, providerName, windowMs, parentSignal, attempts, factory, options, geminiProvider = true, priority = 0, apiKeySlot = null }) {
+async function runAttempt({
+  key, providerName, windowMs, parentSignal, attempts, factory, options,
+  geminiProvider = true, priority = 0, apiKeySlot = null,
+  deferBudgetUntilGeminiSlot = false, onLimiterWait = null
+}) {
   const state = providerStates[key];
   const configSignature = providerConfigSignature(key);
   if (!providerReady(key, state, configSignature)) {
@@ -547,16 +607,30 @@ async function runAttempt({ key, providerName, windowMs, parentSignal, attempts,
   }
   const requestStartedAt = Date.now();
   const started = performance.now();
-  const abortable = attemptSignal(parentSignal, windowMs, providerName);
+  let providerStartedAt = started;
+  let abortable = null;
   let releaseGemini = null;
   let releaseOwnedByCompletion = false;
   let providerStarted = false;
   try {
-    if (geminiProvider) releaseGemini = await acquireGeminiSlot(priority, abortable.signal);
+    if (geminiProvider && deferBudgetUntilGeminiSlot) {
+      const limiterWaitStarted = performance.now();
+      releaseGemini = await acquireGeminiSlot(priority, parentSignal);
+      const limiterWaitMs = Math.max(0, performance.now() - limiterWaitStarted);
+      if (limiterWaitMs >= 1) geminiLimiter.prefetchDeferredCount += 1;
+      if (typeof onLimiterWait === 'function') onLimiterWait(limiterWaitMs);
+      // Speculative prefetch should not burn a remote first-audio window while
+      // merely waiting for a local Gemini concurrency slot.
+      providerStartedAt = performance.now();
+      abortable = attemptSignal(parentSignal, windowMs, providerName);
+    } else {
+      abortable = attemptSignal(parentSignal, windowMs, providerName);
+      if (geminiProvider) releaseGemini = await acquireGeminiSlot(priority, abortable.signal);
+    }
     state.startedCount += 1;
     providerStarted = true;
     const generated = await factory(abortable.signal, options);
-    const elapsed = performance.now() - started;
+    const elapsed = performance.now() - providerStartedAt;
     noteAttempt(state, elapsed);
     markFirstAudio(state);
     attempts.push({ provider: providerName, outcome: 'first-audio', ms: elapsed });
@@ -569,8 +643,8 @@ async function runAttempt({ key, providerName, windowMs, parentSignal, attempts,
     lastProvider = providerName;
     return { result: generated, error: null, elapsed, firstAudioAt: performance.now() };
   } catch (rawError) {
-    const error = abortable.signal.aborted && abortable.signal.reason instanceof Error ? abortable.signal.reason : rawError;
-    const elapsed = performance.now() - started;
+    const error = abortable?.signal?.aborted && abortable.signal.reason instanceof Error ? abortable.signal.reason : rawError;
+    const elapsed = performance.now() - providerStartedAt;
     noteAttempt(state, elapsed);
     const budget = Boolean(error?.budgetLike || error?.name === 'TtsFailoverBudgetError');
     if (!providerStarted) {
@@ -598,7 +672,7 @@ async function runAttempt({ key, providerName, windowMs, parentSignal, attempts,
     return { result: null, error, elapsed };
   } finally {
     if (releaseGemini && !releaseOwnedByCompletion) releaseGemini();
-    abortable.cleanup();
+    abortable?.cleanup();
   }
 }
 
@@ -617,10 +691,15 @@ export async function synthesize(text, context = {}) {
   let requestGeminiUsable = Boolean(requestApiKey) && !geminiAuthDisabled;
   const configuredBudget = Math.max(2500, Math.min(Number(settings.geminiLive?.firstAudioBudgetMs) || 7000, 20_000));
   const deadline = started + configuredBudget;
-  const remaining = () => Math.max(0, deadline - performance.now());
+  let deferredLimiterWaitMs = 0;
+  const remaining = () => Math.max(0, deadline - performance.now() + deferredLimiterWaitMs);
   const parentSignal = context.signal;
   const bufferProviders = context.liveStreamOutput === false;
   const attemptPriority = context.prefetch === true ? 1 : 0;
+  const deferGeminiBudgetForPrefetch = context.prefetch === true;
+  const creditLimiterWait = (ms) => {
+    if (deferGeminiBudgetForPrefetch) deferredLimiterWaitMs += Math.max(0, Number(ms) || 0);
+  };
   const burstBypass = () => Date.now() < geminiBurstUntil;
 
   const bufferSelected = async (attempt, providerName) => {
@@ -650,7 +729,9 @@ export async function synthesize(text, context = {}) {
       key: 'livePrimary', providerName: 'gemini-3.1-live', windowMs: window, parentSignal, attempts,
       factory: (signal) => synthesizeGeminiLive(value, voice, liveOptions(String(settings.geminiLive?.primaryModel || 'gemini-3.1-flash-live-preview'), signal, window, requestApiKey)),
       priority: attemptPriority,
-      apiKeySlot: requestApiKeySlot
+      apiKeySlot: requestApiKeySlot,
+      deferBudgetUntilGeminiSlot: deferGeminiBudgetForPrefetch,
+      onLimiterWait: creditLimiterWait
     });
     primary = await bufferSelected(primary, 'gemini-3.1-live');
     if (primary.result) return generatedResult(primary.result, 'gemini-3.1-live', primary.elapsed, (primary.firstAudioAt ?? performance.now()) - started, attempts);
@@ -666,7 +747,9 @@ export async function synthesize(text, context = {}) {
       key: 'liveFallback', providerName: 'gemini-2.5-live', windowMs: window, parentSignal, attempts,
       factory: (signal) => synthesizeGeminiLive(value, voice, liveOptions(String(settings.geminiLive?.fallbackModel || 'gemini-2.5-flash-native-audio-preview-12-2025'), signal, window, requestApiKey)),
       priority: attemptPriority,
-      apiKeySlot: requestApiKeySlot
+      apiKeySlot: requestApiKeySlot,
+      deferBudgetUntilGeminiSlot: deferGeminiBudgetForPrefetch,
+      onLimiterWait: creditLimiterWait
     });
     fallbackLive = await bufferSelected(fallbackLive, 'gemini-2.5-live');
     if (fallbackLive.result) return generatedResult(fallbackLive.result, 'gemini-2.5-live', fallbackLive.elapsed, (fallbackLive.firstAudioAt ?? performance.now()) - started, attempts);
@@ -684,7 +767,9 @@ export async function synthesize(text, context = {}) {
       key: 'exactTts', providerName: 'gemini-3.1-tts', windowMs: window, parentSignal, attempts,
       factory: (signal) => synthesizeGemini(value, voice, exactOptions(signal, window, requestApiKey)),
       priority: attemptPriority,
-      apiKeySlot: requestApiKeySlot
+      apiKeySlot: requestApiKeySlot,
+      deferBudgetUntilGeminiSlot: deferGeminiBudgetForPrefetch,
+      onLimiterWait: creditLimiterWait
     });
     exact = await bufferSelected(exact, 'gemini-3.1-tts');
     if (exact.result) return generatedResult(exact.result, 'gemini-3.1-tts', exact.elapsed, (exact.firstAudioAt ?? performance.now()) - started, attempts);
@@ -747,6 +832,7 @@ function publicProviderState(state) {
     midstreamFailureCount: state.midstreamFailureCount,
     skippedCount: state.skippedCount,
     budgetMissCount: state.budgetMissCount,
+    runawayIncidentCount: state.runawayIncidentCount,
     lastError: state.lastError,
     lastFailureKind: state.lastFailureKind,
     lastAttemptMs: state.lastAttemptMs,
@@ -763,6 +849,10 @@ export function restartTtsRuntime() {
   geminiBurstUntil = 0;
   globalHalfOpenProbeKey = null;
   recentGeminiQuotaFailures.length = 0;
+  geminiLimiter.waitCount = 0;
+  geminiLimiter.totalWaitMs = 0;
+  geminiLimiter.maxWaitMs = 0;
+  geminiLimiter.prefetchDeferredCount = 0;
   for (const state of Object.values(providerStates)) {
     const fresh = newProviderState();
     for (const key of Object.keys(fresh)) state[key] = fresh[key];
@@ -790,10 +880,14 @@ export function getTtsProviderStatus() {
     burstBypassActive: Date.now() < geminiBurstUntil,
     burstBypassRemainingSeconds: Math.ceil(Math.max(0, geminiBurstUntil - Date.now()) / 1000),
     halfOpenProbeKey: globalHalfOpenProbeKey,
-    geminiLimiter: { active: geminiLimiter.active, queued: geminiLimiter.queue.length, max: healthOptions().globalGeminiConcurrency },
+    geminiLimiter: {
+      active: geminiLimiter.active, queued: geminiLimiter.queue.length, max: healthOptions().globalGeminiConcurrency,
+      waitCount: geminiLimiter.waitCount, totalWaitMs: geminiLimiter.totalWaitMs,
+      maxWaitMs: geminiLimiter.maxWaitMs, prefetchDeferredCount: geminiLimiter.prefetchDeferredCount
+    },
     lastProvider
   };
 }
 
 
-export const __test = { makeBudgetError, setProviderFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };
+export const __test = { makeBudgetError, setProviderFailure, recordRunawayMidstreamFailure, recordIsolatedLiveMidstreamFailure, shouldIsolateLiveMidstreamFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, runAttempt, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };

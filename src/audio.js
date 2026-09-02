@@ -129,7 +129,7 @@ function getState(guildId) {
     streamingPrefetches: 0, cutoffRecoveries: 0, cutoffRecoverySuccesses: 0,
     cutoffRecoveryFailures: 0, suspiciousShortOutputs: 0, transcriptCutoffs: 0,
     playbackCutoffs: 0, mirrorReplays: 0, suppressedCutoffReplays: 0,
-    completionGraceTimeouts: 0, pipelineFailures: 0, lastSpeakerAnnouncement: null,
+    completionGraceTimeouts: 0, pipelineFailures: 0, runawayRecoveriesSuppressed: 0, lastSpeakerAnnouncement: null,
     recoveryEpoch: 0, runSerial: 0
   };
   player.on('error', (error) => console.error(`[player:${guildId}]`, error));
@@ -485,6 +485,18 @@ function handleCompletionRecovery(guildId, state, item, generated, playedMs, pla
   const staleSerial = Number(item.runSerial || 0) > 0 && Number(state.runSerial || 0) > Number(item.runSerial || 0);
   if (staleEpoch || staleSerial) {
     state.suppressedCutoffReplays = (Number(state.suppressedCutoffReplays) || 0) + 1;
+    return false;
+  }
+  const runawayFailure = Boolean(error?.runawayLike || triggerError?.runawayLike);
+  if (runawayFailure) {
+    // The guard intentionally stopped unwanted generated speech. Recovering a
+    // PCM/text tail here would continue the hallucinated answer and block FIFO.
+    if (!item.runawayRecoverySuppressed) {
+      item.runawayRecoverySuppressed = true;
+      state.runawayRecoveriesSuppressed = (Number(state.runawayRecoveriesSuppressed) || 0) + 1;
+      state.suppressedCutoffReplays = (Number(state.suppressedCutoffReplays) || 0) + 1;
+      console.warn(`[queue:${guildId}] Runaway Live output stopped; recovery intentionally suppressed.`);
+    }
     return false;
   }
   const metadata = {
@@ -1183,7 +1195,7 @@ export function getAudioStatus(guildId) {
     droppedMessages: 0, staleSkippedMessages: 0, streamingPrefetches: 0,
     cutoffRecoveries: 0, cutoffRecoverySuccesses: 0, cutoffRecoveryFailures: 0,
     suspiciousShortOutputs: 0, transcriptCutoffs: 0, playbackCutoffs: 0, mirrorReplays: 0,
-    suppressedCutoffReplays: 0, completionGraceTimeouts: 0, pipelineFailures: 0
+    suppressedCutoffReplays: 0, completionGraceTimeouts: 0, pipelineFailures: 0, runawayRecoveriesSuppressed: 0
   };
   if (!state) return empty;
   const prefetched = state.queue.filter((item) => Boolean(item.generation)).length;
@@ -1200,7 +1212,7 @@ export function getAudioStatus(guildId) {
     suspiciousShortOutputs: state.suspiciousShortOutputs, transcriptCutoffs: state.transcriptCutoffs,
     playbackCutoffs: state.playbackCutoffs, mirrorReplays: state.mirrorReplays,
     suppressedCutoffReplays: state.suppressedCutoffReplays, completionGraceTimeouts: state.completionGraceTimeouts,
-    pipelineFailures: state.pipelineFailures
+    pipelineFailures: state.pipelineFailures, runawayRecoveriesSuppressed: state.runawayRecoveriesSuppressed
   };
 }
 
