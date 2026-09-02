@@ -1,0 +1,131 @@
+name: Prepare v0.23.24 Release
+
+on:
+  push:
+    branches:
+      - release/v0.23.24
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: release/v0.23.24
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Prepare release metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = (git rev-parse HEAD).Trim()
+          if ($base -ne 'c38ac53e2210934c171c66682650808b3d294e5f') { throw "Unexpected release base: $base" }
+
+          npm version 0.23.24 --no-git-tag-version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $setup = Get-Content setup-clean.cmd -Raw
+          if (-not $setup.Contains('clean setup v0.23.23')) { throw 'Expected v0.23.23 setup banner not found.' }
+          $setup = $setup.Replace('clean setup v0.23.23','clean setup v0.23.24')
+          Set-Content setup-clean.cmd -Value $setup -NoNewline -Encoding ascii
+
+          $notes = @'
+Malay TTS Bot v0.23.24 - Runaway Live Queue Isolation
+
+What this fixes
+- Fixes a queue/fallback problem seen after Gemini 3.1 Live already produced first audio successfully but later entered runaway extra speech or a temporary midstream stream timeout.
+- Runaway/model-behavior incidents no longer cool down Gemini 3.1 for the next Discord message.
+- Temporary post-first-audio Live failures are isolated from next-turn provider health because every Discord message uses a fresh one-turn Live session.
+- Real quota, API-key/auth, model/project access, request/config, and first-audio budget failures still keep their existing health/cooldown behavior.
+
+Queue and recovery reliability
+- Intentional runaway stops no longer schedule PCM/text/regenerated tail recovery, preventing unwanted generated speech from being replayed and blocking FIFO.
+- Speculative prefetch no longer burns its Gemini 2500/1600/1600ms provider window while waiting for the local Gemini concurrency limiter.
+- Foreground messages keep the existing timing behavior; only speculative prefetch credits local limiter wait back to its provider budget.
+- Explicit user/queue cancellations remain neutral and are not misclassified as provider failures.
+
+Diagnostics
+- /status now reports runaway incidents when present.
+- /status exposes Gemini limiter wait count/average/max and prefetch-deferred waits.
+- /status reports suppressed runaway recovery so this failure mode is visible without reading raw logs.
+
+Preserved behavior
+- Provider order remains Gemini 3.1 Flash Live -> Gemini 2.5 Native Audio Live -> Gemini 3.1 Flash TTS -> Google Malay TTS.
+- Normal first-audio windows remain 2500/1600/1600ms, the overall budget remains 7000ms, and Google reserve remains 1200ms.
+- /ask still skips conversational Live and uses Gemini 3.1 Flash TTS -> Google Malay TTS, with the dedicated Gemini TTS window up to 4000ms.
+- The 10-key round-robin, six-voice pool, strict read-aloud prompts, privacy opt-out, STOP TTS, speaker labels, and one-message/one-TTS-item behavior are unchanged.
+
+Upgrade
+Preserve .env and data\guilds.json. Do not copy old runtime caches, logs, locks, node_modules, or config/settings.json over the new release. Extract the clean package to C:\Malay-TTS-Bot, restore only .env and data\guilds.json, then run setup-clean.cmd.
+'@
+          Set-Content RELEASE-v0.23.24.txt -Value $notes -NoNewline -Encoding utf8
+
+      - name: Validate release source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((node -p "require('./package.json').version").Trim() -ne '0.23.24') { throw 'package.json version mismatch.' }
+          $lock = Get-Content package-lock.json -Raw | ConvertFrom-Json -AsHashtable
+          if ($lock.version -ne '0.23.24' -or $lock.packages[''].version -ne '0.23.24') { throw 'package-lock version mismatch.' }
+          if (-not (Select-String -Path setup-clean.cmd -SimpleMatch 'clean setup v0.23.24')) { throw 'setup-clean version mismatch.' }
+          if (-not (Test-Path RELEASE-v0.23.24.txt)) { throw 'release notes missing.' }
+
+          foreach ($required in @(
+            'src/tts.js','src/audio.js','src/commands.js','test/runaway-isolation.test.js',
+            'src/gemini-key-config.js','test/gemini-key-config.test.js','test/provider-health.test.js'
+          )) { if (-not (Test-Path $required)) { throw "Required file missing: $required" } }
+
+          $tts = Get-Content src/tts.js -Raw
+          foreach ($guard in @('shouldIsolateLiveMidstreamFailure','recordRunawayMidstreamFailure','deferBudgetUntilGeminiSlot','prefetchDeferredCount')) {
+            if (-not $tts.Contains($guard)) { throw "Missing v0.23.24 TTS guard: $guard" }
+          }
+          $audio = Get-Content src/audio.js -Raw
+          if (-not $audio.Contains('runawayRecoveriesSuppressed')) { throw 'Runaway recovery suppression missing.' }
+          $tests = Get-Content test/runaway-isolation.test.js -Raw
+          foreach ($guard in @('runaway Live completion is counted but does not cool down provider health','prefetch limiter waiting does not consume provider first-audio window')) {
+            if (-not $tests.Contains($guard)) { throw "Missing v0.23.24 regression: $guard" }
+          }
+
+          $settings = Get-Content config/settings.json -Raw | ConvertFrom-Json -AsHashtable
+          if ($settings.providerHealth.primaryFirstAudioMs -ne 2500) { throw 'Primary first-audio window changed.' }
+          if ($settings.providerHealth.fallbackFirstAudioMs -ne 1600) { throw 'Fallback first-audio window changed.' }
+          if ($settings.providerHealth.exactFirstAudioMs -ne 1600) { throw 'Exact first-audio window changed.' }
+          if ($settings.geminiTts.timeoutMs -ne 4000) { throw '/ask TTS timeout changed.' }
+          if ($settings.geminiLive.firstAudioBudgetMs -ne 7000) { throw 'Overall first-audio budget changed.' }
+          if ($settings.providerHealth.googleReserveMs -ne 1200) { throw 'Google reserve changed.' }
+
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm audit --audit-level=high
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          Get-ChildItem -Recurse -Filter *.js |
+            Where-Object { $_.FullName -notmatch '[\\/]node_modules[\\/]' } |
+            ForEach-Object {
+              node --check $_.FullName
+              if ($LASTEXITCODE -ne 0) { throw "Syntax failed: $($_.FullName)" }
+            }
+          foreach ($file in @('package.json','package-lock.json','config/settings.json')) {
+            Get-Content $file -Raw | ConvertFrom-Json -AsHashtable | Out-Null
+          }
+
+      - name: Commit release metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package.json package-lock.json setup-clean.cmd RELEASE-v0.23.24.txt
+          git commit -m 'Release v0.23.24 - Runaway Live Queue Isolation'
+          git push origin HEAD:release/v0.23.24
