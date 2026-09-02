@@ -27,8 +27,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $base = (git rev-parse HEAD).Trim()
-          if ($base -ne 'c38ac53e2210934c171c66682650808b3d294e5f' -and $base -ne '2efeb9f8c632e51af3b2e7973c0f7dc73b4321b9') { throw "Unexpected release base: $base" }
+          git merge-base --is-ancestor c38ac53e2210934c171c66682650808b3d294e5f HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Merged runaway isolation source is not an ancestor of this release branch.' }
 
           npm version 0.23.24 --no-git-tag-version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
