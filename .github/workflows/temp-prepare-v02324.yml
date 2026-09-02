@@ -28,7 +28,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $base = (git rev-parse HEAD).Trim()
-          if ($base -ne 'c38ac53e2210934c171c66682650808b3d294e5f') { throw "Unexpected release base: $base" }
+          if ($base -ne 'c38ac53e2210934c171c66682650808b3d294e5f' -and $base -ne '2efeb9f8c632e51af3b2e7973c0f7dc73b4321b9') { throw "Unexpected release base: $base" }
 
           npm version 0.23.24 --no-git-tag-version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -38,35 +38,35 @@ jobs:
           $setup = $setup.Replace('clean setup v0.23.23','clean setup v0.23.24')
           Set-Content setup-clean.cmd -Value $setup -NoNewline -Encoding ascii
 
-          $notes = @'
-Malay TTS Bot v0.23.24 - Runaway Live Queue Isolation
-
-What this fixes
-- Fixes a queue/fallback problem seen after Gemini 3.1 Live already produced first audio successfully but later entered runaway extra speech or a temporary midstream stream timeout.
-- Runaway/model-behavior incidents no longer cool down Gemini 3.1 for the next Discord message.
-- Temporary post-first-audio Live failures are isolated from next-turn provider health because every Discord message uses a fresh one-turn Live session.
-- Real quota, API-key/auth, model/project access, request/config, and first-audio budget failures still keep their existing health/cooldown behavior.
-
-Queue and recovery reliability
-- Intentional runaway stops no longer schedule PCM/text/regenerated tail recovery, preventing unwanted generated speech from being replayed and blocking FIFO.
-- Speculative prefetch no longer burns its Gemini 2500/1600/1600ms provider window while waiting for the local Gemini concurrency limiter.
-- Foreground messages keep the existing timing behavior; only speculative prefetch credits local limiter wait back to its provider budget.
-- Explicit user/queue cancellations remain neutral and are not misclassified as provider failures.
-
-Diagnostics
-- /status now reports runaway incidents when present.
-- /status exposes Gemini limiter wait count/average/max and prefetch-deferred waits.
-- /status reports suppressed runaway recovery so this failure mode is visible without reading raw logs.
-
-Preserved behavior
-- Provider order remains Gemini 3.1 Flash Live -> Gemini 2.5 Native Audio Live -> Gemini 3.1 Flash TTS -> Google Malay TTS.
-- Normal first-audio windows remain 2500/1600/1600ms, the overall budget remains 7000ms, and Google reserve remains 1200ms.
-- /ask still skips conversational Live and uses Gemini 3.1 Flash TTS -> Google Malay TTS, with the dedicated Gemini TTS window up to 4000ms.
-- The 10-key round-robin, six-voice pool, strict read-aloud prompts, privacy opt-out, STOP TTS, speaker labels, and one-message/one-TTS-item behavior are unchanged.
-
-Upgrade
-Preserve .env and data\guilds.json. Do not copy old runtime caches, logs, locks, node_modules, or config/settings.json over the new release. Extract the clean package to C:\Malay-TTS-Bot, restore only .env and data\guilds.json, then run setup-clean.cmd.
-'@
+          $notes = @(
+            'Malay TTS Bot v0.23.24 - Runaway Live Queue Isolation',
+            '',
+            'What this fixes',
+            '- Fixes a queue/fallback problem seen after Gemini 3.1 Live already produced first audio successfully but later entered runaway extra speech or a temporary midstream stream timeout.',
+            '- Runaway/model-behavior incidents no longer cool down Gemini 3.1 for the next Discord message.',
+            '- Temporary post-first-audio Live failures are isolated from next-turn provider health because every Discord message uses a fresh one-turn Live session.',
+            '- Real quota, API-key/auth, model/project access, request/config, and first-audio budget failures still keep their existing health/cooldown behavior.',
+            '',
+            'Queue and recovery reliability',
+            '- Intentional runaway stops no longer schedule PCM/text/regenerated tail recovery, preventing unwanted generated speech from being replayed and blocking FIFO.',
+            '- Speculative prefetch no longer burns its Gemini 2500/1600/1600ms provider window while waiting for the local Gemini concurrency limiter.',
+            '- Foreground messages keep the existing timing behavior; only speculative prefetch credits local limiter wait back to its provider budget.',
+            '- Explicit user/queue cancellations remain neutral and are not misclassified as provider failures.',
+            '',
+            'Diagnostics',
+            '- /status now reports runaway incidents when present.',
+            '- /status exposes Gemini limiter wait count/average/max and prefetch-deferred waits.',
+            '- /status reports suppressed runaway recovery so this failure mode is visible without reading raw logs.',
+            '',
+            'Preserved behavior',
+            '- Provider order remains Gemini 3.1 Flash Live -> Gemini 2.5 Native Audio Live -> Gemini 3.1 Flash TTS -> Google Malay TTS.',
+            '- Normal first-audio windows remain 2500/1600/1600ms, the overall budget remains 7000ms, and Google reserve remains 1200ms.',
+            '- /ask still skips conversational Live and uses Gemini 3.1 Flash TTS -> Google Malay TTS, with the dedicated Gemini TTS window up to 4000ms.',
+            '- The 10-key round-robin, six-voice pool, strict read-aloud prompts, privacy opt-out, STOP TTS, speaker labels, and one-message/one-TTS-item behavior are unchanged.',
+            '',
+            'Upgrade',
+            'Preserve .env and data\guilds.json. Do not copy old runtime caches, logs, locks, node_modules, or config/settings.json over the new release. Extract the clean package to C:\Malay-TTS-Bot, restore only .env and data\guilds.json, then run setup-clean.cmd.'
+          ) -join "`r`n"
           Set-Content RELEASE-v0.23.24.txt -Value $notes -NoNewline -Encoding utf8
 
       - name: Validate release source
