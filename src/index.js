@@ -4,6 +4,7 @@ import { cancelMessageAudio, enqueue } from './audio.js';
 import { handleAskStopButton } from './ask-response.js';
 import { commands } from './commands.js';
 import { config } from './config.js';
+import { buildSpeakableMessage } from './message-speech-policy.js';
 import { prepareSpeechVariants } from './preprocess.js';
 import { getGuildSettings, isUserTtsOptedOut } from './store.js';
 import { cleanupTempDirectory, getOrAssignTtsVoice } from './tts.js';
@@ -69,8 +70,15 @@ client.on(Events.MessageCreate, async (message) => {
     const currentChannelId = getRuntimeVoiceChannelId(message.guild.id);
     if (currentChannelId && currentChannelId !== message.channel.id) return;
 
+    // Only normal chat text, mentions/tags and images are eligible here.
+    // Link/file/GIF/video/emoji-only posts are discarded before speaker labels,
+    // provider selection or a Discord voice connection is started. /ask has its
+    // own interaction path and is intentionally unaffected by this policy.
+    const speakableMessage = buildSpeakableMessage(message);
+    if (!speakableMessage) return;
+
     const preprocessStartedAt = performance.now();
-    const speech = prepareSpeechVariants(message, guildSettings);
+    const speech = prepareSpeechVariants(speakableMessage, guildSettings);
     const preprocessMs = performance.now() - preprocessStartedAt;
     const geminiText = speech.geminiText || speech.googleText;
     if (!geminiText) return;
