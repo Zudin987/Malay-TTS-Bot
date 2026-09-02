@@ -1,12 +1,26 @@
 import { stripTextEmoticons } from './text-emoticons.js';
 
-const URL_PATTERN = /\bhttps?:\/\/\S+|\bwww\.\S+|(?<![@\w])(?:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\.)+(?:com|net|org|gg|io|me|tv|co|my|dev|app|ai|ly|be)(?:\/[^\s<]*)?/giu;
+const SCHEME_URL_PATTERN = /\bhttps?:\/\/\S+|\bwww\.\S+/giu;
+const BARE_DOMAIN_PATTERN = /(?<![@\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})(?::\d{2,5})?(?:\/[^\s<]*)?/giu;
 const MASKED_LINK_PATTERN = /\[([^\]\n]{1,200})\]\((?:https?:\/\/|www\.)[^)\s]+(?:\s+"[^"]*")?\)/giu;
 const AUTOLINK_PATTERN = /<(?:https?:\/\/|www\.)[^>\s]+>/giu;
 const FENCED_CODE_PATTERN = /```[\s\S]*?```|```[\s\S]*$/gu;
+const INLINE_CODE_PATTERN = /`[^`\r\n]+`/gu;
 const CUSTOM_EMOJI_PATTERN = /<a?:[\w-]+:\d+>/gu;
 const DISCORD_MENTION_PATTERN = /<@!?\d+>|<@&\d+>|<#\d+>/u;
 const EMOJI_CLUSTER_MARKER = /\p{Extended_Pictographic}|\p{Emoji_Presentation}|[\u{1F1E6}-\u{1F1FF}]|\u20E3|\uFE0F/u;
+
+// A broad bare-domain matcher catches new/less-common TLDs without maintaining
+// a fragile allowlist. Preserve obvious filename/code tokens such as app.js or
+// config.json so normal technical chat is not accidentally swallowed as a URL.
+const FILE_LIKE_SUFFIXES = new Set([
+  '7z', 'avif', 'bat', 'bmp', 'c', 'cmd', 'cpp', 'css', 'csv', 'dll', 'exe',
+  'flac', 'gif', 'gz', 'h', 'heic', 'heif', 'hpp', 'ini', 'java', 'jfif', 'jpg',
+  'jpeg', 'js', 'json', 'jsx', 'jxl', 'less', 'log', 'm4v', 'md', 'mkv', 'mov',
+  'mp3', 'mp4', 'ogg', 'opus', 'pdf', 'png', 'ps1', 'py', 'rar', 'sass', 'scss',
+  'sh', 'svg', 'tar', 'tif', 'tiff', 'ts', 'tsx', 'txt', 'wav', 'webm', 'webp',
+  'xml', 'yaml', 'yml', 'zip'
+]);
 
 function stripUnicodeEmoji(input) {
   const text = String(input ?? '');
@@ -24,6 +38,19 @@ function stripUnicodeEmoji(input) {
     .replace(/[\u200D\u20E3\uFE0E\uFE0F]/gu, ' ');
 }
 
+function isLikelyFileToken(value) {
+  const host = String(value ?? '')
+    .split('/')[0]
+    .split(':')[0]
+    .toLowerCase();
+  const suffix = host.split('.').at(-1) ?? '';
+  return FILE_LIKE_SUFFIXES.has(suffix);
+}
+
+function stripBareDomains(input) {
+  return String(input ?? '').replace(BARE_DOMAIN_PATTERN, (matched) => isLikelyFileToken(matched) ? matched : ' ');
+}
+
 function isGifAttachment(attachment) {
   return String(attachment?.contentType ?? '').toLowerCase() === 'image/gif' || /\.gif$/iu.test(attachment?.name ?? '');
 }
@@ -31,7 +58,7 @@ function isGifAttachment(attachment) {
 function isImageAttachment(attachment) {
   return !isGifAttachment(attachment) && (
     String(attachment?.contentType ?? '').toLowerCase().startsWith('image/') ||
-    /\.(png|jpe?g|webp|bmp|avif)$/iu.test(attachment?.name ?? '')
+    /\.(png|jpe?g|jfif|webp|bmp|avif|heic|heif|jxl|tiff?)$/iu.test(attachment?.name ?? '')
   );
 }
 
@@ -50,10 +77,12 @@ export function sanitizeSpeechContent(input) {
   // beside one of these items, only that normal text remains eligible for TTS.
   text = text
     .replace(FENCED_CODE_PATTERN, ' ')
+    .replace(INLINE_CODE_PATTERN, ' ')
     .replace(MASKED_LINK_PATTERN, ' ')
     .replace(AUTOLINK_PATTERN, ' ')
-    .replace(URL_PATTERN, ' ')
+    .replace(SCHEME_URL_PATTERN, ' ')
     .replace(CUSTOM_EMOJI_PATTERN, ' ');
+  text = stripBareDomains(text);
   text = stripUnicodeEmoji(text);
   text = stripTextEmoticons(text);
   return text.replace(/[\t\r\n ]+/gu, ' ').trim();
@@ -82,4 +111,4 @@ export function buildSpeakableMessage(message) {
   };
 }
 
-export const __test = { stripUnicodeEmoji, isImageAttachment, isImageEmbed };
+export const __test = { stripUnicodeEmoji, stripBareDomains, isLikelyFileToken, isImageAttachment, isImageEmbed };
