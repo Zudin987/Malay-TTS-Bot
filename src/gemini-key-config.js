@@ -1,6 +1,6 @@
 import 'dotenv/config';
 
-const MAX_GEMINI_API_KEYS = 5;
+const MAX_GEMINI_API_KEYS = 10;
 
 function slotEnvName(slot) {
   return slot === 1 ? 'GEMINI_API_KEY' : `GEMINI_API_KEY_${slot}`;
