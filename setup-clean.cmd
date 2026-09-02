@@ -2,7 +2,7 @@
 setlocal
 cd /d C:\Malay-TTS-Bot
 
-echo Malay TTS Bot clean setup v0.23.24
+echo Malay TTS Bot clean setup v0.23.25
 echo.
 
 where node >nul 2>&1
