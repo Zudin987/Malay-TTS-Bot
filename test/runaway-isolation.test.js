@@ -21,6 +21,26 @@ test('runaway Live completion is counted but does not cool down provider health'
   assert.equal(state.lastFailureKind, 'runaway/model-behavior');
 });
 
+test('temporary Live midstream timeout is counted without poisoning next-turn health', () => {
+  const state = tts.__test.newProviderState();
+  const error = Object.assign(new Error('Gemini Live audio stream timed out after 3500ms.'), { transportLike: true });
+  assert.equal(tts.__test.shouldIsolateLiveMidstreamFailure(error, 'livePrimary'), true);
+  tts.__test.recordIsolatedLiveMidstreamFailure(state, error, 'livePrimary');
+  assert.equal(state.failureCount, 1);
+  assert.equal(state.midstreamFailureCount, 1);
+  assert.equal(state.consecutiveFailures, 0);
+  assert.equal(state.cooldownUntil, 0);
+  assert.equal(state.cooldownReason, null);
+  assert.equal(state.lastFailureKind, 'midstream/transport');
+});
+
+test('serious Live quota/auth/config failures are not isolated', () => {
+  assert.equal(tts.__test.shouldIsolateLiveMidstreamFailure({ quotaLike: true }, 'livePrimary'), false);
+  assert.equal(tts.__test.shouldIsolateLiveMidstreamFailure({ authLike: true }, 'livePrimary'), false);
+  assert.equal(tts.__test.shouldIsolateLiveMidstreamFailure({ configLike: true }, 'livePrimary'), false);
+  assert.equal(tts.__test.shouldIsolateLiveMidstreamFailure({ transportLike: true }, 'exactTts'), false);
+});
+
 test('runaway Live output never schedules cutoff recovery', () => {
   const item = audio.__test.createQueueItem('hello world', { verificationText: 'hello world' });
   item.runSerial = 1;

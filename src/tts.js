@@ -391,6 +391,29 @@ function recordRunawayMidstreamFailure(state, error, key = 'unknown') {
   releaseHalfOpenProbe(key, state);
 }
 
+function shouldIsolateLiveMidstreamFailure(error, key) {
+  if (key !== 'livePrimary' && key !== 'liveFallback') return false;
+  // Quota, credentials, access and invalid request/config errors describe a
+  // real condition that can affect the next fresh Live turn. Temporary errors
+  // after first audio do not: each Discord message opens a new one-turn session.
+  return !error?.dailyQuotaLike
+    && !error?.quotaLike
+    && !error?.authLike
+    && !error?.permissionLike
+    && !error?.configLike;
+}
+
+function recordIsolatedLiveMidstreamFailure(state, error, key = 'unknown') {
+  state.failureCount += 1;
+  state.midstreamFailureCount += 1;
+  state.lastFailureAt = Date.now();
+  state.lastError = sanitizeProviderError(error);
+  state.lastFailureKind = error?.transportLike ? 'midstream/transport' : 'midstream/temporary';
+  // Do not increment consecutiveFailures or apply a provider cooldown. Recovery
+  // still handles the current audio; the next message gets a fresh Live turn.
+  releaseHalfOpenProbe(key, state);
+}
+
 function observeCompletion(key, state, generated, providerName, requestStartedAt, options, geminiProvider, configSignature) {
   const completion = generated?.completion;
   if (!completion || typeof completion.then !== 'function') {
@@ -401,6 +424,11 @@ function observeCompletion(key, state, generated, providerName, requestStartedAt
     if (error?.runawayLike) {
       recordRunawayMidstreamFailure(state, error, key);
       console.warn(`[provider-runaway:${providerName}] phase=midstream isolated=true message=${sanitizeProviderError(error)}`);
+      return;
+    }
+    if (shouldIsolateLiveMidstreamFailure(error, key)) {
+      recordIsolatedLiveMidstreamFailure(state, error, key);
+      console.warn(`[provider-midstream:${providerName}] isolated=true message=${sanitizeProviderError(error)}`);
       return;
     }
     const budget = Boolean(error?.budgetLike || error?.name === 'TtsFailoverBudgetError');
@@ -860,4 +888,4 @@ export function getTtsProviderStatus() {
 }
 
 
-export const __test = { makeBudgetError, setProviderFailure, recordRunawayMidstreamFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, runAttempt, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };
+export const __test = { makeBudgetError, setProviderFailure, recordRunawayMidstreamFailure, recordIsolatedLiveMidstreamFailure, shouldIsolateLiveMidstreamFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, runAttempt, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };
