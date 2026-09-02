@@ -64,15 +64,28 @@ test('normal chat stays speakable while links and emoji beside it are silent', (
   assert.equal(speech.geminiText.includes(settings.filePhrase), false);
 });
 
-test('link-only posts are completely skipped including masked and autolinks', () => {
+test('link-only posts are completely skipped including arbitrary modern TLDs', () => {
   for (const content of [
     'https://example.com/test',
     '<https://example.com/test>',
     '[example](https://example.com/test)',
-    'discord.gg/example'
+    'discord.gg/example',
+    'example.xyz',
+    'service.tech/path',
+    'status.cloud/incidents/1',
+    'shop.store'
   ]) {
     assert.equal(buildSpeakableMessage(makeMessage({ content })), null, content);
   }
+});
+
+test('bare-domain filtering preserves obvious filenames and code tokens', () => {
+  for (const content of ['app.js', 'config.json', 'notes.txt', 'archive.zip', 'photo.png']) {
+    const speakable = buildSpeakableMessage(makeMessage({ content }));
+    assert.ok(speakable, content);
+    assert.equal(speakable.content, content);
+  }
+  assert.equal(sanitizeSpeechContent('check example.xyz but edit config.json'), 'check but edit config.json');
 });
 
 test('file GIF and video-only posts are completely skipped', () => {
@@ -93,8 +106,15 @@ test('emoji-only posts are completely skipped for Unicode custom and text emotic
   }
 });
 
-test('fenced code-only posts are not treated as normal chat', () => {
+test('fenced and inline code-only posts are not treated as normal chat', () => {
   assert.equal(buildSpeakableMessage(makeMessage({ content: '```js\nconsole.log("hi")\n```' })), null);
+  assert.equal(buildSpeakableMessage(makeMessage({ content: '`npm install discord.js`' })), null);
+  assert.equal(buildSpeakableMessage(makeMessage({ content: '`const x = 1`' })), null);
+});
+
+test('inline code beside normal chat is silent while nearby words remain', () => {
+  assert.equal(sanitizeSpeechContent('try this `npm install discord.js` bro'), 'try this bro');
+  assert.equal(sanitizeSpeechContent('guna `config.json` lepas tu restart'), 'guna lepas tu restart');
 });
 
 test('image-only posts still say hantar gambar', () => {
@@ -102,6 +122,15 @@ test('image-only posts still say hantar gambar', () => {
   assert.ok(speech);
   assert.ok(speech.geminiText.includes(settings.imagePhrase));
   assert.ok(speech.googleText.includes(settings.imagePhrase));
+});
+
+test('modern still-image extensions are recognized even without MIME metadata', () => {
+  for (const name of ['photo.heic', 'photo.heif', 'photo.jxl', 'scan.tif', 'scan.tiff', 'camera.jfif']) {
+    const speech = prepared(makeMessage({ attachments: [{ name, contentType: null }] }));
+    assert.ok(speech, name);
+    assert.ok(speech.geminiText.includes(settings.imagePhrase), name);
+    assert.ok(speech.googleText.includes(settings.imagePhrase), name);
+  }
 });
 
 test('normal text plus image reads the text and hantar gambar only', () => {
@@ -129,4 +158,5 @@ test('mention-only posts remain speakable and resolve the tagged name', () => {
 test('sanitizer removes non-chat payloads without damaging nearby words', () => {
   assert.equal(sanitizeSpeechContent('aku hantar 😄 https://example.com sekarang'), 'aku hantar sekarang');
   assert.equal(sanitizeSpeechContent('weh [buka ni](https://example.com) bro'), 'weh bro');
+  assert.equal(sanitizeSpeechContent('cek service.tech/status sekarang'), 'cek sekarang');
 });
