@@ -44,6 +44,8 @@ Use `/ask question:<text>` when you intentionally want an AI answer. It uses `ge
 
 After the embed is posted, the same AI reply is also queued through the normal TTS provider chain when the asker is in the active normal voice channel. Only the AI answer is spoken: not the username, title, question, or field labels. `/ttsoptout`, voice-channel ownership, queue limits, and normal Live-first read-aloud safeguards still apply. TTS failure never removes the already-posted answer. Bot-authored `/ask` replies are ignored by the normal MessageCreate TTS handler.
 
+For `/ask` playback, conversational Live is intentionally skipped. Dedicated Gemini 3.1 TTS gets its configured first-audio timeout (4 seconds by default) before Google fallback; normal Live-first chat keeps the shorter exact-TTS fallback window.
+
 `/ask` uses the existing Gemini key round-robin. Under normal conditions it makes one text-generation request per command. If the selected slot fails with a credential-auth error, that slot is disabled and `/ask` retries the next healthy configured key. Quota/rate-limit and model/project permission failures do not rotate to another key inside the same `/ask`; speaking the resulting answer uses the normal TTS provider chain.
 
 ## Gemini API keys

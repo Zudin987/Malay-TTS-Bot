@@ -56,3 +56,11 @@ test('repeated 2.5 Live quota failures get a 30-minute probe backoff without pen
   assert.ok(primaryDelay <= health.quotaThirdSeconds * 1000 + 1000);
   assert.equal(primary.cooldownReason, 'quota/rate limit x3');
 });
+
+test('/ask exact TTS gets the full configured timeout while normal chat keeps the short fallback window', () => {
+  const health = tts.__test.healthOptions();
+
+  assert.equal(health.exactFirstAudioMs, 1600);
+  assert.equal(tts.__test.exactFirstAudioWindowCap({}, health), 1600);
+  assert.equal(tts.__test.exactFirstAudioWindowCap({ skipLive: true }, health), 4000);
+});
