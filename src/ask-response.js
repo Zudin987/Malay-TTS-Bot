@@ -121,7 +121,12 @@ export function buildAskTtsItem(interaction, answer, voiceChannel, voice) {
       // conversational Live model, which can occasionally answer a question in
       // the transcript instead of reading it. Use dedicated Gemini TTS first,
       // then the deterministic Google fallback.
-      skipLive: true
+      skipLive: true,
+      // /ask prioritizes a complete audible answer over first-chunk latency.
+      // Buffer the dedicated Gemini TTS stream before playback so a midstream
+      // failure is detected inside synthesize() and can fall through to Google
+      // instead of being accepted on first audio and then dying silently.
+      forceBuffered: true
     }
   };
 }
