@@ -4,7 +4,7 @@
 
 GitHub is the source of truth for development. `main` is stable/released code and `develop` is the active integration branch. Use focused feature/fix branches and pull requests for non-trivial changes.
 
-Current stable baseline: **v0.23.22 — /ask Key Auth Failover**.
+Current stable baseline: **v0.23.23 - 10-Key Round-Robin + /ask TTS Fix**.
 
 ## Priorities
 
