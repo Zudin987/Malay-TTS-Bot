@@ -1,0 +1,229 @@
+name: Apply runaway isolation patch
+
+on:
+  push:
+    branches:
+      - fix/runaway-isolation-v2
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/runaway-isolation-v2
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Apply focused runaway/prefetch fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from textwrap import dedent
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected exactly one match, found {count} for:\n{old[:180]}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          replace_once('src/tts.js',
+          '''    initialFailureCount: 0, midstreamFailureCount: 0, skippedCount: 0,\n    budgetMissCount: 0, lastFailureAt: 0, lastError: null,''',
+          '''    initialFailureCount: 0, midstreamFailureCount: 0, skippedCount: 0,\n    runawayIncidentCount: 0, budgetMissCount: 0, lastFailureAt: 0, lastError: null,''')
+
+          replace_once('src/tts.js',
+          '''const geminiLimiter = { active: 0, queue: [], sequence: 0 };''',
+          '''const geminiLimiter = {\n  active: 0, queue: [], sequence: 0,\n  waitCount: 0, totalWaitMs: 0, maxWaitMs: 0, prefetchDeferredCount: 0\n};''')
+
+          replace_once('src/tts.js',
+          '''    entry.resolve(release);''',
+          '''    const waitMs = Math.max(0, performance.now() - entry.enqueuedAt);\n    geminiLimiter.waitCount += 1;\n    geminiLimiter.totalWaitMs += waitMs;\n    geminiLimiter.maxWaitMs = Math.max(geminiLimiter.maxWaitMs, waitMs);\n    entry.resolve(release);''')
+
+          replace_once('src/tts.js',
+          '''    const entry = { priority, sequence: geminiLimiter.sequence++, signal, resolve, reject, cleanup: null };''',
+          '''    const entry = { priority, sequence: geminiLimiter.sequence++, signal, resolve, reject, cleanup: null, enqueuedAt: performance.now() };''')
+
+          replace_once('src/tts.js',
+          '''function observeCompletion(key, state, generated, providerName, requestStartedAt, options, geminiProvider, configSignature) {''',
+          '''function recordRunawayMidstreamFailure(state, error, key = 'unknown') {\n  const now = Date.now();\n  state.runawayIncidentCount += 1;\n  state.failureCount += 1;\n  state.midstreamFailureCount += 1;\n  state.lastFailureAt = now;\n  state.lastError = sanitizeProviderError(error);\n  state.lastFailureKind = 'runaway/model-behavior';\n  // First audio was healthy; runaway extra speech is model behavior, not\n  // evidence that the provider cannot serve the next message. Do not apply\n  // the normal provider cooldown or increment consecutive health failures.\n  releaseHalfOpenProbe(key, state);\n}\n\nfunction observeCompletion(key, state, generated, providerName, requestStartedAt, options, geminiProvider, configSignature) {''')
+
+          replace_once('src/tts.js',
+          '''  completion.then(() => markCompleted(state, requestStartedAt, geminiProvider, key)).catch((error) => {\n    const budget = Boolean(error?.budgetLike || error?.name === 'TtsFailoverBudgetError');''',
+          '''  completion.then(() => markCompleted(state, requestStartedAt, geminiProvider, key)).catch((error) => {\n    if (error?.runawayLike) {\n      recordRunawayMidstreamFailure(state, error, key);\n      console.warn(`[provider-runaway:${providerName}] phase=midstream isolated=true message=${sanitizeProviderError(error)}`);\n      return;\n    }\n    const budget = Boolean(error?.budgetLike || error?.name === 'TtsFailoverBudgetError');''')
+
+          replace_once('src/tts.js',
+          '''async function runAttempt({ key, providerName, windowMs, parentSignal, attempts, factory, options, geminiProvider = true, priority = 0, apiKeySlot = null }) {''',
+          '''async function runAttempt({\n  key, providerName, windowMs, parentSignal, attempts, factory, options,\n  geminiProvider = true, priority = 0, apiKeySlot = null,\n  deferBudgetUntilGeminiSlot = false, onLimiterWait = null\n}) {''')
+
+          replace_once('src/tts.js',
+          '''  const requestStartedAt = Date.now();\n  const started = performance.now();\n  const abortable = attemptSignal(parentSignal, windowMs, providerName);\n  let releaseGemini = null;\n  let releaseOwnedByCompletion = false;\n  let providerStarted = false;\n  try {\n    if (geminiProvider) releaseGemini = await acquireGeminiSlot(priority, abortable.signal);\n    state.startedCount += 1;\n    providerStarted = true;\n    const generated = await factory(abortable.signal, options);\n    const elapsed = performance.now() - started;''',
+          '''  const requestStartedAt = Date.now();\n  const started = performance.now();\n  let providerStartedAt = started;\n  let abortable = null;\n  let releaseGemini = null;\n  let releaseOwnedByCompletion = false;\n  let providerStarted = false;\n  try {\n    if (geminiProvider && deferBudgetUntilGeminiSlot) {\n      const limiterWaitStarted = performance.now();\n      releaseGemini = await acquireGeminiSlot(priority, parentSignal);\n      const limiterWaitMs = Math.max(0, performance.now() - limiterWaitStarted);\n      if (limiterWaitMs >= 1) geminiLimiter.prefetchDeferredCount += 1;\n      if (typeof onLimiterWait === 'function') onLimiterWait(limiterWaitMs);\n      // Speculative prefetch should not burn a remote first-audio window while\n      // merely waiting for a local Gemini concurrency slot.\n      providerStartedAt = performance.now();\n      abortable = attemptSignal(parentSignal, windowMs, providerName);\n    } else {\n      abortable = attemptSignal(parentSignal, windowMs, providerName);\n      if (geminiProvider) releaseGemini = await acquireGeminiSlot(priority, abortable.signal);\n    }\n    state.startedCount += 1;\n    providerStarted = true;\n    const generated = await factory(abortable.signal, options);\n    const elapsed = performance.now() - providerStartedAt;''')
+
+          replace_once('src/tts.js',
+          '''  } catch (rawError) {\n    const error = abortable.signal.aborted && abortable.signal.reason instanceof Error ? abortable.signal.reason : rawError;\n    const elapsed = performance.now() - started;''',
+          '''  } catch (rawError) {\n    const error = abortable?.signal?.aborted && abortable.signal.reason instanceof Error ? abortable.signal.reason : rawError;\n    const elapsed = performance.now() - providerStartedAt;''')
+
+          replace_once('src/tts.js',
+          '''    abortable.cleanup();\n  }\n}''',
+          '''    abortable?.cleanup();\n  }\n}''')
+
+          replace_once('src/tts.js',
+          '''  const deadline = started + configuredBudget;\n  const remaining = () => Math.max(0, deadline - performance.now());\n  const parentSignal = context.signal;\n  const bufferProviders = context.liveStreamOutput === false;\n  const attemptPriority = context.prefetch === true ? 1 : 0;''',
+          '''  const deadline = started + configuredBudget;\n  let deferredLimiterWaitMs = 0;\n  const remaining = () => Math.max(0, deadline - performance.now() + deferredLimiterWaitMs);\n  const parentSignal = context.signal;\n  const bufferProviders = context.liveStreamOutput === false;\n  const attemptPriority = context.prefetch === true ? 1 : 0;\n  const deferGeminiBudgetForPrefetch = context.prefetch === true;\n  const creditLimiterWait = (ms) => {\n    if (deferGeminiBudgetForPrefetch) deferredLimiterWaitMs += Math.max(0, Number(ms) || 0);\n  };''')
+
+          text = Path('src/tts.js').read_text(encoding='utf-8')
+          old_tail = '''      priority: attemptPriority,\n      apiKeySlot: requestApiKeySlot\n    });'''
+          new_tail = '''      priority: attemptPriority,\n      apiKeySlot: requestApiKeySlot,\n      deferBudgetUntilGeminiSlot: deferGeminiBudgetForPrefetch,\n      onLimiterWait: creditLimiterWait\n    });'''
+          if text.count(old_tail) != 3:
+              raise SystemExit(f'src/tts.js: expected 3 Gemini attempt tails, found {text.count(old_tail)}')
+          Path('src/tts.js').write_text(text.replace(old_tail, new_tail), encoding='utf-8')
+
+          replace_once('src/tts.js',
+          '''    budgetMissCount: state.budgetMissCount,\n    lastError: state.lastError,''',
+          '''    budgetMissCount: state.budgetMissCount,\n    runawayIncidentCount: state.runawayIncidentCount,\n    lastError: state.lastError,''')
+
+          replace_once('src/tts.js',
+          '''  recentGeminiQuotaFailures.length = 0;\n  for (const state of Object.values(providerStates)) {''',
+          '''  recentGeminiQuotaFailures.length = 0;\n  geminiLimiter.waitCount = 0;\n  geminiLimiter.totalWaitMs = 0;\n  geminiLimiter.maxWaitMs = 0;\n  geminiLimiter.prefetchDeferredCount = 0;\n  for (const state of Object.values(providerStates)) {''')
+
+          replace_once('src/tts.js',
+          '''    geminiLimiter: { active: geminiLimiter.active, queued: geminiLimiter.queue.length, max: healthOptions().globalGeminiConcurrency },''',
+          '''    geminiLimiter: {\n      active: geminiLimiter.active, queued: geminiLimiter.queue.length, max: healthOptions().globalGeminiConcurrency,\n      waitCount: geminiLimiter.waitCount, totalWaitMs: geminiLimiter.totalWaitMs,\n      maxWaitMs: geminiLimiter.maxWaitMs, prefetchDeferredCount: geminiLimiter.prefetchDeferredCount\n    },''')
+
+          replace_once('src/tts.js',
+          '''export const __test = { makeBudgetError, setProviderFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };''',
+          '''export const __test = { makeBudgetError, setProviderFailure, recordRunawayMidstreamFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, runAttempt, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };''')
+
+          replace_once('src/audio.js',
+          '''    completionGraceTimeouts: 0, pipelineFailures: 0, lastSpeakerAnnouncement: null,''',
+          '''    completionGraceTimeouts: 0, pipelineFailures: 0, runawayRecoveriesSuppressed: 0, lastSpeakerAnnouncement: null,''')
+
+          replace_once('src/audio.js',
+          '''  if (staleEpoch || staleSerial) {\n    state.suppressedCutoffReplays = (Number(state.suppressedCutoffReplays) || 0) + 1;\n    return false;\n  }\n  const metadata = {''',
+          '''  if (staleEpoch || staleSerial) {\n    state.suppressedCutoffReplays = (Number(state.suppressedCutoffReplays) || 0) + 1;\n    return false;\n  }\n  const runawayFailure = Boolean(error?.runawayLike || triggerError?.runawayLike);\n  if (runawayFailure) {\n    // The guard intentionally stopped unwanted generated speech. Recovering a\n    // PCM/text tail here would continue the hallucinated answer and block FIFO.\n    if (!item.runawayRecoverySuppressed) {\n      item.runawayRecoverySuppressed = true;\n      state.runawayRecoveriesSuppressed = (Number(state.runawayRecoveriesSuppressed) || 0) + 1;\n      state.suppressedCutoffReplays = (Number(state.suppressedCutoffReplays) || 0) + 1;\n      console.warn(`[queue:${guildId}] Runaway Live output stopped; recovery intentionally suppressed.`);\n    }\n    return false;\n  }\n  const metadata = {''')
+
+          replace_once('src/audio.js',
+          '''    suppressedCutoffReplays: 0, completionGraceTimeouts: 0, pipelineFailures: 0''',
+          '''    suppressedCutoffReplays: 0, completionGraceTimeouts: 0, pipelineFailures: 0, runawayRecoveriesSuppressed: 0''')
+
+          replace_once('src/audio.js',
+          '''    suppressedCutoffReplays: state.suppressedCutoffReplays, completionGraceTimeouts: state.completionGraceTimeouts,\n    pipelineFailures: state.pipelineFailures''',
+          '''    suppressedCutoffReplays: state.suppressedCutoffReplays, completionGraceTimeouts: state.completionGraceTimeouts,\n    pipelineFailures: state.pipelineFailures, runawayRecoveriesSuppressed: state.runawayRecoveriesSuppressed''')
+
+          replace_once('src/commands.js',
+          '''      return `${name}: ${availability} • first ${state.firstAudioSuccessCount}/${state.startedCount} • done ${state.successCount} • fail ${state.failureCount} • skip ${state.skippedCount} • budget ${state.budgetMissCount}`;''',
+          '''      const runaway = state.runawayIncidentCount > 0 ? ` • runaway ${state.runawayIncidentCount}` : '';\n      return `${name}: ${availability} • first ${state.firstAudioSuccessCount}/${state.startedCount} • done ${state.successCount} • fail ${state.failureCount} • skip ${state.skippedCount} • budget ${state.budgetMissCount}${runaway}`;''')
+
+          replace_once('src/commands.js',
+          '''            `Gemini concurrency: ${provider.geminiLimiter.active}/${provider.geminiLimiter.max} active • ${provider.geminiLimiter.queued} waiting${provider.halfOpenProbeKey ? ` • probe ${provider.halfOpenProbeKey}` : ''}`,\n            `Completed totals: Gemini ${provider.geminiSuccessCount} • Google ${provider.fallbackCount} • last ${provider.lastProvider ?? 'none'}`''',
+          '''            `Gemini concurrency: ${provider.geminiLimiter.active}/${provider.geminiLimiter.max} active • ${provider.geminiLimiter.queued} waiting${provider.halfOpenProbeKey ? ` • probe ${provider.halfOpenProbeKey}` : ''}`,\n            provider.geminiLimiter.waitCount > 0\n              ? `Limiter waits: ${provider.geminiLimiter.waitCount} • avg ${Math.round(provider.geminiLimiter.totalWaitMs / provider.geminiLimiter.waitCount)}ms • max ${Math.round(provider.geminiLimiter.maxWaitMs)}ms • prefetch deferred ${provider.geminiLimiter.prefetchDeferredCount}`\n              : 'Limiter waits: none',\n            `Completed totals: Gemini ${provider.geminiSuccessCount} • Google ${provider.fallbackCount} • last ${provider.lastProvider ?? 'none'}`''')
+
+          replace_once('src/commands.js',
+          '''            `Recovery ${audio.cutoffRecoverySuccesses}/${audio.cutoffRecoveries} • PCM-tail ${audio.mirrorReplays} • duplicate replay prevented ${audio.suppressedCutoffReplays} • pipeline failures ${audio.pipelineFailures}`,''',
+          '''            `Recovery ${audio.cutoffRecoverySuccesses}/${audio.cutoffRecoveries} • PCM-tail ${audio.mirrorReplays} • duplicate replay prevented ${audio.suppressedCutoffReplays} • runaway recovery suppressed ${audio.runawayRecoveriesSuppressed} • pipeline failures ${audio.pipelineFailures}`,''')
+
+          Path('test/runaway-isolation.test.js').write_text(dedent(r'''\
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+
+          process.env.DISCORD_TOKEN ||= 'test-token';
+          process.env.DISCORD_CLIENT_ID ||= '123456789012345678';
+          process.env.DISCORD_GUILD_ID ||= '123456789012345678';
+
+          const tts = await import('../src/tts.js');
+          const audio = await import('../src/audio.js');
+
+          test('runaway Live completion is counted but does not cool down provider health', () => {
+            const state = tts.__test.newProviderState();
+            const error = Object.assign(new Error('Gemini Live runaway-audio guard stopped output.'), { runawayLike: true });
+            tts.__test.recordRunawayMidstreamFailure(state, error, 'livePrimary');
+            assert.equal(state.runawayIncidentCount, 1);
+            assert.equal(state.failureCount, 1);
+            assert.equal(state.midstreamFailureCount, 1);
+            assert.equal(state.consecutiveFailures, 0);
+            assert.equal(state.cooldownUntil, 0);
+            assert.equal(state.cooldownReason, null);
+            assert.equal(state.lastFailureKind, 'runaway/model-behavior');
+          });
+
+          test('runaway Live output never schedules cutoff recovery', () => {
+            const item = audio.__test.createQueueItem('hello world', { verificationText: 'hello world' });
+            item.runSerial = 1;
+            item.recoveryEpoch = 0;
+            const state = { disposed: false, recoveryEpoch: 0, runSerial: 1, suppressedCutoffReplays: 0, runawayRecoveriesSuppressed: 0 };
+            const error = Object.assign(new Error('runaway'), { runawayLike: true });
+            const recovered = audio.__test.handleCompletionRecovery(
+              'test-guild', state, item,
+              { audioFormat: 's16le', sampleRate: 24_000, channels: 1 },
+              1200, 1, { error, triggerError: error }
+            );
+            assert.equal(recovered, false);
+            assert.equal(item.recoveryScheduled, false);
+            assert.equal(state.runawayRecoveriesSuppressed, 1);
+            assert.equal(state.suppressedCutoffReplays, 1);
+          });
+
+          test('prefetch limiter waiting does not consume provider first-audio window', async () => {
+            tts.restartTtsRuntime();
+            const release1 = await tts.__test.acquireGeminiSlot(0, null);
+            const release2 = await tts.__test.acquireGeminiSlot(0, null);
+            let creditedWaitMs = 0;
+            const attempts = [];
+            try {
+              const pending = tts.__test.runAttempt({
+                key: 'livePrimary', providerName: 'test-live', windowMs: 300,
+                parentSignal: null, attempts,
+                factory: async () => ({ completion: Promise.resolve({}) }),
+                options: {}, geminiProvider: true, priority: 1,
+                deferBudgetUntilGeminiSlot: true,
+                onLimiterWait: (ms) => { creditedWaitMs += ms; }
+              });
+              const timer = setTimeout(() => release1(), 360);
+              const result = await pending;
+              clearTimeout(timer);
+              assert.ok(result.result);
+              assert.ok(creditedWaitMs >= 300, `expected limiter wait >=300ms, got ${creditedWaitMs}`);
+              assert.equal(attempts.at(-1)?.outcome, 'first-audio');
+            } finally {
+              release1();
+              release2();
+            }
+          });
+          '''), encoding='utf-8')
+          PY
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax checks
+        run: |
+          node --check src/tts.js
+          node --check src/audio.js
+          node --check src/commands.js
+          node --check test/runaway-isolation.test.js
+
+      - name: Full regression suite
+        run: npm test
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/tts.js src/audio.js src/commands.js test/runaway-isolation.test.js
+          git commit -m "Fix runaway Live queue poisoning"
+          git push origin HEAD:fix/runaway-isolation-v2
