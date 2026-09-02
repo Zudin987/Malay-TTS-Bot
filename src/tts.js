@@ -396,7 +396,9 @@ function shouldIsolateLiveMidstreamFailure(error, key) {
   // Quota, credentials, access and invalid request/config errors describe a
   // real condition that can affect the next fresh Live turn. Temporary errors
   // after first audio do not: each Discord message opens a new one-turn session.
-  return !error?.dailyQuotaLike
+  return !error?.cancelled
+    && !error?.budgetLike
+    && !error?.dailyQuotaLike
     && !error?.quotaLike
     && !error?.authLike
     && !error?.permissionLike

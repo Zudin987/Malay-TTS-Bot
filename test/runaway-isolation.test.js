@@ -35,6 +35,8 @@ test('temporary Live midstream timeout is counted without poisoning next-turn he
 });
 
 test('serious Live quota/auth/config failures are not isolated', () => {
+  assert.equal(tts.__test.shouldIsolateLiveMidstreamFailure({ cancelled: true }, 'livePrimary'), false);
+  assert.equal(tts.__test.shouldIsolateLiveMidstreamFailure({ budgetLike: true }, 'livePrimary'), false);
   assert.equal(tts.__test.shouldIsolateLiveMidstreamFailure({ quotaLike: true }, 'livePrimary'), false);
   assert.equal(tts.__test.shouldIsolateLiveMidstreamFailure({ authLike: true }, 'livePrimary'), false);
   assert.equal(tts.__test.shouldIsolateLiveMidstreamFailure({ configLike: true }, 'livePrimary'), false);
