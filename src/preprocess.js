@@ -26,7 +26,7 @@ function isGif(attachment) {
 function isImage(attachment) {
   return !isGif(attachment) && (
     attachment.contentType?.startsWith('image/') ||
-    /\.(png|jpe?g|webp|bmp|avif)$/iu.test(attachment.name ?? '')
+    /\.(png|jpe?g|jfif|webp|bmp|avif|heic|heif|jxl|tiff?)$/iu.test(attachment.name ?? '')
   );
 }
 
