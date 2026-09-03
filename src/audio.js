@@ -625,13 +625,15 @@ function scheduleCompletionGraceCancel(guildId, state, generated, context = {}) 
   state.pendingCompletions ??= new Set();
   state.pendingCompletions.add(item);
   item.completionPending = true;
+  let failed = Boolean(context.triggerError);
   const graceMs = getCompletionGraceMs();
   const deadline = deadlineSignal(item.abortController?.signal, graceMs, new Error('Completion metadata grace expired.'));
-  const cancel = () => { try { generated.cancel?.(deadline.signal.reason); } catch {} };
+  const cancel = () => { try { Promise.resolve(generated.cancel?.(deadline.signal.reason)).catch(() => {}); } catch {} };
   deadline.signal.addEventListener('abort', cancel, { once: true });
   raceWithSignal(completion, deadline.signal).then((info) => {
     handleCompletionRecovery(guildId, state, item, generated, context.playedMs, context.playbackSpeed, { info, triggerError: context.triggerError || null });
   }, (error) => {
+    if (!deadline.signal.aborted) failed = true;
     const timedOut = deadline.signal.aborted && !item.abortController?.signal.aborted;
     if (timedOut) state.completionGraceTimeouts = (Number(state.completionGraceTimeouts) || 0) + 1;
     if (!deadline.signal.aborted) handleCompletionRecovery(guildId, state, item, generated, context.playedMs, context.playbackSpeed, { error, triggerError: context.triggerError || null });
@@ -640,7 +642,7 @@ function scheduleCompletionGraceCancel(guildId, state, generated, context = {}) 
     deadline.cleanup();
     state.pendingCompletions.delete(item);
     item.completionPending = false;
-    if (!item.recoveryScheduled) finishLogicalJob(item, context.triggerError ? 'unavailable' : 'finished');
+    if (!item.recoveryScheduled) finishLogicalJob(item, failed ? 'unavailable' : 'finished');
   }).catch(() => {});
   return true;
 }
@@ -1090,6 +1092,7 @@ async function runQueue(guildId, state, makePipeline = createMessagePipeline) {
     if ((completionResult.error || completionResult.info) && !item.cancelled && !state.disposed) {
       const recovered = handleCompletionRecovery(guildId, state, item, generated, playedMs, messagePlaybackSpeed, completionResult);
       if (!recovered && completionResult.error) {
+        outcome = 'unavailable';
         state.suppressedCutoffReplays += 1;
         console.warn(`[queue:${guildId}] Midstream provider failure occurred after ${Math.round(playedMs)}ms; no safe tail was available.`);
       }

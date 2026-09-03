@@ -73,7 +73,7 @@ export function compactAskAnswer(value, maxCharacters = 450) {
   if (!text) return '';
 
   const points = Array.from(text);
-  if (points.length <= limit) return text;
+  if (text.length <= limit) return text;
   const preview = points.slice(0, limit + 1).join('');
   const floor = Math.floor(limit * 0.55);
   let cut = -1;
@@ -87,7 +87,8 @@ export function compactAskAnswer(value, maxCharacters = 450) {
   }
   if (cut < 1) cut = limit;
   text = preview.slice(0, cut).trimEnd();
-  const body = Array.from(text).slice(0, Math.max(1, limit - 1)).join('').trimEnd();
+  // Discord field limits count UTF-16 units, including both halves of emoji.
+  const body = text.slice(0, Math.max(1, limit - 1)).replace(/[\uD800-\uDBFF]$/u, '').trimEnd();
   return `${body}…`;
 }
 

@@ -2,134 +2,109 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
   pull_request:
-    branches: [main, develop]
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
-  validate:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  test:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: validate
+          - os: windows-latest
+            name: windows-validate
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-
       - uses: actions/setup-node@v7
         with:
-          node-version: '24'
+          node-version: '24.19.0'
           cache: npm
-
       - name: Install dependencies
         run: npm ci
-
-      - name: Archive Linux test dependencies
-        run: tar -czf "$RUNNER_TEMP/test-dependencies.tar.gz" node_modules
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-test-dependencies
-          path: ${{ runner.temp }}/test-dependencies.tar.gz
-          retention-days: 1
-
-      - name: JavaScript syntax
-        shell: bash
-        run: |
-          find . -type f -name '*.js' -not -path './node_modules/*' -print0 \
-            | xargs -0 -n1 node --check
-
-      - name: JSON validation
-        shell: bash
-        run: |
-          node --input-type=module <<'NODE'
-          import fs from 'node:fs';
-          import path from 'node:path';
-          const roots = ['config', 'package.json', 'package-lock.json'];
-          const files = [];
-          for (const item of roots) {
-            if (!fs.existsSync(item)) continue;
-            const stat = fs.statSync(item);
-            if (stat.isFile()) files.push(item);
-            else {
-              for (const name of fs.readdirSync(item)) {
-                if (name.endsWith('.json')) files.push(path.join(item, name));
-              }
-            }
-          }
-          for (const file of files) JSON.parse(fs.readFileSync(file, 'utf8'));
-          console.log(`Validated ${files.length} JSON file(s).`);
-          NODE
-
-      - name: Regression tests
-        run: npm test
-
+      - name: Five consecutive full regression passes
+        run: node scripts/repeat-tests.mjs
+      - name: Validate all source JavaScript, JSON and private-file exclusions
+        run: node scripts/validate-source.mjs
+      - name: Exercise real ZIP integrity and exclusion checks
+        run: python scripts/test-clean-package.py
       - name: Dependency audit
         run: npm audit --audit-level=high
-
-      - name: Install FFmpeg
+      - name: Install Linux FFmpeg
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
-
-      - name: FFmpeg/libopus probe
+      - name: Linux FFmpeg/Opus round trip
+        if: runner.os == 'Linux'
         shell: bash
         run: |
-          ffmpeg -hide_banner -loglevel error \
-            -f lavfi -i 'sine=frequency=440:duration=0.20' \
-            -af 'volume=0.600,alimiter=limit=0.562341:attack=1.0:release=60.0:level=false' \
-            -c:a libopus -f ogg -y /tmp/malay-tts-probe.ogg
+          ffmpeg -hide_banner -loglevel error -f lavfi -i 'sine=frequency=440:duration=0.20' -af 'volume=0.600,alimiter=limit=0.562341:attack=1.0:release=60.0:level=false' -c:a libopus -f ogg -y /tmp/malay-tts-probe.ogg
           ffmpeg -hide_banner -loglevel error -i /tmp/malay-tts-probe.ogg -f null -
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tests-${{ runner.os }}-${{ github.sha }}
+          path: artifacts/*.log
+          retention-days: 14
 
-      - name: Secret/runtime file guard
-        shell: bash
-        run: |
-          test ! -e .env
-          test ! -e data/guilds.json
-          test ! -e data/guilds.json.bak
-          test ! -e data/bot.lock
-          test ! -e data/stop.request
-          test ! -d data/speaker-label-cache
-          test ! -d runtime
-          test ! -d temp
-          test ! -e bot.log
-          test ! -e bot-old.log
-
-  windows-validate:
+  package-windows:
+    name: clean-windows-package
+    needs: test
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      - name: Build from tracked source and checksum-pinned runtimes
+        shell: pwsh
+        run: python scripts/build-clean.py --archives "$env:RUNNER_TEMP/runtime-archives" --output dist --commit "$env:GITHUB_SHA"
+      - name: Verify every ZIP member and re-extract the final CLEAN archive
+        shell: pwsh
+        run: |
+          $Zip = (Get-ChildItem dist -Filter '*-CLEAN.zip').FullName
+          python scripts/verify-clean.py $Zip --expected-commit "$env:GITHUB_SHA" --extract 'C:/'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test packaged Node/npm/FFmpeg, SYSTEM start/stop and inherited ACLs
+        shell: pwsh
+        run: ./scripts/verify-windows.ps1 -PackagePath 'C:\Malay-TTS-Bot'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clean-windows-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
 
+  release:
+    name: publish-validated-release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, package-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: clean-release
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: '24'
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: JavaScript syntax
-        shell: pwsh
-        run: |
-          Get-ChildItem -Recurse -Filter *.js |
-            Where-Object { $_.FullName -notmatch '[\\/]node_modules[\\/]' } |
-            ForEach-Object {
-              node --check $_.FullName
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            }
-
-      - name: JSON validation
-        shell: pwsh
-        run: |
-          node -e "const fs=require('fs'),p=require('path'); const files=['package.json','package-lock.json',...fs.readdirSync('config').filter(x=>x.endsWith('.json')).map(x=>p.join('config',x))]; for(const f of files) JSON.parse(fs.readFileSync(f,'utf8')); console.log('Validated '+files.length+' JSON file(s).')"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Regression tests on Windows
-        run: npm test
-
-      - name: Secret/runtime file guard
-        shell: pwsh
-        run: |
-          $forbidden = @('.env', 'data/guilds.json', 'data/guilds.json.bak', 'data/bot.lock', 'data/stop.request', 'data/speaker-label-cache', 'runtime', 'temp', 'bot.log', 'bot-old.log')
-          foreach ($item in $forbidden) {
-            if (Test-Path $item) { throw "Forbidden runtime/private path committed: $item" }
-          }
+          node-version: '24.19.0'
+      - uses: actions/download-artifact@v4
+        with:
+          name: clean-windows-${{ github.sha }}
+          path: dist
+      - name: Recheck the exact validated package before publishing
+        shell: bash
+        run: python scripts/verify-clean.py dist/*-CLEAN.zip --expected-commit "$GITHUB_SHA"
+      - name: Publish the new version after all Linux, Windows and package gates
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/publish-release.mjs

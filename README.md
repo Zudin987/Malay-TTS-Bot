@@ -6,9 +6,9 @@ Lightweight design: Gemini first, Google Malay fallback, no local AI model, and 
 
 ## Use
 
-1. Install/use the bot at `C:\Malay-TTS-Bot`.
+1. Stop the previous bot with `stop-bot.vbs`, then install/use the bot at `C:\Malay-TTS-Bot`.
 2. On upgrade, preserve only `.env` and `data\guilds.json`.
-3. Replace the old app files with the new clean build.
+3. Extract the new CLEAN build into an empty installation and restore only those two user files.
 4. Run `setup-clean.cmd` **as administrator**. It installs dependencies, protects the state directory and registers the SYSTEM task.
 5. Run `doctor.cmd` if you want to verify dependencies/audio.
 6. Start the **Malay TTS Bot** Task Scheduler task, or use `restart-bot.vbs`.
@@ -94,3 +94,11 @@ Historical release notes are available on [GitHub Releases](../../releases).
 The checked-in `install-task.ps1` registers the portable Node executable, absolute bootstrap path and `C:\Malay-TTS-Bot` working directory under SYSTEM. It uses one instance, a startup trigger and three restarts after failure. The `data` directory grants inherited access to SYSTEM, Administrators and the installing user, so new atomic state files and backups keep the same protection.
 
 A small control socket bound only to `127.0.0.1` provides OS-owned exclusivity and nonce/PID-bound graceful stopping. The port is derived from the installation path (23000–38999). `data/bot.lock` records identity; stale, empty or corrupt records are replaced only after the OS grants ownership. A port collision fails closed. Stop control starts before Discord login, startup is limited to 45 seconds and shutdown to five seconds. The bot does not kill an arbitrary PID or poll a stop-request file.
+
+## Release validation
+
+v0.24.0 ships portable Node 24.19.0 including npm, and FFmpeg 9.0.1. Source commits contain no binaries. `scripts/build-clean.py` downloads checksum-pinned runtimes and builds from tracked source using an explicit allowlist and fixed archive ordering/timestamps. `release-manifest.json` records the source commit and per-file checksums.
+
+CI requires five consecutive full test passes on both Linux and Windows. It re-extracts the real CLEAN ZIP, checks every shipped JavaScript and JSON file (including portable npm), installs application dependencies with bundled npm and no system Node on PATH, and verifies two SYSTEM starts/stops, ten-key rotation, the PCM/filter/Opus/decode path and inherited private-state ACLs. Publishing from main depends on every gate passing and never overwrites an existing release/tag.
+
+Repository administrators should separately require `validate`, `windows-validate` and `clean-windows-package` in branch protection. Workflow publishing gates do not configure GitHub's merge permissions.

@@ -332,4 +332,7 @@ test('/ask limits align with Discord embed field limits and include ellipsis ins
   const compact = compactAskAnswer('A'.repeat(1400), 1024);
   assert.ok(Array.from(compact).length <= 1024);
   assert.match(compact, /…$/u);
+  const unicode = compactAskAnswer('😀'.repeat(700), 1024);
+  assert.ok(unicode.length <= 1024);
+  assert.equal(unicode.isWellFormed(), true);
 });

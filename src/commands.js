@@ -29,8 +29,7 @@ import {
   connectToVoiceChannel,
   disconnectGuild,
   getRuntimeVoiceChannelId,
-  getVoiceRuntimeStatus,
-  isVoiceRecovering
+  getVoiceRuntimeStatus
 } from './voice.js';
 
 import { getLastSettingsError, loadSettings, settings } from './config.js';

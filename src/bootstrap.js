@@ -16,7 +16,8 @@ export async function startBot({ directory = defaultInstanceDirectory, loadApp =
     clearTimeout(startupTimer);
     if (app) return app.gracefulShutdown('local stop control');
     // This path is installed before importing index.js / awaiting Discord login.
-    const deadline = setTimeout(() => process.exit(1), 5000);
+    // A requested stop must stay stopped; a nonzero exit would trigger Scheduler restart.
+    const deadline = setTimeout(() => process.exit(0), 5000);
     await terminateAllChildren();
     await flushLogs();
     clearTimeout(deadline);

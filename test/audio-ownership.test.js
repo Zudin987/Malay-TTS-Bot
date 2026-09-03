@@ -117,6 +117,18 @@ test('metadata observers retire after grace even when cancel and completion neve
   } finally { settings.audioPipeline.completionGraceMs = prior; audio.releaseAudio(guildId); }
 });
 
+test('a failed late completion terminalizes unavailable when no recovery remains', async () => {
+  const guildId = 'failed-late-completion';
+  const state = audio.__test.getState(guildId);
+  const outcomes = [];
+  const item = audio.__test.createQueueItem('hello', { recoveryAttempt: 2, onTerminal: (outcome) => outcomes.push(outcome) });
+  audio.__test.scheduleCompletionGraceCancel(guildId, state, { completion: Promise.reject(new Error('provider completion failed')), cancel() {} }, { item, playedMs: 2000, playbackSpeed: 1 });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(outcomes, ['unavailable']);
+  assert.equal(state.pendingCompletions.size, 0);
+  audio.releaseAudio(guildId);
+});
+
 test('prefetch does not cross a noPrefetch item behind a normal candidate', () => {
   const first = { generation: null };
   const barrier = { generation: null, noPrefetch: true };

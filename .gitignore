@@ -14,3 +14,9 @@ data/guilds.json.bak
 
 # Portable runtimes/binaries belong in release ZIPs, not Git source.
 runtime/
+
+# Local validation and release output.
+dist/
+artifacts/
+__pycache__/
+*.pyc

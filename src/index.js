@@ -153,7 +153,8 @@ export async function gracefulShutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[shutdown] ${signal}; cleaning up.`);
-  const deadline = setTimeout(() => process.exit(1), 5000);
+  // A requested stop must stay stopped; a nonzero exit would trigger Scheduler restart.
+  const deadline = setTimeout(() => process.exit(0), 5000);
   try {
     disconnectAllGuilds();
     client.destroy();

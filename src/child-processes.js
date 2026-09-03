@@ -36,6 +36,7 @@ export function terminateChild(child, { graceMs = 250, timeoutMs = 1000 } = {}) 
     try { child.stdin?.destroy?.(); child.kill('SIGTERM'); } catch {}
   });
   stopping.set(child, result);
+  void result.then(() => stopping.delete(child));
   return result;
 }
 
