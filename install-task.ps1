@@ -30,5 +30,5 @@ $System = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount 
 $Settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName $TaskName -TaskPath '\' -Action $Action -Trigger $Trigger -Principal $System -Settings $Settings -Description 'Malay TTS Bot: portable Node, SYSTEM, bounded startup and clean stop control.' -Force | Out-Null
 $Task = Get-ScheduledTask -TaskName $TaskName -TaskPath '\'
-if ($Task.Principal.UserId -notin @('SYSTEM', 'S-1-5-18') -or $Task.Actions[0].Execute -ne $Node -or $Task.Actions[0].WorkingDirectory -ne $InstallPath) { throw 'The registered task does not match the required SYSTEM runtime.' }
+if ($Task.Principal.UserId -notin @('SYSTEM', 'NT AUTHORITY\SYSTEM', 'S-1-5-18') -or $Task.Actions[0].Execute -ne $Node -or $Task.Actions[0].WorkingDirectory -ne $InstallPath) { throw 'The registered task does not match the required SYSTEM runtime.' }
 Write-Host "Installed '$TaskName' as SYSTEM with the portable Node runtime. Start it from Task Scheduler or restart-bot.vbs."

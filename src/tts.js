@@ -725,7 +725,6 @@ export async function synthesize(text, context = {}) {
   let deferredLimiterWaitMs = 0;
   const remaining = () => Math.max(0, deadline - performance.now() + deferredLimiterWaitMs);
   const parentSignal = context.signal;
-  const health = healthOptions();
   const bufferSelected = async (attempt, providerName) => {
     if (!attempt.result || context.liveStreamOutput !== false) return attempt;
     try {
