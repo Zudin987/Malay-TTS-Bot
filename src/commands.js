@@ -43,8 +43,8 @@ import { getOrAssignTtsVoice, getTtsProviderStatus, restartTtsRuntime } from './
 import { GEMINI_VOICES, GEMINI_VOICE_OPTIONS } from './voices.js';
 import { getSpeakerLabelStatus } from './speaker-label.js';
 import { getFfmpegPath } from './ffmpeg.js';
-import { askGemini, describeAskError, getAskOptions } from './ask.js';
-import { ASK_ALLOWED_MENTIONS, beginAskTtsRequest, buildAskEmbed, queueAskAnswerTts } from './ask-response.js';
+import { getAskOptions } from './ask.js';
+import { executeAskRequest } from './ask-command.js';
 import { describeTtsRestartBlockers, getTtsRestartBlockers } from './restart-guard.js';
 
 const ephemeral = MessageFlags.Ephemeral;
@@ -107,28 +107,7 @@ const askCommand = {
     ),
 
   async execute(interaction) {
-    const question = interaction.options.getString('question', true);
-    const askTtsSequence = beginAskTtsRequest(interaction.guildId, interaction.user.id);
-    await interaction.deferReply();
-    try {
-      const { answer } = await askGemini(question, { options: getAskOptions(settings.ask) });
-      const embed = buildAskEmbed(interaction, question, answer);
-      await interaction.editReply({
-        content: null,
-        embeds: [embed],
-        allowedMentions: ASK_ALLOWED_MENTIONS
-      });
-      void queueAskAnswerTts(interaction, answer, askTtsDependencies, { requestSequence: askTtsSequence }).catch((error) => {
-        console.warn('[ask-tts]', error?.message || error);
-      });
-    } catch (error) {
-      console.warn('[ask]', error?.code || error?.name || 'error', error?.status || '');
-      await interaction.editReply({
-        content: describeAskError(error),
-        embeds: [],
-        allowedMentions: ASK_ALLOWED_MENTIONS
-      });
-    }
+    await executeAskRequest(interaction, { options: getAskOptions(settings.ask), ttsDependencies: askTtsDependencies });
   }
 };
 

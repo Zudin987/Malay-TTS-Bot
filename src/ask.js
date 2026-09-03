@@ -1,3 +1,4 @@
+import { cancellationError, deadlineSignal, discardGenerated, raceWithSignal, readResponseBuffer, throwIfAborted } from './cancellation.js';
 import {
   disableGeminiApiKeySlot,
   getGeminiApiKeyRoundRobinStatus,
@@ -129,6 +130,7 @@ function apiFailure(status, payload) {
 }
 
 export function describeAskError(error) {
+  if (error?.cancelled) return 'Superseded by a newer /ask request.';
   if (error?.code === 'disabled') return '/ask is disabled in config/settings.json.';
   if (error?.code === 'no-key') return 'Gemini /ask is not configured right now.';
   if (error?.code === 'quota') return 'Gemini is rate-limited right now. Try again later.';
@@ -156,65 +158,56 @@ export async function askGemini(question, {
   fetchImpl = globalThis.fetch,
   keyEntry = null,
   keyManager = null,
-  options = getAskOptions()
+  options = getAskOptions(),
+  signal = null,
+  onAccepted = null
 } = {}) {
+  throwIfAborted(signal);
   if (!options.enabled) throw new AskError('disabled', '/ask is disabled.');
   if (typeof fetchImpl !== 'function') throw new AskError('api', 'Fetch is unavailable.');
-  if (activeAskRequests >= ASK_MAX_CONCURRENCY) {
-    throw new AskError('busy', `Gemini /ask already has ${activeAskRequests} active requests.`);
-  }
-
+  if (activeAskRequests >= ASK_MAX_CONCURRENCY) throw new AskError('busy', `Gemini /ask already has ${activeAskRequests} active requests.`);
+  const body = JSON.stringify(buildAskRequest(question, options));
+  const manager = keyManager ?? runtimeKeyManager();
+  const automaticSelection = keyEntry == null;
+  let selectedKey = keyEntry ?? manager.next();
+  if (!selectedKey?.key) throw new AskError('no-key', 'No Gemini API key is configured.');
+  const availableAtStart = automaticSelection ? Math.max(1, Number(manager.status?.()?.availableCount) || 1) : 1;
   activeAskRequests += 1;
+  const deadline = deadlineSignal(signal, options.timeoutMs, new AskError('timeout', `Gemini /ask timed out after ${options.timeoutMs}ms.`));
   try {
-    const manager = keyManager ?? runtimeKeyManager();
-    const automaticSelection = keyEntry == null;
-    let selectedKey = keyEntry ?? manager.next();
-    if (!selectedKey?.key) throw new AskError('no-key', 'No Gemini API key is configured.');
-    const availableAtStart = automaticSelection
-      ? Math.max(1, Number(manager.status?.()?.availableCount) || 1)
-      : 1;
+    // Admission and latest-wins are one synchronous operation. Rejected work
+    // never invalidates an already accepted request.
+    onAccepted?.();
     let credentialAttempts = 0;
-
     while (selectedKey?.key) {
+      throwIfAborted(deadline.signal);
       credentialAttempts += 1;
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), options.timeoutMs);
-      timer.unref?.();
-      let response;
-      try {
-        response = await fetchImpl(`${API_ROOT}/${encodeURIComponent(options.model)}:generateContent`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': selectedKey.key,
-            'x-goog-api-client': 'malay-tts-bot/ask'
-          },
-          body: JSON.stringify(buildAskRequest(question, options)),
-          signal: controller.signal
-        });
-      } catch (error) {
-        if (controller.signal.aborted || error?.name === 'AbortError') {
-          throw new AskError('timeout', `Gemini /ask timed out after ${options.timeoutMs}ms.`);
-        }
-        throw error;
-      } finally {
-        clearTimeout(timer);
-      }
-
+      const response = await raceWithSignal(fetchImpl(`${API_ROOT}/${encodeURIComponent(options.model)}:generateContent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': selectedKey.key, 'x-goog-api-client': 'malay-tts-bot/ask' },
+        body,
+        signal: deadline.signal
+      }), deadline.signal, discardGenerated);
       let payload = null;
-      try { payload = await response.json(); } catch {}
+      try {
+        payload = response.body?.getReader
+          ? JSON.parse((await readResponseBuffer(response, { signal: deadline.signal, maxBytes: 128 * 1024 })).toString('utf8'))
+          : await raceWithSignal(response.json(), deadline.signal);
+      } catch (error) { throwIfAborted(deadline.signal); if (response.ok) throw error; }
+      throwIfAborted(deadline.signal);
       if (!response.ok) {
         const failure = apiFailure(response.status, payload);
-        if (automaticSelection && failure.keyAuthLike && selectedKey.slot != null && credentialAttempts < availableAtStart) {
+        if (automaticSelection && failure.keyAuthLike && selectedKey.slot != null) {
+          // Disable even the final bad slot; only retry credentials, never quota
+          // or model/project permission failures.
           const status = manager.disable(selectedKey.slot);
-          if (Number(status?.availableCount) > 0) {
+          if (credentialAttempts < availableAtStart && Number(status?.availableCount) > 0) {
             selectedKey = manager.next();
             if (selectedKey?.key) continue;
           }
         }
         throw failure;
       }
-
       const answer = compactAskAnswer(responseText(payload), options.maxAnswerCharacters);
       if (!answer) {
         const blocked = payload?.promptFeedback?.blockReason || payload?.candidates?.[0]?.finishReason === 'SAFETY';
@@ -222,9 +215,13 @@ export async function askGemini(question, {
       }
       return { answer, model: options.model, keySlot: selectedKey.slot ?? null };
     }
-
     throw new AskError('no-key', 'No Gemini API key is configured.');
+  } catch (error) {
+    if (signal?.aborted) throw cancellationError(signal.reason);
+    if (deadline.signal.aborted) throw deadline.signal.reason;
+    throw error;
   } finally {
+    deadline.cleanup();
     activeAskRequests = Math.max(0, activeAskRequests - 1);
   }
 }
