@@ -5,25 +5,24 @@ cd /d C:\Malay-TTS-Bot
 echo Malay TTS Bot clean setup v0.23.26
 echo.
 
-where node >nul 2>&1
-if errorlevel 1 goto :missingnode
-where npm >nul 2>&1
-if errorlevel 1 goto :missingnode
+set "NODE_EXE=C:\Malay-TTS-Bot\runtime\node-v24.19.0-win-x64\node.exe"
+set "NPM_CLI=C:\Malay-TTS-Bot\runtime\node-v24.19.0-win-x64\node_modules\npm\bin\npm-cli.js"
 
-for /f "delims=" %%V in ('node -p "process.versions.node"') do set NODE_VERSION=%%V
-for /f "delims=" %%M in ('node -p "process.versions.node.split('.')[0]"') do set NODE_MAJOR=%%M
-echo Found system Node.js %NODE_VERSION%
-if not "%NODE_MAJOR%"=="24" (
+if not exist "%NODE_EXE%" goto :missingruntime
+if not exist "%NPM_CLI%" goto :missingruntime
+
+"%NODE_EXE%" -e "if (process.versions.node.split('.')[0] !== '24') process.exit(24)"
+if errorlevel 1 (
   echo.
-  echo This bot requires Node.js 24.x for npm ci.
-  echo Install Node.js 24 LTS, then close and reopen this setup file.
-  echo winget install OpenJS.NodeJS.LTS --accept-package-agreements --accept-source-agreements
+  echo The bundled runtime is not Node.js 24.x.
+  echo Re-extract the current Clean release package before continuing.
   pause
   exit /b 1
 )
 
+echo Using bundled Node.js runtime and npm.
 echo Installing bot dependencies with npm ci...
-call npm ci
+"%NODE_EXE%" "%NPM_CLI%" ci
 set "NPM_EXIT=%ERRORLEVEL%"
 if not "%NPM_EXIT%"=="0" (
   echo.
@@ -46,7 +45,7 @@ if exist "data\guilds.json" (
 )
 echo.
 echo Running health check...
-"C:\Malay-TTS-Bot\runtime\node-v24.19.0-win-x64\node.exe" "C:\Malay-TTS-Bot\src\doctor.js"
+"%NODE_EXE%" "C:\Malay-TTS-Bot\src\doctor.js"
 set "DOCTOR_EXIT=%ERRORLEVEL%"
 if not "%DOCTOR_EXIT%"=="0" (
   echo.
@@ -58,7 +57,7 @@ if not "%DOCTOR_EXIT%"=="0" (
 
 echo.
 echo Deploying slash commands including /changevoice and /restarttts...
-"C:\Malay-TTS-Bot\runtime\node-v24.19.0-win-x64\node.exe" "C:\Malay-TTS-Bot\deploy-commands.js"
+"%NODE_EXE%" "C:\Malay-TTS-Bot\deploy-commands.js"
 set "DEPLOY_EXIT=%ERRORLEVEL%"
 if not "%DEPLOY_EXIT%"=="0" (
   echo.
@@ -73,11 +72,10 @@ echo Setup complete. Start the existing Task Scheduler task, or double-click sta
 pause
 exit /b 0
 
-:missingnode
-echo Node/npm was not found in PATH.
-echo Install Node.js 24 LTS, then close and reopen this setup file:
-echo.
-echo winget install OpenJS.NodeJS.LTS --accept-package-agreements --accept-source-agreements
+:missingruntime
+echo Bundled Node/npm runtime files are missing from this folder.
+echo Re-extract the current Clean release package into C:\Malay-TTS-Bot and run setup-clean.cmd again.
+echo A separate system Node.js installation is not required.
 echo.
 pause
 exit /b 1

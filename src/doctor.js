@@ -173,9 +173,20 @@ try {
   fail(`data folder is not writable: ${error.message}`);
 }
 
-const npm = spawnSync('npm', ['--version'], { encoding: 'utf8', windowsHide: true, shell: process.platform === 'win32', timeout: 5000 });
-if (npm.status === 0) pass(`System npm ${String(npm.stdout).trim()} available for clean installs`);
-else warn('System npm not found; existing installs can run, but a clean npm ci needs Node/npm installed');
+const bundledRuntimeDir = path.join(rootDir, 'runtime', 'node-v24.19.0-win-x64');
+const bundledNode = path.join(bundledRuntimeDir, 'node.exe');
+const bundledNpmCli = path.join(bundledRuntimeDir, 'node_modules', 'npm', 'bin', 'npm-cli.js');
+if (process.platform === 'win32' || fs.existsSync(bundledRuntimeDir)) {
+  if (fs.existsSync(bundledNode) && fs.existsSync(bundledNpmCli)) {
+    const npm = spawnSync(bundledNode, [bundledNpmCli, '--version'], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+    if (npm.status === 0) pass(`Bundled npm ${String(npm.stdout).trim()} available for clean installs`);
+    else fail('Bundled npm exists but could not run; re-extract the current Clean release package');
+  } else {
+    fail('Bundled Node/npm runtime is incomplete; re-extract the current Clean release package');
+  }
+} else {
+  pass('Bundled Windows Node/npm check skipped on non-Windows source checkout');
+}
 
 console.log('');
 console.log(`Doctor result: ${failures} failure(s), ${warnings} warning(s).`);
