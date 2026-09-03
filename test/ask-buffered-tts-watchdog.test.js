@@ -89,16 +89,17 @@ test('non-audio SSE traffic cannot keep a stalled exact TTS stream alive after f
   assert.ok(elapsed < 1500, `stalled exact TTS survived ${Math.round(elapsed)}ms`);
 });
 
-test('/ask exact TTS uses bounded completed-response mode while normal exact fallback stays streaming', () => {
-  assert.equal(tts.__test.isBufferedExactContext({ skipLive: true, liveStreamOutput: false }), true);
-  assert.equal(tts.__test.exactAttemptWindowMs({ skipLive: true, liveStreamOutput: false }), 10000);
-  assert.equal(tts.__test.exactAttemptWindowMs({ skipLive: true, liveStreamOutput: true }), 4000);
-  const buffered = tts.__test.exactOptions(null, 10000, 'fixture-key', { skipLive: true, liveStreamOutput: false });
+test('/ask exact TTS uses the streaming first-audio path while explicit buffered mode remains available for recovery', () => {
+  assert.equal(tts.__test.isBufferedExactContext({ skipLive: true }), false);
+  assert.equal(tts.__test.exactAttemptWindowMs({ skipLive: true }), 4000);
+  const askStreaming = tts.__test.exactOptions(null, 4000, 'fixture-key', { skipLive: true });
+  const explicitBuffered = tts.__test.exactOptions(null, 10000, 'fixture-key', { skipLive: true, liveStreamOutput: false });
   const normal = tts.__test.exactOptions(null, 1600, 'fixture-key', {});
-  assert.equal(buffered.streaming, false);
-  assert.equal(buffered.bufferedTimeoutMs, 10000);
+  assert.equal(askStreaming.streaming, true);
+  assert.equal(askStreaming.bufferedTimeoutMs, undefined);
+  assert.equal(explicitBuffered.streaming, false);
+  assert.equal(explicitBuffered.bufferedTimeoutMs, 10000);
   assert.equal(normal.streaming, true);
-  assert.equal(normal.bufferedTimeoutMs, undefined);
 });
 
 test('/ask Google fallback receives a fresh first-audio window after exact TTS exhausts the normal budget', () => {

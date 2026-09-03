@@ -103,6 +103,7 @@ function createQueueItem(text, metadata = {}) {
     playbackStartedAt: 0,
     playbackSpeed: 1,
     forceBuffered: metadata.forceBuffered === true,
+    noPrefetch: metadata.noPrefetch === true,
     recoveryAttempt: Math.max(0, Number(metadata.recoveryAttempt) || 0),
     isRecovery: metadata.isRecovery === true,
     skipLive: metadata.skipLive === true,
@@ -243,8 +244,12 @@ function getPrefetchAhead(state) {
   if (!options.enabled) return 1;
   return state.queue.length >= options.prefetchBusyThreshold ? options.prefetchBusy : options.prefetchIdle;
 }
+function hasPrefetchBarrier(queue) {
+  const firstUnstarted = (Array.isArray(queue) ? queue : []).find((item) => !item.generation);
+  return Boolean(firstUnstarted?.noPrefetch);
+}
 function prefetchNext(guildId, state) {
-  if (state.disposed || state.queue.length === 0) return;
+  if (state.disposed || state.queue.length === 0 || hasPrefetchBarrier(state.queue)) return;
   const options = getAdaptiveQueueOptions();
   const candidates = selectPrefetchCandidates(state.queue, { ahead: getPrefetchAhead(state) });
   for (const item of candidates) {
@@ -1130,6 +1135,29 @@ export function cancelUserAudio(guildId, userId) {
   return { cancelledCurrent, cancelledQueued };
 }
 
+function cancelQueuedAskItemsForUser(state, userId) {
+  const id = String(userId ?? '');
+  if (!state || !id || !Array.isArray(state.queue)) return 0;
+  let cancelled = 0;
+  const kept = [];
+  for (const item of state.queue) {
+    const isQueuedAsk = String(item?.messageId ?? '').startsWith('ask:');
+    if (isQueuedAsk && String(item?.userId ?? '') === id) {
+      cancelled += 1;
+      cleanupCancelledQueuedItem(item);
+    } else kept.push(item);
+  }
+  state.queue = kept;
+  return cancelled;
+}
+
+export function cancelQueuedAskAudioForUser(guildId, userId) {
+  const state = states.get(guildId);
+  const cancelled = cancelQueuedAskItemsForUser(state, userId);
+  if (state && !state.running && state.voiceReady && state.queue.length) void runQueue(guildId, state);
+  return cancelled;
+}
+
 export function cancelMessageAudio(guildId, messageId) {
   const state = states.get(guildId);
   const id = String(messageId ?? '');
@@ -1216,4 +1244,4 @@ export function getAudioStatus(guildId) {
   };
 }
 
-export const __test = { mp3DurationMs, decideSpeakerLabel, buildPcmTail, buildTranscriptTextTail, handleCompletionRecovery, getGeneratedAudioDurationMs, getRecoveryResumeStartMs, createQueueItem, cancelQueuedItemsForUser, cancelCurrentItemForUser, createPrefetchSpool, wireProviderToInput, scheduleRecovery, scheduleCompletionGraceCancel, canRunQueue, takeNextItem, abandonUnclaimedGeneration };
+export const __test = { mp3DurationMs, decideSpeakerLabel, buildPcmTail, buildTranscriptTextTail, handleCompletionRecovery, getGeneratedAudioDurationMs, getRecoveryResumeStartMs, createQueueItem, cancelQueuedItemsForUser, cancelQueuedAskItemsForUser, cancelCurrentItemForUser, createPrefetchSpool, wireProviderToInput, scheduleRecovery, scheduleCompletionGraceCancel, canRunQueue, takeNextItem, abandonUnclaimedGeneration, hasPrefetchBarrier };

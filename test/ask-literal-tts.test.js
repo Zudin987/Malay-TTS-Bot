@@ -17,6 +17,7 @@ test('/ask TTS skips conversational Gemini Live and preserves the displayed answ
   assert.equal(item.metadata.googleText, answer);
   assert.equal(item.metadata.verificationText, answer);
   assert.equal(item.metadata.skipLive, true);
-  assert.equal(item.metadata.forceBuffered, true);
+  assert.equal(item.metadata.forceBuffered, false);
+  assert.equal(item.metadata.noPrefetch, true);
   assert.equal(item.metadata.messageId, 'ask:interaction-literal');
 });

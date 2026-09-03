@@ -122,10 +122,13 @@ export function buildAskTtsItem(interaction, answer, voiceChannel, voice) {
       // the transcript instead of reading it. Use dedicated Gemini TTS first,
       // then the deterministic Google fallback.
       skipLive: true,
-      // /ask prioritizes a complete audible answer over first-chunk latency.
-      // This selects a bounded completed-response Gemini 3.1 TTS request instead
-      // of streaming SSE into a buffer. On failure it falls through to Google.
-      forceBuffered: true
+      // /ask uses dedicated Gemini 3.1 TTS, but starts playback from the
+      // first streamed audio chunk. This keeps conversational Live excluded while
+      // avoiding the multi-second full-answer buffering delay.
+      forceBuffered: false,
+      // Do not synthesize queued /ask answers speculatively. Repeated /ask calls
+      // should not occupy Gemini slots for audio that cannot play yet.
+      noPrefetch: true
     }
   };
 }
@@ -142,7 +145,8 @@ export async function queueAskAnswerTts(interaction, answer, dependencies) {
     getVoice,
     connect,
     enqueue,
-    cancel
+    cancel,
+    cancelQueuedAsk
   } = dependencies;
 
   if (isOptedOut(interaction.guildId, interaction.user.id)) return 'opted-out';
@@ -152,6 +156,12 @@ export async function queueAskAnswerTts(interaction, answer, dependencies) {
 
   const activeChannelId = getRuntimeVoiceChannelId(interaction.guildId);
   if (activeChannelId && String(activeChannelId) !== String(voiceChannel.id)) return 'other-channel';
+
+  // A newer /ask from the same user supersedes only their older queued
+  // /ask speech. Never interrupt the answer that is already speaking, and never
+  // touch normal message TTS. This prevents stale /ask answers building a long
+  // FIFO backlog during rapid follow-up questions.
+  cancelQueuedAsk?.(interaction.guildId, interaction.user.id);
 
   const audio = getAudioStatus(interaction.guildId);
   if (audio && Number(audio.queued) >= Number(audio.maximumQueued)) return 'queue-full';
