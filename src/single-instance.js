@@ -1,24 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import net from 'node:net';
+import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const rootDir = path.resolve(__dirname, '..');
-const lockPath = path.join(rootDir, 'data', 'bot.lock');
-let ownsLock = false;
-let ownedNonce = null;
-
-function processIsRunning(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === 'EPERM';
-  }
-}
+export const defaultInstanceDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+let ownedLease = null;
 
 function normalizeExecutable(value) {
   if (!value) return null;
@@ -26,135 +13,134 @@ function normalizeExecutable(value) {
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
-function currentProcessStartMs() {
-  return Math.round(Date.now() - process.uptime() * 1000);
+export function getInstanceEndpoint(directory = defaultInstanceDirectory) {
+  const canonical = normalizeExecutable(fs.realpathSync(directory));
+  const identity = createHash('sha256').update(canonical).digest('hex');
+  // OS-owned local socket: no compare/unlink race, no polling, and automatic
+  // release after a crash. A port collision fails closed without touching files.
+  // https://nodejs.org/docs/latest-v24.x/api/net.html#serverlistenoptions-callback
+  return { host: '127.0.0.1', port: 23000 + (Number.parseInt(identity.slice(0, 8), 16) % 16000), identity };
 }
 
-function parseLockData(raw) {
+export function readInstanceRecord(directory = defaultInstanceDirectory) {
+  let fd;
   try {
-    const data = JSON.parse(raw);
-    return {
-      pid: Number(data?.pid),
-      execPath: normalizeExecutable(data?.execPath),
-      processStartMs: Number(data?.processStartMs),
-      nonce: typeof data?.nonce === 'string' ? data.nonce : null,
-      raw
-    };
-  } catch {
-    // Preserve the raw record even when JSON is corrupt so a stable corrupt
-    // stale lock can still be compared byte-for-byte and safely removed.
-    return { pid: NaN, execPath: null, processStartMs: NaN, nonce: null, raw };
-  }
+    fd = fs.openSync(path.join(directory, 'data', 'bot.lock'), 'r');
+    const buffer = Buffer.alloc(4096);
+    const size = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    const value = JSON.parse(buffer.subarray(0, size).toString('utf8'));
+    return Number.isInteger(value.pid) && value.pid > 0 && typeof value.nonce === 'string' && value.nonce.length <= 128 ? value : null;
+  } catch { return null; }
+  finally { if (fd != null) fs.closeSync(fd); }
 }
 
-function readLockData() {
-  try {
-    return parseLockData(fs.readFileSync(lockPath, 'utf8'));
-  } catch {
-    return { pid: NaN, execPath: null, processStartMs: NaN, nonce: null, raw: null };
-  }
-}
-
-function lockRecordUnchanged(before, after) {
-  return typeof before?.raw === 'string' && before.raw.length > 0 && before.raw === after?.raw;
-}
-
-function windowsProcessIdentity(pid) {
-  const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
-  const powershell = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  const command = `$p=Get-Process -Id ${pid} -ErrorAction Stop; $start=[DateTimeOffset]$p.StartTime.ToUniversalTime(); [pscustomobject]@{Path=$p.Path;StartMs=$start.ToUnixTimeMilliseconds()} | ConvertTo-Json -Compress`;
-  const result = spawnSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], {
-    encoding: 'utf8', windowsHide: true, timeout: 2500
+export async function acquireSingleInstanceLock({ directory = defaultInstanceDirectory, onStopRequested = () => process.exit(0) } = {}) {
+  const endpoint = getInstanceEndpoint(directory);
+  const lockPath = path.join(directory, 'data', 'bot.lock');
+  const sockets = new Set();
+  const record = { pid: process.pid, nonce: randomUUID(), identity: endpoint.identity, port: endpoint.port,
+    execPath: path.resolve(process.execPath), processStartMs: Math.round(Date.now() - process.uptime() * 1000) };
+  let stopping = false;
+  let released = false;
+  let handler = onStopRequested;
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+    socket.on('error', () => {});
+    socket.setTimeout(1500, () => socket.destroy());
+    let input = '';
+    let received = false;
+    socket.on('data', (chunk) => {
+      if (received) return;
+      input += chunk.toString('utf8');
+      if (Buffer.byteLength(input) > 4096) { received = true; socket.destroy(); return; }
+      if (!input.includes('\n')) return;
+      received = true;
+      let request;
+      try { request = JSON.parse(input.slice(0, input.indexOf('\n'))); } catch { socket.destroy(); return; }
+      const matches = request.identity === record.identity && request.pid === record.pid && request.nonce === record.nonce;
+      const valid = matches && ['status', 'stop'].includes(request.action);
+      if (!valid) { socket.end(`${JSON.stringify({ ok: false })}\n`); return; }
+      const shouldStop = request.action === 'stop' && !stopping;
+      if (shouldStop) stopping = true;
+      socket.end(`${JSON.stringify({ ok: true, pid: record.pid, nonce: record.nonce, stopping })}\n`, () => {
+        if (shouldStop) setImmediate(() => Promise.resolve(handler()).catch((error) => { console.error('[control]', error); process.exit(1); }));
+      });
+    });
   });
-  if (result.status !== 0 || !String(result.stdout || '').trim()) return null;
+  server.maxConnections = 4;
   try {
-    const parsed = JSON.parse(String(result.stdout).trim());
-    return { execPath: normalizeExecutable(parsed.Path), processStartMs: Number(parsed.StartMs) };
-  } catch { return null; }
-}
-
-function posixProcessIdentity(pid) {
-  try {
-    const execPath = normalizeExecutable(fs.readlinkSync(`/proc/${pid}/exe`));
-    // Linux proc start-time conversion is intentionally not guessed here; the
-    // executable identity still prevents the common unrelated-PID reuse case.
-    return { execPath, processStartMs: NaN };
-  } catch { return null; }
-}
-
-function processIdentity(pid) {
-  return process.platform === 'win32' ? windowsProcessIdentity(pid) : posixProcessIdentity(pid);
-}
-
-function lockBelongsToLiveBot(lock) {
-  if (!processIsRunning(lock.pid)) return false;
-  const identity = processIdentity(lock.pid);
-  if (!identity) return true; // Conservative when OS inspection is unavailable.
-
-  if (lock.execPath && identity.execPath && lock.execPath !== identity.execPath) return false;
-  if (Number.isFinite(lock.processStartMs) && Number.isFinite(identity.processStartMs)) {
-    if (Math.abs(lock.processStartMs - identity.processStartMs) > 5000) return false;
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen({ host: endpoint.host, port: endpoint.port, exclusive: true }, () => { server.removeListener('error', reject); resolve(); });
+    });
+  } catch (error) {
+    if (error?.code === 'EADDRINUSE') return false;
+    throw error;
   }
-  return true;
-}
-
-export function acquireSingleInstanceLock() {
-  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-
-  // A third attempt gives a concurrent starter one chance to replace a stale
-  // lock while we re-check it without either process deleting the other's new
-  // lock file.
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const nonce = randomUUID();
-      const fd = fs.openSync(lockPath, 'wx');
-      try {
-        fs.writeFileSync(fd, `${JSON.stringify({
-          pid: process.pid,
-          startedAt: new Date().toISOString(),
-          processStartMs: currentProcessStartMs(),
-          execPath: path.resolve(process.execPath),
-          nonce
-        })}\n`, 'utf8');
-        fs.fsyncSync(fd);
-      } catch (writeError) {
-        try { fs.closeSync(fd); } catch {}
-        try { fs.unlinkSync(lockPath); } catch {}
-        throw writeError;
-      }
-      fs.closeSync(fd);
-
-      ownedNonce = nonce;
-      ownsLock = true;
-      process.once('exit', releaseSingleInstanceLock);
-      return true;
-    } catch (error) {
-      if (error?.code !== 'EEXIST') throw error;
-      const existing = readLockData();
-      if (lockBelongsToLiveBot(existing)) return false;
-
-      // Close the stale-lock TOCTOU window: another bot may have removed the
-      // stale record and acquired its own lock while we were inspecting the old
-      // PID. Delete only if the exact file contents are still the record we
-      // classified as stale.
-      const confirmed = readLockData();
-      if (!lockRecordUnchanged(existing, confirmed)) continue;
-
-      try { fs.unlinkSync(lockPath); }
-      catch (unlinkError) { if (unlinkError?.code !== 'ENOENT') throw unlinkError; }
+  server.on('error', (error) => { console.error('[instance-owner]', error); process.exit(1); });
+  const removeOwnedRecord = () => {
+    // Only the process holding the OS socket can publish or remove this record.
+    // Remove it before releasing the socket so a new owner cannot be deleted.
+    const current = readInstanceRecord(directory);
+    if (current?.nonce === record.nonce && current.pid === record.pid) {
+      try { fs.unlinkSync(lockPath); } catch (error) { if (error.code !== 'ENOENT') console.warn('[instance-record]', error.code); }
     }
-  }
-  return false;
-}
-
-export function releaseSingleInstanceLock() {
-  if (!ownsLock) return;
-  ownsLock = false;
+  };
+  const releaseSync = () => {
+    if (released) return;
+    released = true;
+    removeOwnedRecord();
+    for (const socket of sockets) socket.destroy();
+    server.close();
+    if (ownedLease === lease) ownedLease = null;
+  };
+  const lease = { record, setStopHandler(callback) { handler = callback; }, release: releaseSync };
+  const tempPath = `${lockPath}.${record.nonce}.tmp`;
   try {
-    const data = readLockData();
-    if (data.pid === process.pid && data.nonce === ownedNonce) fs.unlinkSync(lockPath);
-  } catch {}
-  ownedNonce = null;
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    fs.writeFileSync(tempPath, `${JSON.stringify(record)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    fs.renameSync(tempPath, lockPath);
+  } catch (error) {
+    try { fs.unlinkSync(tempPath); } catch {}
+    releaseSync();
+    throw error;
+  }
+  ownedLease = lease;
+  process.once('exit', releaseSync);
+  return lease;
 }
 
-export const __test = { normalizeExecutable, lockBelongsToLiveBot, lockRecordUnchanged, parseLockData };
+export function releaseSingleInstanceLock() { ownedLease?.release(); }
+
+export async function requestInstanceControl(record, { directory = defaultInstanceDirectory, action = 'status', timeoutMs = 1500 } = {}) {
+  const endpoint = getInstanceEndpoint(directory);
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ host: endpoint.host, port: endpoint.port });
+    let done = false;
+    let input = '';
+    const finish = (error, value) => {
+      if (done) return;
+      done = true; clearTimeout(timer); socket.destroy();
+      if (error) reject(error); else resolve(value);
+    };
+    const timer = setTimeout(() => finish(Object.assign(new Error('Local bot control timed out.'), { code: 'CONTROL_TIMEOUT' })), timeoutMs);
+    socket.once('error', (error) => finish(error));
+    socket.once('end', () => finish(Object.assign(new Error('Bot owner closed its control connection.'), { code: 'ECONNRESET' })));
+    socket.once('connect', () => socket.write(`${JSON.stringify({ identity: endpoint.identity, nonce: record?.nonce, pid: record?.pid, action })}\n`));
+    socket.on('data', (chunk) => {
+      input += chunk.toString('utf8');
+      if (input.length > 4096) return finish(new Error('Invalid bot control response.'));
+      if (!input.includes('\n')) return;
+      try {
+        const reply = JSON.parse(input.slice(0, input.indexOf('\n')));
+        if (!reply.ok || reply.pid !== record?.pid || reply.nonce !== record?.nonce) {
+          return finish(Object.assign(new Error('Bot instance identity changed; no other process was stopped.'), { code: 'INSTANCE_CHANGED' }));
+        }
+        finish(null, reply);
+      } catch (error) { finish(error); }
+    });
+  });
+}
+
+export const __test = { normalizeExecutable };

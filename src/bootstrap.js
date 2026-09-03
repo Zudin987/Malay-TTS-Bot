@@ -1,29 +1,52 @@
 import 'dotenv/config';
-import { fatalLogSync, installLogger } from './logger.js';
-import { acquireSingleInstanceLock } from './single-instance.js';
-import { startStopRequestWatcher } from './stop-control.js';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { fatalLogSync, flushLogs, installLogger } from './logger.js';
+import { acquireSingleInstanceLock, defaultInstanceDirectory } from './single-instance.js';
 import { getGeminiApiKeyRoundRobinStatus } from './gemini-key-config.js';
+import { terminateAllChildren } from './child-processes.js';
 
-installLogger();
-
-try {
-  const keyStatus = getGeminiApiKeyRoundRobinStatus();
-  if (keyStatus.configuredCount > 1) {
-    console.log(`[gemini-keys] ${keyStatus.configuredCount} keys configured; round-robin enabled across slots ${keyStatus.configuredSlots.join(', ')}; first slot ${keyStatus.startSlot ?? 'none'}.`);
-  } else if (keyStatus.configuredCount === 1) {
-    console.log(`[gemini-keys] One Gemini key configured in slot ${keyStatus.startSlot}; round-robin behaves as single-key mode.`);
-  }
-
-  if (!acquireSingleInstanceLock()) {
-    console.warn('Bot is already running. This second instance will exit.');
+export async function startBot({ directory = defaultInstanceDirectory, loadApp = () => import('./index.js'), startupTimeoutMs = 45000 } = {}) {
+  let app = null;
+  let stopping = false;
+  let startupTimer;
+  const stop = async () => {
+    if (stopping) return;
+    stopping = true;
+    clearTimeout(startupTimer);
+    if (app) return app.gracefulShutdown('local stop control');
+    // This path is installed before importing index.js / awaiting Discord login.
+    const deadline = setTimeout(() => process.exit(1), 5000);
+    await terminateAllChildren();
+    await flushLogs();
+    clearTimeout(deadline);
     process.exit(0);
+  };
+  const lease = await acquireSingleInstanceLock({ directory, onStopRequested: stop });
+  if (!lease) {
+    console.warn('Another process owns this bot installation’s local control endpoint. This instance will exit.');
+    return false;
   }
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+  startupTimer = setTimeout(() => {
+    fatalLogSync('[fatal-startup]', 'Discord startup did not finish within its deadline.');
+    process.exit(1);
+  }, startupTimeoutMs);
+  try { app = await loadApp(); }
+  finally { clearTimeout(startupTimer); process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); }
+  if (stopping) await app.gracefulShutdown('stop during startup');
+  return lease;
+}
 
-  const app = await import('./index.js');
-  startStopRequestWatcher(() => app.gracefulShutdown('stop-bot.vbs'));
-} catch (error) {
-  // start-hidden.vbs / Task Scheduler may have no visible console, so startup
-  // failures must land synchronously before the non-zero exit.
-  fatalLogSync('[fatal-startup]', error instanceof Error ? error : new Error(String(error)));
-  process.exit(1);
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  installLogger();
+  try {
+    const keys = getGeminiApiKeyRoundRobinStatus();
+    console.log(`[gemini-keys] ${keys.configuredCount} unique keys configured; round-robin slots ${keys.configuredSlots.join(', ') || 'none'}; first slot ${keys.startSlot ?? 'none'}.`);
+    await startBot();
+  } catch (error) {
+    fatalLogSync('[fatal-startup]', error instanceof Error ? error : new Error(String(error)));
+    process.exit(1);
+  }
 }
