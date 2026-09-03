@@ -84,7 +84,9 @@ jobs:
             if (-not $setup.Contains($guard)) { throw "Bundled setup guard missing: $guard" }
           }
           $restartGuard = Get-Content src/restart-guard.js -Raw
-          if (-not $restartGuard.Contains('getGlobalGeminiLimiterStatus')) { throw 'Process-global restart guard missing.' }
+          foreach ($guard in @('getTtsRestartBlockers','provider.geminiLimiter','providerActive','providerQueued')) {
+            if (-not $restartGuard.Contains($guard)) { throw "Process-global restart guard missing: $guard" }
+          }
           $speaker = Get-Content src/speaker-label.js -Raw
           if (-not $speaker.Contains('AbortController') -and -not $speaker.Contains('signal')) { throw 'Speaker-label cancellation guard missing.' }
 
