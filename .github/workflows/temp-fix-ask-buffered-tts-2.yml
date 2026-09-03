@@ -1,0 +1,39 @@
+name: Apply ask buffered TTS hotfix
+
+on:
+  push:
+    branches: [fix/ask-buffered-tts-final]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: fix/ask-buffered-tts-final
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Apply patch
+        run: python .github/scripts/apply-ask-hotfix.py
+      - name: Validate
+        run: |
+          npm ci
+          npm test
+          npm audit --audit-level=high
+          find src test -name '*.js' -print0 | xargs -0 -n1 node --check
+      - name: Commit source changes
+        run: |
+          rm -f .github/workflows/temp-fix-ask-buffered-tts.yml
+          rm -f .github/workflows/temp-fix-ask-buffered-tts-2.yml
+          rm -f .github/scripts/apply-ask-hotfix.py
+          git config user.name 'MrEz'
+          git config user.email '39240221+Zudin987@users.noreply.github.com'
+          git add -A
+          git commit -m 'Fix /ask buffered TTS stall failover'
+          git push origin HEAD:fix/ask-buffered-tts-final
