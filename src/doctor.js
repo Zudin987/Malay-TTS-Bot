@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { getFfmpegPath } from './ffmpeg.js';
 import { buildAudioFilters } from './audio-filters.js';
+import { getGeminiApiKeyConfiguration } from './gemini-key-config.js';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 let failures = 0;
@@ -111,9 +112,19 @@ if (exists('.env')) {
     if (match?.[1] && !/^(["']?)(?:replace|your|changeme|token|client)[-_ ]/iu.test(match[1])) pass(`${key} is set`);
     else fail(`${key} is missing/empty in .env`);
   }
-  const geminiMatch = envText.match(/^\s*GEMINI_API_KEY\s*=\s*(.+?)\s*$/m);
-  if (geminiMatch?.[1]) pass('GEMINI_API_KEY is set (Gemini provider chain enabled)');
-  else warn('GEMINI_API_KEY is missing/empty; bot will use Google Malay fallback only');
+
+  const gemini = getGeminiApiKeyConfiguration(process.env);
+  if (gemini.configuredCount > 0) {
+    pass(`Gemini key ring: ${gemini.configuredCount} unique credential(s) in slot(s) ${gemini.configuredSlots.join(', ')}; start slot ${gemini.selectedSlot}`);
+  } else {
+    warn('No Gemini API key slot is configured; bot will use Google Malay fallback only');
+  }
+  for (const duplicate of gemini.duplicateSlots) {
+    warn(`Gemini API key slot ${duplicate.slot} duplicates slot ${duplicate.duplicateOf}; duplicate slot is ignored by the runtime ring`);
+  }
+  if (gemini.configuredCount > 0 && gemini.requestedSlot !== gemini.selectedSlot && !gemini.duplicateSlots.some((entry) => entry.slot === gemini.requestedSlot)) {
+    warn(`GEMINI_API_KEY_SLOT=${gemini.requestedSlot} is not a unique configured slot; runtime starts at slot ${gemini.selectedSlot}`);
+  }
 }
 
 for (const dependency of ['discord.js', '@discordjs/voice', 'dotenv', 'libsodium-wrappers']) {
