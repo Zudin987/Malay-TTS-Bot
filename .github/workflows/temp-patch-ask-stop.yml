@@ -1,12 +1,12 @@
 name: Prepare ask stop cancellation hardening
 on:
   push:
-    branches: [fix/ask-stop-cancel-barrier]
+    branches:
+      - fix/ask-stop-cancel-barrier
 permissions:
   contents: write
 jobs:
   patch:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -15,7 +15,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
-          node-version: 24.19.0
+          node-version: '24.19.0'
           cache: npm
       - name: Apply focused patch
         shell: python
