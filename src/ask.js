@@ -6,6 +6,9 @@ import {
 
 const API_ROOT = 'https://generativelanguage.googleapis.com/v1beta/models';
 const DEFAULT_MODEL = 'gemini-3.1-flash-lite';
+const ASK_MAX_CONCURRENCY = 2;
+let activeAskRequests = 0;
+
 const DEFAULT_SYSTEM = [
   'You are /ask, a concise chat-answer mode for a private Discord server.',
   'Answer the user directly in the same language and casual register they used, including Malaysian Malay, English, or Manglish.',
@@ -132,6 +135,7 @@ export function describeAskError(error) {
   if (error?.code === 'auth') return 'Gemini /ask is unavailable right now.';
   if (error?.code === 'blocked') return 'Gemini could not answer that request.';
   if (error?.code === 'timeout') return 'Gemini took too long to answer. Try again.';
+  if (error?.code === 'busy') return '/ask is busy right now. Try again after one of the current requests finishes.';
   if (error?.code === 'empty') return 'Ask me a question first.';
   return 'Gemini /ask failed. Try again.';
 }
@@ -144,6 +148,10 @@ function runtimeKeyManager() {
   };
 }
 
+export function getAskRuntimeStatus() {
+  return { active: activeAskRequests, maximum: ASK_MAX_CONCURRENCY };
+}
+
 export async function askGemini(question, {
   fetchImpl = globalThis.fetch,
   keyEntry = null,
@@ -152,63 +160,73 @@ export async function askGemini(question, {
 } = {}) {
   if (!options.enabled) throw new AskError('disabled', '/ask is disabled.');
   if (typeof fetchImpl !== 'function') throw new AskError('api', 'Fetch is unavailable.');
-
-  const manager = keyManager ?? runtimeKeyManager();
-  const automaticSelection = keyEntry == null;
-  let selectedKey = keyEntry ?? manager.next();
-  if (!selectedKey?.key) throw new AskError('no-key', 'No Gemini API key is configured.');
-  const availableAtStart = automaticSelection
-    ? Math.max(1, Number(manager.status?.()?.availableCount) || 1)
-    : 1;
-  let credentialAttempts = 0;
-
-  while (selectedKey?.key) {
-    credentialAttempts += 1;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), options.timeoutMs);
-    timer.unref?.();
-    let response;
-    try {
-      response = await fetchImpl(`${API_ROOT}/${encodeURIComponent(options.model)}:generateContent`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': selectedKey.key,
-          'x-goog-api-client': 'malay-tts-bot/ask'
-        },
-        body: JSON.stringify(buildAskRequest(question, options)),
-        signal: controller.signal
-      });
-    } catch (error) {
-      if (controller.signal.aborted || error?.name === 'AbortError') {
-        throw new AskError('timeout', `Gemini /ask timed out after ${options.timeoutMs}ms.`);
-      }
-      throw error;
-    } finally {
-      clearTimeout(timer);
-    }
-
-    let payload = null;
-    try { payload = await response.json(); } catch {}
-    if (!response.ok) {
-      const failure = apiFailure(response.status, payload);
-      if (automaticSelection && failure.keyAuthLike && selectedKey.slot != null && credentialAttempts < availableAtStart) {
-        const status = manager.disable(selectedKey.slot);
-        if (Number(status?.availableCount) > 0) {
-          selectedKey = manager.next();
-          if (selectedKey?.key) continue;
-        }
-      }
-      throw failure;
-    }
-
-    const answer = compactAskAnswer(responseText(payload), options.maxAnswerCharacters);
-    if (!answer) {
-      const blocked = payload?.promptFeedback?.blockReason || payload?.candidates?.[0]?.finishReason === 'SAFETY';
-      throw new AskError(blocked ? 'blocked' : 'api', blocked ? 'Gemini blocked the request.' : 'Gemini returned no text.');
-    }
-    return { answer, model: options.model, keySlot: selectedKey.slot ?? null };
+  if (activeAskRequests >= ASK_MAX_CONCURRENCY) {
+    throw new AskError('busy', `Gemini /ask already has ${activeAskRequests} active requests.`);
   }
 
-  throw new AskError('no-key', 'No Gemini API key is configured.');
+  activeAskRequests += 1;
+  try {
+    const manager = keyManager ?? runtimeKeyManager();
+    const automaticSelection = keyEntry == null;
+    let selectedKey = keyEntry ?? manager.next();
+    if (!selectedKey?.key) throw new AskError('no-key', 'No Gemini API key is configured.');
+    const availableAtStart = automaticSelection
+      ? Math.max(1, Number(manager.status?.()?.availableCount) || 1)
+      : 1;
+    let credentialAttempts = 0;
+
+    while (selectedKey?.key) {
+      credentialAttempts += 1;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+      timer.unref?.();
+      let response;
+      try {
+        response = await fetchImpl(`${API_ROOT}/${encodeURIComponent(options.model)}:generateContent`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': selectedKey.key,
+            'x-goog-api-client': 'malay-tts-bot/ask'
+          },
+          body: JSON.stringify(buildAskRequest(question, options)),
+          signal: controller.signal
+        });
+      } catch (error) {
+        if (controller.signal.aborted || error?.name === 'AbortError') {
+          throw new AskError('timeout', `Gemini /ask timed out after ${options.timeoutMs}ms.`);
+        }
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+
+      let payload = null;
+      try { payload = await response.json(); } catch {}
+      if (!response.ok) {
+        const failure = apiFailure(response.status, payload);
+        if (automaticSelection && failure.keyAuthLike && selectedKey.slot != null && credentialAttempts < availableAtStart) {
+          const status = manager.disable(selectedKey.slot);
+          if (Number(status?.availableCount) > 0) {
+            selectedKey = manager.next();
+            if (selectedKey?.key) continue;
+          }
+        }
+        throw failure;
+      }
+
+      const answer = compactAskAnswer(responseText(payload), options.maxAnswerCharacters);
+      if (!answer) {
+        const blocked = payload?.promptFeedback?.blockReason || payload?.candidates?.[0]?.finishReason === 'SAFETY';
+        throw new AskError(blocked ? 'blocked' : 'api', blocked ? 'Gemini blocked the request.' : 'Gemini returned no text.');
+      }
+      return { answer, model: options.model, keySlot: selectedKey.slot ?? null };
+    }
+
+    throw new AskError('no-key', 'No Gemini API key is configured.');
+  } finally {
+    activeAskRequests = Math.max(0, activeAskRequests - 1);
+  }
 }
+
+export const __test = { ASK_MAX_CONCURRENCY };
