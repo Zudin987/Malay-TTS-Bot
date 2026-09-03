@@ -8,32 +8,13 @@ import { stripSymbolNoise } from './text-noise.js';
 import { cleanDiscordFormatting } from './text-discord.js';
 import { replaceExactAcronyms } from './acronyms.js';
 import { normalizeShoutingCase } from './text-case.js';
+import { hasSpeakableImage, sanitizeSpeechContent } from './message-speech-policy.js';
 
-const URL_PATTERN = /\bhttps?:\/\/\S+|\bwww\.\S+|(?<![@\w])(?:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\.)+(?:com|net|org|gg|io|me|tv|co|my|dev|app|ai|ly|be)(?:\/[^\s<]*)?/giu;
-const CODE_BLOCK_FOR_URL_PATTERN = /```[\s\S]*?```|```[\s\S]*$/gu;
-const CUSTOM_EMOJI_PATTERN = /<a?:([\w-]+):\d+>/gu;
 const USER_MENTION_PATTERN = /<@!?(\d+)>/gu;
 const ROLE_MENTION_PATTERN = /<@&(\d+)>/gu;
 const CHANNEL_MENTION_PATTERN = /<#(\d+)>/gu;
-const UNICODE_EMOJI_PATTERN = /\p{Extended_Pictographic}|\p{Emoji_Presentation}/gu;
 const CONTROL_PATTERN = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/gu;
 const ZERO_WIDTH_PATTERN = /[\u200B-\u200D\u2060\uFEFF]/gu;
-
-function isGif(attachment) {
-  return attachment.contentType?.toLowerCase() === 'image/gif' || /\.gif$/iu.test(attachment.name ?? '');
-}
-
-function isImage(attachment) {
-  return !isGif(attachment) && (
-    attachment.contentType?.startsWith('image/') ||
-    /\.(png|jpe?g|jfif|webp|bmp|avif|heic|heif|jxl|tiff?)$/iu.test(attachment.name ?? '')
-  );
-}
-
-function isVideo(attachment) {
-  return attachment.contentType?.startsWith('video/') ||
-    /\.(mp4|webm|mov|mkv|m4v)$/iu.test(attachment.name ?? '');
-}
 
 function normalizeGoogleText(text) {
   return text
@@ -44,9 +25,9 @@ function normalizeGoogleText(text) {
 }
 
 function normalizeGeminiText(text) {
-  // Gemini text is intentionally only lightly sanitized. Local cleanup is
-  // deterministic and sub-millisecond; it removes transport/Discord syntax
-  // that sounds bad while leaving slang, grammar, punctuation and emoji alone.
+  // Gemini text is intentionally only lightly sanitized. The MessageCreate
+  // eligibility layer has already removed non-chat payloads; this step only
+  // removes transport/Discord noise while preserving the user's lexical text.
   let value = String(text ?? '')
     .replace(CONTROL_PATTERN, ' ')
     .replace(ZERO_WIDTH_PATTERN, '')
@@ -83,15 +64,11 @@ function resolveGeminiMentions(message, text) {
 }
 
 function cleanGeminiDiscordText(message, text) {
-  let cleaned = resolveGeminiMentions(message, text);
-  cleaned = cleanDiscordFormatting(cleaned, {
-    codePhrase: 'hantar code',
+  const cleaned = cleanDiscordFormatting(resolveGeminiMentions(message, text), {
+    codePhrase: '',
     resolveChannelName: (channelId) => message.guild.channels.cache.get(channelId)?.name ?? null,
     resolveRoleName: (roleId) => message.guild.roles?.cache?.get(roleId)?.name ?? null
   });
-  cleaned = cleaned.replace(CUSTOM_EMOJI_PATTERN, (_matched, emojiName) => ` ${emojiName} `);
-  cleaned = cleaned.replace(URL_PATTERN, ' ');
-  URL_PATTERN.lastIndex = 0;
   return normalizeGeminiText(cleaned);
 }
 
@@ -204,9 +181,7 @@ function protectMentions(message, text) {
 
 function restoreUserMentions(text, replacements) {
   let restored = text;
-  for (const { token, name } of replacements) {
-    restored = restored.replaceAll(token, name);
-  }
+  for (const { token, name } of replacements) restored = restored.replaceAll(token, name);
   return restored;
 }
 
@@ -224,68 +199,6 @@ function buildSpeakerLabel(message, guildSettings) {
   const username = getSpeakerName(message);
   if (!username) return null;
   return guildSettings.speakerMode === 'cakap' ? `${username} cakap` : username;
-}
-
-function classifyEmbeds(embeds) {
-  const result = {
-    gif: false,
-    image: false,
-    video: false,
-    link: false
-  };
-
-  for (const embed of embeds) {
-    const type = String(embed.type ?? '').toLowerCase();
-    if (type === 'gifv') {
-      result.gif = true;
-      continue;
-    }
-    if (type === 'link' || type === 'article' || type === 'rich') {
-      result.link = true;
-      continue;
-    }
-    if (type === 'video' || embed.video) {
-      result.video = true;
-      continue;
-    }
-    if (type === 'image' || embed.image) {
-      result.image = true;
-      continue;
-    }
-    if (embed.url || type === 'link' || type === 'article' || type === 'rich') {
-      result.link = true;
-    }
-  }
-
-  return result;
-}
-
-function mediaPhrases(message, containsUrl) {
-  const attachments = [...message.attachments.values()];
-  const hasGifAttachment = attachments.some(isGif);
-  const hasImageAttachment = attachments.some(isImage);
-  const hasVideoAttachment = attachments.some(isVideo);
-  const hasOtherFile = attachments.some((attachment) =>
-    !isGif(attachment) && !isImage(attachment) && !isVideo(attachment)
-  );
-
-  const embeds = classifyEmbeds(message.embeds ?? []);
-  const hasGif = hasGifAttachment || embeds.gif;
-  const hasImage = hasImageAttachment || embeds.image;
-  const hasVideo = hasVideoAttachment || embeds.video;
-
-  // Media embeds normally originate from the same URL, so avoid saying both
-  // "hantar link" and "hantar GIF/video/gambar" for one item.
-  const mediaEmbed = embeds.gif || embeds.image || embeds.video;
-  const hasLink = embeds.link || (containsUrl && !mediaEmbed);
-
-  const parts = [];
-  if (hasGif) parts.push(settings.gifPhrase);
-  if (hasVideo) parts.push(settings.videoPhrase);
-  if (hasImage) parts.push(settings.imagePhrase);
-  if (hasOtherFile) parts.push(settings.filePhrase);
-  if (hasLink) parts.push(settings.linkPhrase);
-  return parts;
 }
 
 function finalizeRawSpeech(text, extraParts) {
@@ -346,38 +259,26 @@ function finalizeSpeech(text, extraParts) {
 }
 
 export function prepareSpeechVariants(message, guildSettings) {
-  const original = message.content ?? '';
-  const urlDetectionText = original.replace(CODE_BLOCK_FOR_URL_PATTERN, ' ');
-  const containsUrl = URL_PATTERN.test(urlDetectionText);
-  URL_PATTERN.lastIndex = 0;
+  // All Discord payload eligibility/sanitization lives in message-speech-policy.
+  // This function only performs pronunciation/formatting after that decision.
+  const original = sanitizeSpeechContent(message.content ?? '');
 
-  // Gemini path: light deterministic cleanup only. Username/speaker
-  // identity is deliberately kept OUT of this text and is voiced separately by
-  // the cached Google speaker-label path in audio.js.
+  // Gemini path: light deterministic cleanup only. Username/speaker identity is
+  // deliberately kept OUT of this text and voiced separately in audio.js.
   const geminiBaseText = cleanGeminiDiscordText(message, original);
 
-  // Build a non-spoken reference only for cutoff diagnostics. This NEVER goes
-  // to Gemini. It strips emoji/noise so transcription comparison remains fair.
-  let verificationText = geminiBaseText
-    .replace(UNICODE_EMOJI_PATTERN, ' ');
-  verificationText = stripSymbolNoise(stripTextEmoticons(verificationText));
+  // Non-spoken reference used only for cutoff diagnostics; never sent to Gemini.
+  let verificationText = stripSymbolNoise(stripTextEmoticons(geminiBaseText));
   verificationText = normalizeGeminiText(verificationText);
 
-  // Google Malay safety fallback keeps the mature local normalization path.
+  // Google Malay safety fallback keeps the mature local pronunciation path.
   const { protectedText, replacements: mentionReplacements } = protectMentions(message, original);
   let commonProtectedText = cleanDiscordFormatting(protectedText, {
-    codePhrase: 'hantar code',
+    codePhrase: '',
     resolveChannelName: (channelId) => message.guild.channels.cache.get(channelId)?.name ?? null,
     resolveRoleName: (roleId) => message.guild.roles?.cache?.get(roleId)?.name ?? null
-  })
-    .replace(URL_PATTERN, ' ')
-    .replace(CUSTOM_EMOJI_PATTERN, ' ');
-  URL_PATTERN.lastIndex = 0;
-
-  commonProtectedText = stripSymbolNoise(
-    stripTextEmoticons(commonProtectedText)
-      .replace(UNICODE_EMOJI_PATTERN, ' ')
-  );
+  });
+  commonProtectedText = stripSymbolNoise(stripTextEmoticons(commonProtectedText));
 
   let googleText = replaceExactAcronyms(commonProtectedText);
   googleText = replaceDictionaryWords(googleText, message.guild.id);
@@ -388,7 +289,8 @@ export function prepareSpeechVariants(message, guildSettings) {
 
   if (settings.intonation?.enabled !== false) googleText = addIntonationCues(googleText);
 
-  const extras = mediaPhrases(message, containsUrl);
+  // Images are the only non-text payload intentionally spoken by normal chat.
+  const extras = hasSpeakableImage(message) ? [settings.imagePhrase] : [];
   const geminiText = finalizeRawSpeech(geminiBaseText, extras);
   verificationText = finalizeSpeech(verificationText, extras);
 
