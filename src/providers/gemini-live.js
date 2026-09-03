@@ -144,6 +144,7 @@ function createDeferred() {
 }
 
 async function startFreshTurn(text, voiceName, options) {
+  if (options.signal?.aborted) throw cancellationError(options.signal.reason);
   const value = String(text ?? '').trim();
   if (!value) throw new GeminiLiveError('Gemini Live received empty text.');
   const apiKey = String(options.apiKey ?? '').trim();
@@ -314,6 +315,7 @@ async function startFreshTurn(text, voiceName, options) {
     if (settled) return;
     let response;
     const raw = await messageToString(event?.data);
+    if (settled || options.signal?.aborted) return;
     try { response = JSON.parse(raw); }
     catch {
       return fail(new GeminiLiveError(`Gemini Live returned an unreadable WebSocket frame (${String(raw).slice(0, 60)}).`, { setupLike: !setupComplete, transportLike: true }));
