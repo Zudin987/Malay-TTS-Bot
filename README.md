@@ -9,9 +9,9 @@ Lightweight design: Gemini first, Google Malay fallback, no local AI model, and 
 1. Install/use the bot at `C:\Malay-TTS-Bot`.
 2. On upgrade, preserve only `.env` and `data\guilds.json`.
 3. Replace the old app files with the new clean build.
-4. Run `setup-clean.cmd`.
+4. Run `setup-clean.cmd` **as administrator**. It installs dependencies, protects the state directory and registers the SYSTEM task.
 5. Run `doctor.cmd` if you want to verify dependencies/audio.
-6. Start the existing **Malay TTS Bot** Task Scheduler task.
+6. Start the **Malay TTS Bot** Task Scheduler task, or use `restart-bot.vbs`.
 
 Speech providers: **Gemini 3.1 Flash Live → Google Malay (`google-ms`)**.
 
@@ -88,3 +88,9 @@ Edit `geminiLive.profile` in `config/settings.json`: fidelity belongs in `system
 Eligible normal speech remains text, resolved mentions and `hantar gambar` for images. Links, non-image files, GIFs, videos, emoji and code-only payloads remain silent. One Discord message remains one logical speech item.
 
 Historical release notes are available on [GitHub Releases](../../releases).
+
+## Windows process control
+
+The checked-in `install-task.ps1` registers the portable Node executable, absolute bootstrap path and `C:\Malay-TTS-Bot` working directory under SYSTEM. It uses one instance, a startup trigger and three restarts after failure. The `data` directory grants inherited access to SYSTEM, Administrators and the installing user, so new atomic state files and backups keep the same protection.
+
+A small control socket bound only to `127.0.0.1` provides OS-owned exclusivity and nonce/PID-bound graceful stopping. The port is derived from the installation path (23000–38999). `data/bot.lock` records identity; stale, empty or corrupt records are replaced only after the OS grants ownership. A port collision fails closed. Stop control starts before Discord login, startup is limited to 45 seconds and shutdown to five seconds. The bot does not kill an arbitrary PID or poll a stop-request file.

@@ -1,69 +1,28 @@
-import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { pathToFileURL } from 'node:url';
+import { defaultInstanceDirectory, readInstanceRecord, requestInstanceControl } from './single-instance.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const rootDir = path.resolve(__dirname, '..');
-const dataDir = path.join(rootDir, 'data');
-const lockPath = path.join(dataDir, 'bot.lock');
-const stopRequestPath = path.join(dataDir, 'stop.request');
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function processIsRunning(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === 'EPERM';
+export async function stopBot({ directory = defaultInstanceDirectory, timeoutMs = 12000 } = {}) {
+  const record = readInstanceRecord(directory);
+  if (!record) return { code: 2, message: 'Malay TTS Bot is not running.' };
+  const deadline = Date.now() + timeoutMs;
+  try { await requestInstanceControl(record, { directory, action: 'stop', timeoutMs: Math.min(1500, timeoutMs) }); }
+  catch (error) {
+    if (['ECONNREFUSED', 'INSTANCE_CHANGED'].includes(error.code)) return { code: 2, message: 'The recorded bot instance is no longer running. No other process was stopped.' };
+    return { code: 1, message: `Could not contact the bot safely (${error.code || 'control error'}).` };
   }
-}
-
-function readLockPid() {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-    const pid = Number(parsed?.pid);
-    return Number.isInteger(pid) && pid > 0 ? pid : null;
-  } catch {
-    return null;
-  }
-}
-
-function cleanupStaleFiles() {
-  for (const target of [lockPath, stopRequestPath]) {
-    try { fs.unlinkSync(target); } catch (error) {
-      if (error?.code !== 'ENOENT') throw error;
+  while (Date.now() < deadline) {
+    try { await requestInstanceControl(record, { directory, timeoutMs: Math.min(1500, Math.max(1, deadline - Date.now())) }); }
+    catch (error) {
+      if (['ECONNREFUSED', 'ECONNRESET', 'INSTANCE_CHANGED'].includes(error.code)) return { code: 0, message: 'Malay TTS Bot stopped cleanly.' };
     }
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
+  return { code: 1, message: 'Timed out waiting for this bot instance to stop. Check bot.log.' };
 }
 
-const pid = readLockPid();
-if (!pid || !processIsRunning(pid)) {
-  try { cleanupStaleFiles(); } catch {}
-  console.log('Malay TTS Bot is not running.');
-  process.exit(2);
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  const result = await stopBot();
+  console[result.code === 1 ? 'error' : 'log'](result.message);
+  process.exitCode = result.code;
 }
-
-fs.mkdirSync(dataDir, { recursive: true });
-fs.writeFileSync(
-  stopRequestPath,
-  `${JSON.stringify({ pid, requestedAt: new Date().toISOString() })}\n`,
-  'utf8'
-);
-
-const deadline = Date.now() + 12_000;
-while (Date.now() < deadline) {
-  if (!processIsRunning(pid)) {
-    try { fs.unlinkSync(stopRequestPath); } catch {}
-    console.log('Malay TTS Bot stopped cleanly.');
-    process.exit(0);
-  }
-  await sleep(100);
-}
-
-console.error('Timed out waiting for the bot to stop cleanly.');
-console.error('If the bot is frozen, Task Manager can still be used as a fallback.');
-process.exit(1);

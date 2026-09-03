@@ -6,6 +6,7 @@ echo Malay TTS Bot clean setup v0.23.30
 echo.
 
 set "NODE_EXE=C:\Malay-TTS-Bot\runtime\node-v24.19.0-win-x64\node.exe"
+set "PATH=C:\Malay-TTS-Bot\runtime\node-v24.19.0-win-x64;%PATH%"
 set "NPM_CLI=C:\Malay-TTS-Bot\runtime\node-v24.19.0-win-x64\node_modules\npm\bin\npm-cli.js"
 
 if not exist "%NODE_EXE%" goto :missingruntime
@@ -34,14 +35,13 @@ if not "%NPM_EXIT%"=="0" (
 echo.
 echo Dependencies installed.
 echo.
-echo Tightening local permissions for secrets/state where possible...
-if exist ".env" (
-  icacls ".env" /inheritance:r /grant:r "%USERDOMAIN%\%USERNAME%:(F)" "*S-1-5-18:(R)" "*S-1-5-32-544:(F)" >nul 2>&1
-  if errorlevel 1 echo WARNING: Could not restrict .env ACL automatically. Protect it manually with Windows file permissions.
-)
-if exist "data\guilds.json" (
-  icacls "data\guilds.json" /inheritance:r /grant:r "%USERDOMAIN%\%USERNAME%:(F)" "*S-1-5-18:(F)" "*S-1-5-32-544:(F)" >nul 2>&1
-  if errorlevel 1 echo WARNING: Could not restrict data\guilds.json ACL automatically.
+echo Installing the SYSTEM task and protecting private state...
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\Malay-TTS-Bot\install-task.ps1"
+set "TASK_EXIT=%ERRORLEVEL%"
+if not "%TASK_EXIT%"=="0" (
+  echo Task or file-permission setup failed. Run setup-clean.cmd as administrator.
+  pause
+  exit /b 1
 )
 echo.
 echo Running health check...
@@ -68,7 +68,7 @@ if not "%DEPLOY_EXIT%"=="0" (
 )
 
 echo.
-echo Setup complete. Start the existing Task Scheduler task, or double-click start-hidden.vbs for a manual hidden start.
+echo Setup complete. Start the installed SYSTEM Task Scheduler task, or double-click start-hidden.vbs for a manual hidden start.
 pause
 exit /b 0
 
