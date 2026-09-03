@@ -24,6 +24,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Archive Linux test dependencies
+        run: tar -czf "$RUNNER_TEMP/test-dependencies.tar.gz" node_modules
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-test-dependencies
+          path: ${{ runner.temp }}/test-dependencies.tar.gz
+          retention-days: 1
+
       - name: JavaScript syntax
         shell: bash
         run: |

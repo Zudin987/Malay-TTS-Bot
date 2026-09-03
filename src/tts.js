@@ -6,6 +6,7 @@ import { synthesizeGemini, GEMINI_VOICES } from './providers/gemini.js';
 import { resetGeminiLiveSessions, synthesizeGeminiLive } from './providers/gemini-live.js';
 import { shouldBypassGeminiLiveForReadAloud } from './live-readaloud-guard.js';
 import { streamGoogleMalay } from './providers/google.js';
+import { cancellationError, deadlineSignal, discardGenerated, raceWithSignal, throwIfAborted } from './cancellation.js';
 import {
   disableGeminiApiKeySlot,
   getGeminiApiKeyRoundRobinStatus,
@@ -346,26 +347,35 @@ function pumpGeminiLimiter() {
       pumpGeminiLimiter();
     };
     const waitMs = Math.max(0, performance.now() - entry.enqueuedAt);
-    geminiLimiter.waitCount += 1;
-    geminiLimiter.totalWaitMs += waitMs;
-    geminiLimiter.maxWaitMs = Math.max(geminiLimiter.maxWaitMs, waitMs);
+    entry.release = release;
+    if (entry.waited) {
+      geminiLimiter.waitCount += 1;
+      geminiLimiter.totalWaitMs += waitMs;
+      geminiLimiter.maxWaitMs = Math.max(geminiLimiter.maxWaitMs, waitMs);
+    }
     entry.resolve(release);
   }
 }
 
-function acquireGeminiSlot(priority = 0, signal = null) {
+function acquireGeminiSlot(priority = 0, signal = null, promotionSignal = null) {
   return new Promise((resolve, reject) => {
-    const entry = { priority, sequence: geminiLimiter.sequence++, signal, resolve, reject, cleanup: null, enqueuedAt: performance.now() };
-    if (signal) {
-      const onAbort = () => {
-        const index = geminiLimiter.queue.indexOf(entry);
-        if (index >= 0) geminiLimiter.queue.splice(index, 1);
-        reject(signal.reason || new Error('Gemini limiter wait cancelled.'));
-      };
-      if (signal.aborted) { onAbort(); return; }
-      signal.addEventListener('abort', onAbort, { once: true });
-      entry.cleanup = () => signal.removeEventListener?.('abort', onAbort);
-    }
+    const entry = { priority, sequence: geminiLimiter.sequence++, signal, resolve, reject, enqueuedAt: performance.now(), waited: geminiLimiter.active >= healthOptions().globalGeminiConcurrency };
+    const promote = () => { entry.priority = 0; pumpGeminiLimiter(); };
+    const onAbort = () => {
+      const index = geminiLimiter.queue.indexOf(entry);
+      if (index >= 0) geminiLimiter.queue.splice(index, 1);
+      entry.release?.();
+      entry.cleanup();
+      reject(signal.reason || cancellationError());
+    };
+    entry.cleanup = () => {
+      signal?.removeEventListener('abort', onAbort);
+      promotionSignal?.removeEventListener('abort', promote);
+    };
+    if (signal?.aborted) { onAbort(); return; }
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (promotionSignal?.aborted) entry.priority = 0;
+    else promotionSignal?.addEventListener('abort', promote, { once: true });
     geminiLimiter.queue.push(entry);
     pumpGeminiLimiter();
   });
@@ -622,7 +632,7 @@ function shareLiveTransportFailure(error) {
 async function runAttempt({
   key, providerName, windowMs, parentSignal, attempts, factory, options,
   geminiProvider = true, priority = 0, apiKeySlot = null,
-  deferBudgetUntilGeminiSlot = false, onLimiterWait = null
+  deferBudgetUntilGeminiSlot = false, onLimiterWait = null, promotionSignal = null
 }) {
   const state = providerStates[key];
   const configSignature = providerConfigSignature(key);
@@ -654,7 +664,16 @@ async function runAttempt({
   try {
     if (geminiProvider && deferBudgetUntilGeminiSlot) {
       const limiterWaitStarted = performance.now();
-      releaseGemini = await acquireGeminiSlot(priority, parentSignal);
+      const wait = deadlineSignal(parentSignal, 15_000, makeBudgetError(providerName, 15_000));
+      let promotionTimer;
+      const promote = () => {
+        promotionTimer = setTimeout(() => wait.cancel(makeBudgetError(providerName, windowMs)), windowMs);
+        promotionTimer.unref?.();
+      };
+      if (promotionSignal?.aborted) promote();
+      else promotionSignal?.addEventListener('abort', promote, { once: true });
+      try { releaseGemini = await acquireGeminiSlot(priority, wait.signal, promotionSignal); }
+      finally { wait.cleanup(); clearTimeout(promotionTimer); promotionSignal?.removeEventListener('abort', promote); }
       const limiterWaitMs = Math.max(0, performance.now() - limiterWaitStarted);
       if (limiterWaitMs >= 1) geminiLimiter.prefetchDeferredCount += 1;
       if (typeof onLimiterWait === 'function') onLimiterWait(limiterWaitMs);
@@ -664,11 +683,24 @@ async function runAttempt({
       abortable = attemptSignal(parentSignal, windowMs, providerName);
     } else {
       abortable = attemptSignal(parentSignal, windowMs, providerName);
-      if (geminiProvider) releaseGemini = await acquireGeminiSlot(priority, abortable.signal);
+      if (geminiProvider) releaseGemini = await acquireGeminiSlot(priority, abortable.signal, promotionSignal);
     }
+    throwIfAborted(abortable.signal);
     state.startedCount += 1;
     providerStarted = true;
-    const generated = await factory(abortable.signal, options);
+    const generated = await raceWithSignal(factory(abortable.signal, options), abortable.signal, discardGenerated);
+    throwIfAborted(abortable.signal);
+    // Keep ownership bounded after first audio, including providers whose
+    // completion promise never responds to remote cancellation.
+    const lifetime = deadlineSignal(parentSignal, 65_000, makeBudgetError(`${providerName} completion`, 65_000));
+    const cancelGenerated = () => { abortable.abort(lifetime.signal.reason); discardGenerated(generated, lifetime.signal.reason); };
+    lifetime.signal.addEventListener('abort', cancelGenerated, { once: true });
+    if (lifetime.signal.aborted) cancelGenerated();
+    generated.completion = raceWithSignal(generated.completion, lifetime.signal).finally(() => {
+      lifetime.signal.removeEventListener('abort', cancelGenerated);
+      lifetime.cleanup();
+    });
+    generated.completion.catch(() => {});
     const elapsed = performance.now() - providerStartedAt;
     noteAttempt(state, elapsed);
     markFirstAudio(state);
@@ -698,7 +730,8 @@ async function runAttempt({
     lastProvider = providerName;
     return { result: generated, error: null, elapsed, firstAudioAt: performance.now() };
   } catch (rawError) {
-    const error = abortable?.signal?.aborted && abortable.signal.reason instanceof Error ? abortable.signal.reason : rawError;
+    const error = parentSignal?.aborted ? cancellationError(parentSignal.reason)
+      : abortable?.signal?.aborted && abortable.signal.reason instanceof Error ? abortable.signal.reason : rawError;
     const elapsed = performance.now() - providerStartedAt;
     noteAttempt(state, elapsed);
     const budget = Boolean(error?.budgetLike || error?.name === 'TtsFailoverBudgetError');

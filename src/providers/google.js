@@ -1,6 +1,7 @@
 import { PassThrough } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { waitForWritableDrain } from '../stream-backpressure.js';
+import { cancellationError, discardGenerated, raceWithSignal, readResponseBuffer, throwIfAborted } from '../cancellation.js';
 
 const ENDPOINT = 'https://translate.google.com/translate_tts';
 const DEFAULT_MAXIMUM_LENGTH = 200;
@@ -79,12 +80,6 @@ function makeChunkUrl(chunk, index, total) {
   return url;
 }
 
-function cancellationError(reason, fallback = 'Google TTS cancelled.') {
-  const error = reason instanceof Error ? reason : new Error(String(reason || fallback));
-  error.cancelled = true;
-  return error;
-}
-
 function makeTimeoutError(ms) {
   const error = new Error(`Google Malay TTS exceeded ${ms}ms.`);
   error.name = 'TimeoutError';
@@ -123,42 +118,16 @@ function isRetryableNetworkError(error) {
 }
 
 async function fetchChunk(fetchImpl, url, { signal, maxAudioBytes }) {
-  const response = await fetchImpl(url, {
+  throwIfAborted(signal);
+  const response = await raceWithSignal(fetchImpl(url, {
     headers: { Accept: 'audio/mpeg,*/*;q=0.8', 'User-Agent': 'Mozilla/5.0 Malay-TTS-Bot/1.0' },
     signal
-  });
+  }), signal, discardGenerated);
   if (!response.ok) throw new GoogleTtsHttpError(response.status);
   const contentType = response.headers.get('content-type') ?? '';
   if (!contentType.toLowerCase().includes('audio')) throw new Error(`Google Malay TTS returned unexpected content type: ${contentType || 'unknown'}`);
 
-  const reader = response.body?.getReader?.();
-  if (!reader) {
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length < 200) throw new Error(`Google Malay TTS returned unexpectedly small audio: ${buffer.length} bytes.`);
-    if (buffer.length > maxAudioBytes) throw new Error(`Google Malay TTS exceeded ${maxAudioBytes} audio bytes.`);
-    return buffer;
-  }
-
-  const parts = [];
-  let bytes = 0;
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (!value?.length) continue;
-      bytes += value.length;
-      if (bytes > maxAudioBytes) {
-        const error = new Error(`Google Malay TTS exceeded ${maxAudioBytes} audio bytes.`);
-        error.name = 'GoogleTtsOutputLimitError';
-        throw error;
-      }
-      parts.push(Buffer.from(value));
-    }
-  } catch (error) {
-    try { await reader.cancel(error); } catch {}
-    throw error;
-  }
-  const buffer = Buffer.concat(parts, bytes);
+  const buffer = await readResponseBuffer(response, { signal, maxBytes: maxAudioBytes });
   if (buffer.length < 200) throw new Error(`Google Malay TTS returned unexpectedly small audio: ${buffer.length} bytes.`);
   return buffer;
 }
@@ -177,6 +146,7 @@ async function fetchChunkWithRetry(fetchImpl, url, options) {
 }
 
 export async function streamGoogleMalay(text, options = {}) {
+  throwIfAborted(options.signal);
   const chunks = splitGoogleText(text, options.maximumLength ?? DEFAULT_MAXIMUM_LENGTH);
   if (!chunks.length) throw new Error('Google Malay TTS received empty text.');
 
@@ -197,7 +167,6 @@ export async function streamGoogleMalay(text, options = {}) {
   // observer so a later parallel-chunk failure cannot become an uncaught
   // EventEmitter 'error' before the playback consumer attaches its listener.
   output.on('error', () => {});
-  const parts = new Array(chunks.length);
   const ready = new Array(chunks.length);
   let nextIndex = 0;
   let totalBytes = 0;
@@ -210,6 +179,12 @@ export async function streamGoogleMalay(text, options = {}) {
     promise.catch(() => {});
     return promise;
   });
+  const rejectPending = () => {
+    const error = deadline.signal.reason || cancellationError();
+    for (const entry of ready) entry.reject(error);
+  };
+  deadline.signal.addEventListener('abort', rejectPending, { once: true });
+  if (deadline.signal.aborted) rejectPending();
   async function worker() {
     while (!deadline.signal.aborted) {
       const index = nextIndex++;
@@ -221,7 +196,6 @@ export async function streamGoogleMalay(text, options = {}) {
           retryDelayMs: options.retryDelayMs,
           maxAudioBytes
         });
-        parts[index] = part;
         ready[index].resolve(part);
       } catch (error) {
         ready[index].reject(error);
@@ -240,23 +214,26 @@ export async function streamGoogleMalay(text, options = {}) {
   // Await only the first ordered chunk: this is the latency-critical point.
   let first;
   try {
-    first = await promises[0];
+    first = await raceWithSignal(promises[0], deadline.signal);
     clearFirstChunkTimer();
   } catch (error) {
     clearFirstChunkTimer();
     deadline.cleanup();
+    deadline.signal.removeEventListener('abort', rejectPending);
+    output.destroy();
     throw error;
   }
 
   const completion = (async () => {
     try {
       for (let i = 0; i < chunks.length; i += 1) {
-        const part = i === 0 ? first : await promises[i];
+        const part = i === 0 ? first : await raceWithSignal(promises[i], deadline.signal);
+        throwIfAborted(deadline.signal);
         totalBytes += part.length;
         if (totalBytes > maxAudioBytes) throw new Error(`Google Malay TTS exceeded ${maxAudioBytes} total audio bytes.`);
         if (!output.write(part)) await waitForWritableDrain(output, deadline.signal, 'Google TTS output stream');
       }
-      await Promise.all(workers);
+      await raceWithSignal(Promise.all(workers), deadline.signal);
       output.end();
       return { audioBytes: totalBytes };
     } catch (error) {
@@ -266,6 +243,7 @@ export async function streamGoogleMalay(text, options = {}) {
     } finally {
       clearFirstChunkTimer();
       deadline.cleanup();
+      deadline.signal.removeEventListener('abort', rejectPending);
     }
   })();
   completion.catch(() => {});
