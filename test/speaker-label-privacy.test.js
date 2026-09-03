@@ -1,10 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
 process.env.DISCORD_TOKEN ||= 'test-token';
 process.env.DISCORD_CLIENT_ID ||= '123456789012345678';
 
 const speaker = await import('../src/speaker-label.js');
+const { dataDir } = await import('../src/config.js');
+const cacheDir = path.join(dataDir, 'speaker-label-cache');
+
+test.after(async () => {
+  await fs.rm(cacheDir, { recursive: true, force: true }).catch(() => {});
+});
 
 function nextTick() {
   return new Promise((resolve) => setImmediate(resolve));
