@@ -1,0 +1,261 @@
+name: Package and Release v0.23.27 Clean
+
+on:
+  push:
+    branches:
+      - package/v0.23.27
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 936c8505b3a772bc2ba9bb70ff51cb80912f0ba9
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Validate exact release source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $expectedSha = '936c8505b3a772bc2ba9bb70ff51cb80912f0ba9'
+          $sha = (git rev-parse HEAD).Trim()
+          if ($sha -ne $expectedSha) { throw "Unexpected source SHA: $sha" }
+
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json -AsHashtable
+          $lock = Get-Content package-lock.json -Raw | ConvertFrom-Json -AsHashtable
+          if ($pkg.version -ne '0.23.27') { throw 'package.json is not v0.23.27.' }
+          if ($lock.version -ne '0.23.27' -or $lock.packages[''].version -ne '0.23.27') { throw 'package-lock version mismatch.' }
+          if (-not (Select-String -Path setup-clean.cmd -SimpleMatch 'clean setup v0.23.27')) { throw 'setup-clean banner mismatch.' }
+          if (-not (Test-Path RELEASE-v0.23.27.txt)) { throw 'Release notes missing.' }
+
+          foreach ($required in @(
+            '.env.example','src/index.js','src/preprocess.js','src/message-speech-policy.js','src/tts.js','src/audio.js',
+            'src/gemini-key-config.js','src/providers/gemini.js','src/providers/google.js','src/ask.js','src/ask-response.js',
+            'src/restart-guard.js','src/speaker-label.js','src/doctor.js','src/dictionary.js','src/voice.js',
+            'test/message-speech-policy.test.js','test/runaway-isolation.test.js','test/gemini-key-config.test.js',
+            'test/provider-health.test.js','test/gemini-tts-request.test.js','test/readaloud-guards.test.js',
+            'test/ask-literal-tts.test.js','test/ask-key-auth-failover.test.js','test/regression.test.js',
+            'test/audit-runtime-lifecycle.test.js','test/config-contract.test.js','test/restart-guard.test.js',
+            'test/setup-bundled-runtime.test.js','test/speaker-label-privacy.test.js'
+          )) { if (-not (Test-Path $required)) { throw "Required source missing: $required" } }
+
+          $settings = Get-Content config/settings.json -Raw | ConvertFrom-Json -AsHashtable
+          if ($settings.providerHealth.primaryFirstAudioMs -ne 2500) { throw 'Primary timing changed.' }
+          if ($settings.providerHealth.fallbackFirstAudioMs -ne 1600) { throw 'Fallback timing changed.' }
+          if ($settings.providerHealth.exactFirstAudioMs -ne 1600) { throw 'Exact timing changed.' }
+          if ($settings.geminiTts.timeoutMs -ne 4000) { throw '/ask exact timeout changed.' }
+          if ($settings.geminiLive.firstAudioBudgetMs -ne 7000) { throw 'Overall first-audio budget changed.' }
+          if ($settings.providerHealth.googleReserveMs -ne 1200) { throw 'Google reserve changed.' }
+          if ($settings.audioPipeline.playbackHardMaxMs -ne 60000) { throw 'Playback hard maximum changed.' }
+          foreach ($obsolete in @('videoPhrase','gifPhrase','filePhrase','linkPhrase')) {
+            if ($settings.ContainsKey($obsolete)) { throw "Obsolete speech phrase still shipped: $obsolete" }
+          }
+          foreach ($obsolete in @('transcriptReplayEnabled','durationReplayEnabled')) {
+            if ($settings.audioPipeline.ContainsKey($obsolete)) { throw "Obsolete replay setting still shipped: $obsolete" }
+          }
+
+          $askResponse = Get-Content src/ask-response.js -Raw
+          if (-not $askResponse.Contains('skipLive: true') -or -not $askResponse.Contains('forceBuffered: true')) { throw '/ask routing guard missing.' }
+          $keyConfig = Get-Content src/gemini-key-config.js -Raw
+          if (-not $keyConfig.Contains('MAX_GEMINI_API_KEYS = 10')) { throw '10-key guard missing.' }
+          if (-not (Get-Content .env.example -Raw).Contains('GEMINI_API_KEY_10=')) { throw '10th key env example missing.' }
+
+          $policy = Get-Content src/message-speech-policy.js -Raw
+          foreach ($guard in @('BARE_DOMAIN_PATTERN','INLINE_CODE_PATTERN','FILE_LIKE_SUFFIXES','isSpeakableImageAttachment','isSpeakableImageEmbed')) {
+            if (-not $policy.Contains($guard)) { throw "Canonical speech-policy guard missing: $guard" }
+          }
+          $preprocess = Get-Content src/preprocess.js -Raw
+          if (-not $preprocess.Contains('sanitizeSpeechContent')) { throw 'Preprocess canonical-policy reuse guard missing.' }
+
+          $index = Get-Content src/index.js -Raw
+          if (-not $index.Contains('Events.MessageDelete') -or -not $index.Contains('cancelMessageAudio')) { throw 'MessageDelete cancellation guard missing.' }
+          $setup = Get-Content setup-clean.cmd -Raw
+          foreach ($guard in @('node-v24.19.0-win-x64','NPM_CLI','npm-cli.js')) {
+            if (-not $setup.Contains($guard)) { throw "Bundled setup guard missing: $guard" }
+          }
+          $restartGuard = Get-Content src/restart-guard.js -Raw
+          if (-not $restartGuard.Contains('getGlobalGeminiLimiterStatus')) { throw 'Process-global restart guard missing.' }
+          $speaker = Get-Content src/speaker-label.js -Raw
+          if (-not $speaker.Contains('AbortController') -and -not $speaker.Contains('signal')) { throw 'Speaker-label cancellation guard missing.' }
+
+          $gemini = Get-Content src/providers/gemini.js -Raw
+          foreach ($voice in @('Charon','Orus','Schedar','Gacrux','Vindemiatrix','Despina')) {
+            if (-not $gemini.Contains("name: '$voice'")) { throw "Approved voice missing: $voice" }
+          }
+
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm audit --audit-level=high
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          Get-ChildItem -Recurse -Filter *.js |
+            Where-Object { $_.FullName -notmatch '[\\/]node_modules[\\/]' } |
+            ForEach-Object {
+              node --check $_.FullName
+              if ($LASTEXITCODE -ne 0) { throw "Syntax failed: $($_.FullName)" }
+            }
+          $jsonFiles = @('package.json','package-lock.json') + @(Get-ChildItem config -Filter *.json | ForEach-Object FullName)
+          foreach ($file in $jsonFiles) { Get-Content $file -Raw | ConvertFrom-Json -AsHashtable | Out-Null }
+
+      - name: FFmpeg and libopus probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $probe = Join-Path $env:RUNNER_TEMP 'malay-tts-v02327-probe.ogg'
+          ffmpeg -hide_banner -loglevel error -f lavfi -i 'sine=frequency=440:duration=0.20' -af 'volume=0.600,alimiter=limit=0.562341:attack=1.0:release=60.0:level=false' -c:a libopus -f ogg -y $probe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ffmpeg -hide_banner -loglevel error -i $probe -f null -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build clean package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $env:RUNNER_TEMP 'Malay-TTS-Bot-v0.23.27-Clean'
+          $zip = Join-Path $env:RUNNER_TEMP 'Malay-TTS-Bot-v0.23.27-Clean.zip'
+          Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item $zip -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $stage | Out-Null
+
+          foreach ($file in (git ls-files)) {
+            if ($file -like '.github/*') { continue }
+            if ($file -eq '.gitignore') { continue }
+            if ($file -like 'RELEASE-v*.txt' -and $file -ne 'RELEASE-v0.23.27.txt') { continue }
+            if ($file -like 'data/*' -and $file -ne 'data/.gitkeep') { continue }
+            if ($file -eq 'dummy') { throw 'Accidental dummy file must never ship.' }
+            $dest = Join-Path $stage $file
+            $parent = Split-Path $dest -Parent
+            if ($parent) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+            Copy-Item -LiteralPath $file -Destination $dest -Force
+          }
+
+          $runtimeRoot = Join-Path $stage 'runtime'
+          New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
+          $nodeZip = Join-Path $env:RUNNER_TEMP 'node-v24.19.0-win-x64.zip'
+          Invoke-WebRequest -Uri 'https://nodejs.org/dist/v24.19.0/node-v24.19.0-win-x64.zip' -OutFile $nodeZip
+          Expand-Archive -LiteralPath $nodeZip -DestinationPath $runtimeRoot -Force
+          $nodeDir = Join-Path $runtimeRoot 'node-v24.19.0-win-x64'
+          $node = Join-Path $nodeDir 'node.exe'
+          $npmCli = Join-Path $nodeDir 'node_modules/npm/bin/npm-cli.js'
+          if (-not (Test-Path $node) -or -not (Test-Path $npmCli)) { throw 'Portable Node/npm runtime is incomplete.' }
+          if ((& $node --version).Trim() -ne 'v24.19.0') { throw 'Portable Node version mismatch.' }
+
+          foreach ($item in @('.env','data/guilds.json','data/guilds.json.bak','data/bot.lock','data/stop.request','data/speaker-label-cache','bot.log','bot-old.log','node_modules','.git','.github','temp','dummy')) {
+            if (Test-Path (Join-Path $stage $item)) { throw "Forbidden package item exists: $item" }
+          }
+          foreach ($required in @(
+            '.env.example','src/index.js','src/preprocess.js','src/message-speech-policy.js','src/tts.js','src/audio.js',
+            'src/ask.js','src/ask-response.js','src/restart-guard.js','src/speaker-label.js','src/doctor.js',
+            'test/message-speech-policy.test.js','test/regression.test.js','test/audit-runtime-lifecycle.test.js',
+            'test/config-contract.test.js','test/restart-guard.test.js','test/setup-bundled-runtime.test.js','test/speaker-label-privacy.test.js',
+            'RELEASE-v0.23.27.txt','config/settings.json','package.json','package-lock.json','setup-clean.cmd'
+          )) { if (-not (Test-Path (Join-Path $stage $required))) { throw "Required package file missing: $required" } }
+          $releaseFiles = @(Get-ChildItem $stage -Filter 'RELEASE-v*.txt')
+          if ($releaseFiles.Count -ne 1 -or $releaseFiles[0].Name -ne 'RELEASE-v0.23.27.txt') { throw 'Unexpected release-note set.' }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+          if (-not (Test-Path $zip)) { throw 'Clean ZIP was not created.' }
+
+      - name: Re-extract and validate actual ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'Malay-TTS-Bot-v0.23.27-Clean.zip'
+          $verify = Join-Path $env:RUNNER_TEMP 'verify-v0.23.27'
+          Remove-Item $verify -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $verify | Out-Null
+          Expand-Archive -LiteralPath $zip -DestinationPath $verify -Force
+
+          $nodeDir = Join-Path $verify 'runtime/node-v24.19.0-win-x64'
+          $node = Join-Path $nodeDir 'node.exe'
+          $npmCli = Join-Path $nodeDir 'node_modules/npm/bin/npm-cli.js'
+          if ((& $node --version).Trim() -ne 'v24.19.0') { throw 'Extracted portable Node mismatch.' }
+
+          Push-Location $verify
+          try {
+            & $node $npmCli ci
+            if ($LASTEXITCODE -ne 0) { throw "Extracted npm ci failed: $LASTEXITCODE" }
+            & $node $npmCli test
+            if ($LASTEXITCODE -ne 0) { throw "Extracted tests failed: $LASTEXITCODE" }
+            & $node $npmCli audit --audit-level=high
+            if ($LASTEXITCODE -ne 0) { throw "Extracted audit failed: $LASTEXITCODE" }
+
+            $pkg = Get-Content package.json -Raw | ConvertFrom-Json -AsHashtable
+            $lock = Get-Content package-lock.json -Raw | ConvertFrom-Json -AsHashtable
+            if ($pkg.version -ne '0.23.27' -or $lock.version -ne '0.23.27' -or $lock.packages[''].version -ne '0.23.27') { throw 'Extracted version mismatch.' }
+            if (-not (Select-String -Path setup-clean.cmd -SimpleMatch 'clean setup v0.23.27')) { throw 'Extracted setup banner mismatch.' }
+
+            $settings = Get-Content config/settings.json -Raw | ConvertFrom-Json -AsHashtable
+            if ($settings.providerHealth.primaryFirstAudioMs -ne 2500 -or $settings.providerHealth.fallbackFirstAudioMs -ne 1600 -or $settings.providerHealth.exactFirstAudioMs -ne 1600) { throw 'Extracted first-audio timing mismatch.' }
+            if ($settings.geminiLive.firstAudioBudgetMs -ne 7000 -or $settings.providerHealth.googleReserveMs -ne 1200 -or $settings.geminiTts.timeoutMs -ne 4000) { throw 'Extracted budget/timeout mismatch.' }
+
+            $askResponse = Get-Content src/ask-response.js -Raw
+            if (-not $askResponse.Contains('skipLive: true') -or -not $askResponse.Contains('forceBuffered: true')) { throw 'Extracted /ask guard missing.' }
+            $index = Get-Content src/index.js -Raw
+            if (-not $index.Contains('Events.MessageDelete') -or -not $index.Contains('cancelMessageAudio')) { throw 'Extracted MessageDelete guard missing.' }
+
+            Get-ChildItem -Recurse -Filter *.js |
+              Where-Object { $_.FullName -notmatch '[\\/]node_modules[\\/]' -and $_.FullName -notmatch '[\\/]runtime[\\/]' } |
+              ForEach-Object {
+                & $node --check $_.FullName
+                if ($LASTEXITCODE -ne 0) { throw "Extracted syntax failed: $($_.FullName)" }
+              }
+            $jsonFiles = @('package.json','package-lock.json') + @(Get-ChildItem config -Filter *.json | ForEach-Object FullName)
+            foreach ($file in $jsonFiles) { Get-Content $file -Raw | ConvertFrom-Json -AsHashtable | Out-Null }
+          } finally { Pop-Location }
+
+          Remove-Item (Join-Path $verify 'node_modules') -Recurse -Force -ErrorAction SilentlyContinue
+          foreach ($item in @('.env','data/guilds.json','data/guilds.json.bak','data/bot.lock','data/stop.request','data/speaker-label-cache','bot.log','bot-old.log','node_modules','.git','.github','temp','dummy')) {
+            if (Test-Path (Join-Path $verify $item)) { throw "Forbidden extracted item exists: $item" }
+          }
+          $releaseFiles = @(Get-ChildItem $verify -Filter 'RELEASE-v*.txt')
+          if ($releaseFiles.Count -ne 1 -or $releaseFiles[0].Name -ne 'RELEASE-v0.23.27.txt') { throw 'Unexpected extracted release-note set.' }
+
+      - name: Create checksum
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'Malay-TTS-Bot-v0.23.27-Clean.zip'
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksum = Join-Path $env:RUNNER_TEMP 'Malay-TTS-Bot-v0.23.27-Clean.sha256.txt'
+          Set-Content -LiteralPath $checksum -Value "$hash  Malay-TTS-Bot-v0.23.27-Clean.zip" -Encoding ascii
+          Write-Host "ZIP_BYTES=$((Get-Item $zip).Length)"
+          Write-Host "SHA256=$hash"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Malay-TTS-Bot-v0.23.27-Clean
+          path: |
+            ${{ runner.temp }}/Malay-TTS-Bot-v0.23.27-Clean.zip
+            ${{ runner.temp }}/Malay-TTS-Bot-v0.23.27-Clean.sha256.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (gh release view v0.23.27 --repo Zudin987/Malay-TTS-Bot *> $null) { throw 'v0.23.27 release already exists; refusing to overwrite it.' }
+          $zip = Join-Path $env:RUNNER_TEMP 'Malay-TTS-Bot-v0.23.27-Clean.zip'
+          $checksum = Join-Path $env:RUNNER_TEMP 'Malay-TTS-Bot-v0.23.27-Clean.sha256.txt'
+          gh release create v0.23.27 $zip $checksum --repo Zudin987/Malay-TTS-Bot --target 936c8505b3a772bc2ba9bb70ff51cb80912f0ba9 --title 'Malay TTS Bot v0.23.27 - Runtime & Setup Hardening' --notes-file RELEASE-v0.23.27.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
