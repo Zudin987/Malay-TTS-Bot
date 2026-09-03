@@ -276,6 +276,8 @@ async function startStreamingRequest(fetchImpl, text, voiceName, apiKey, options
   let channels = 1;
   let usage = null;
   let completed = false;
+  let audioStepStopped = false;
+  const audioStepIndexes = new Set();
   let firstAudioResolve, firstAudioReject;
   let firstSettled = false;
   const firstAudio = new Promise((resolve, reject) => { firstAudioResolve = resolve; firstAudioReject = reject; });
@@ -305,7 +307,6 @@ async function startStreamingRequest(fetchImpl, text, voiceName, apiKey, options
   const completion = (async () => {
     const decoder = new TextDecoder();
     let pending = '';
-    armIdle();
     const handleEvent = async (event) => {
       if (!event) return;
       if (event.event_type === 'step.delta' && event.delta?.type === 'audio' && event.delta?.data) {
@@ -322,8 +323,22 @@ async function startStreamingRequest(fetchImpl, text, voiceName, apiKey, options
         mimeType ||= event.delta.mime_type || event.delta.mimeType || null;
         sampleRate = Math.max(8_000, Math.min(Math.floor(finiteNumber(event.delta.sample_rate ?? event.delta.sampleRate, sampleRate)), 96_000));
         channels = Math.max(1, Math.min(Math.floor(finiteNumber(event.delta.channels, channels)), 2));
+        const stepIndex = Number(event.index);
+        if (Number.isFinite(stepIndex)) audioStepIndexes.add(stepIndex);
         resolveFirst();
+        // After first audio, only another real audio chunk proves synthesis is
+        // progressing. Metadata/status SSE traffic must not keep a stalled /ask
+        // request alive for the provider's 54s absolute safety wall.
+        armIdle();
         if (!output.write(chunk)) await waitForWritableDrain(output, linked.controller.signal, 'Gemini TTS output stream');
+      }
+      if (event.event_type === 'step.stop' && audioStepIndexes.has(Number(event.index)) && totalBytes > 0) {
+        audioStepStopped = true;
+        if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+        // step.stop is the documented end of this model_output step. The audio
+        // is complete, so buffered /ask playback must not wait for delayed final
+        // interaction metadata.
+        if (!output.writableEnded && !output.destroyed) output.end();
       }
       if (event.event_type === 'interaction.completed') {
         const status = event.interaction?.status || 'completed';
@@ -349,7 +364,6 @@ async function startStreamingRequest(fetchImpl, text, voiceName, apiKey, options
       while (true) {
         const result = await reader.read();
         if (result.done) break;
-        armIdle();
         pending += decoder.decode(result.value, { stream: true });
         while (true) {
           const match = /\r?\n\r?\n/u.exec(pending);
@@ -358,17 +372,21 @@ async function startStreamingRequest(fetchImpl, text, voiceName, apiKey, options
           pending = pending.slice(match.index + match[0].length);
           await handleEvent(parseSseBlock(block));
         }
+        if (audioStepStopped) {
+          try { await reader.cancel(); } catch {}
+          break;
+        }
       }
       pending += decoder.decode();
       if (pending.trim()) await handleEvent(parseSseBlock(pending));
       if (!totalBytes) throw new Error('Gemini TTS streaming response did not contain audio.');
-      if (!completed) {
+      if (!completed && !audioStepStopped) {
         const error = new Error('Gemini TTS stream ended before interaction.completed.');
         error.name = 'GeminiTtsIncompleteError';
         error.retryable = true;
         throw error;
       }
-      output.end();
+      if (!output.writableEnded && !output.destroyed) output.end();
       const audioBuffer = Buffer.concat(mirror, totalBytes);
       return { audioBuffer, audioBytes: totalBytes, usage, mimeType, sampleRate, channels };
     } catch (rawError) {

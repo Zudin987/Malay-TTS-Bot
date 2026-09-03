@@ -570,7 +570,7 @@ const statusCommand = {
           value: [
             `Voice: ${personalVoice ?? 'balanced on first TTS'} • pool ${voiceAllocation.totalVoices} • occupied ${voiceAllocation.occupiedVoices} by ${voiceAllocation.assignedUsers} saved users`,
             `Thinking ${String(settings.geminiLive?.profile?.thinkingLevel || 'MINIMAL').toUpperCase()} • fresh one-turn Live sessions only`,
-            `First-audio budget ${settings.geminiLive?.firstAudioBudgetMs}ms • windows ${settings.providerHealth?.primaryFirstAudioMs}/${settings.providerHealth?.fallbackFirstAudioMs}/${settings.providerHealth?.exactFirstAudioMs}ms • /ask exact ≤${settings.geminiTts?.timeoutMs}ms • Google reserve ${settings.providerHealth?.googleReserveMs}ms`,
+            `First-audio budget ${settings.geminiLive?.firstAudioBudgetMs}ms • windows ${settings.providerHealth?.primaryFirstAudioMs}/${settings.providerHealth?.fallbackFirstAudioMs}/${settings.providerHealth?.exactFirstAudioMs}ms • /ask 3.1 first ≤${settings.geminiTts?.timeoutMs}ms • audio stall ≤${settings.geminiTts?.streamIdleTimeoutMs}ms • fresh Google ≤${settings.googleTts?.timeoutMs}ms`,
             `Preprocess: light-clean • max ${settings.maximumCharacters} graphemes • no Gemini dictionary/grammar rewrite • no merge`
           ].join('\n')
         },
