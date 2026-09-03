@@ -27,7 +27,9 @@ jobs:
           cache: npm
 
       - name: Apply focused patch
-        run: python3 .github/scripts/patch_ask_lifecycle.py
+        run: |
+          python3 .github/scripts/patch_ask_lifecycle.py
+          python3 .github/scripts/patch_ask_lifecycle_test.py
 
       - name: Install dependencies
         run: npm ci
@@ -50,7 +52,7 @@ jobs:
           set -euo pipefail
           git config user.name "Zudin987"
           git config user.email "39240221+Zudin987@users.noreply.github.com"
-          git rm .github/scripts/patch_ask_lifecycle.py .github/workflows/temp-ask-lifecycle-hardening.yml
-          git add src/tts.js src/audio.js src/ask-response.js src/commands.js test/ask-lifecycle-hardening.test.js
+          git rm .github/scripts/patch_ask_lifecycle.py .github/scripts/patch_ask_lifecycle_test.py .github/workflows/temp-ask-lifecycle-hardening.yml
+          git add src/tts.js src/audio.js src/ask-response.js src/commands.js test/ask-command.test.js test/ask-lifecycle-hardening.test.js
           git commit -m "Harden /ask ordering cancellation and queue lifecycle"
           git push origin HEAD:fix/ask-lifecycle-hardening
