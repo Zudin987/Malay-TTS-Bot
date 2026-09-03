@@ -1,0 +1,24 @@
+Malay TTS Bot v0.23.27 - Runtime & Setup Hardening
+
+What changed
+- Speaker-label generation is now lazy and abort-aware. Privacy opt-out immediately cancels active label generation, aborted labels are never cached, and unnecessary prefetch/warm-up requests are avoided.
+- /restarttts now checks all cached guild queues plus process-global Gemini work before resetting TTS state, preventing a reset while another guild or Gemini job is active.
+- Gemini key handling now deduplicates identical credentials across the 10 slots. Doctor and /status report configured slots and duplicate mappings without exposing key contents.
+- /ask is capped at two simultaneous process-wide requests so text generation cannot grow without bound alongside TTS work.
+- Deleting a Discord message now cancels its matching queued/current TTS item.
+- Direct voice recovery is tracked explicitly so /status reports recovery truthfully and duplicate recovery attempts share one job.
+- Per-guild dictionary regexes are cached and invalidated only when the shipped dictionary or that guild's overrides change.
+- setup-clean.cmd now installs dependencies with the Node 24.19.0 + npm already bundled in the Clean package. A separate system Node/npm installation is no longer required.
+- Normal MessageCreate speech filtering now has one canonical policy source. Preprocessing cannot reintroduce links, files, GIFs, videos, emoji or code that the speech whitelist intentionally silences; images still use "hantar gambar".
+- Obsolete link/file/GIF/video phrase settings and dead replay settings were removed. The playback hard maximum is consistently clamped to the actual 60-second runtime ceiling.
+- DISCORD_CLIENT_ID is optional for normal bot runtime but remains explicitly required when deploying slash commands. Doctor reports a missing client ID as a deployment warning rather than a runtime failure.
+- Missing config/settings.json now reports the fallback-to-defaults warning correctly.
+
+Preserved behavior
+- Normal provider order remains Gemini 3.1 Flash Live -> Gemini 2.5 Native Audio Live -> Gemini 3.1 Flash TTS -> Google Malay TTS.
+- /ask remains Gemini 3.1 Flash TTS -> Google Malay TTS with buffered validation/fallback and does not use conversational Live.
+- Normal first-audio windows remain 2500/1600/1600ms, overall first-audio budget remains 7000ms, Google reserve remains 1200ms, and /ask exact-TTS configured timeout remains 4000ms.
+- The approved six Gemini voices, strict no-added-words prompts, privacy controls, STOP TTS behavior, FIFO queue design and normal-chat latency strategy remain unchanged.
+
+Upgrade
+Preserve only .env and data\guilds.json from the old install. Do not copy old runtime caches, logs, locks, node_modules, or config/settings.json over the new release. Extract the Clean package to C:\Malay-TTS-Bot, restore .env and data\guilds.json, then run setup-clean.cmd. The Clean package includes the Node/npm runtime needed by setup.
