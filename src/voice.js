@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 const leaveTimers = new Map();
 const voiceStates = new Map();
 const guildLocks = new Map();
+const pendingConnects = new Map();
 const NORMAL_RECOVERY_WAIT_MS = 8_000;
 const FRESH_RETRY_DELAYS_MS = [1_000, 3_000];
 const FRESH_READY_TIMEOUT_MS = 15_000;
@@ -159,9 +160,25 @@ async function recoverLocked(guild, channelId, failedConnection, epoch, reason) 
 }
 
 export function getRuntimeVoiceChannelId(guildId) { return voiceStates.get(guildId)?.desiredChannelId ?? null; }
+export function getVoiceRuntimeStatus(guildId) {
+  const state = voiceStates.get(guildId);
+  return { phase: !state ? 'disconnected' : state.recoveryPromise || state.recoveryQueued ? 'recovering'
+    : state.connection?.state?.status || (state.desiredChannelId ? 'connecting' : 'disconnected') };
+}
 export function isVoiceRecovering(guildId) { const state = voiceStates.get(guildId); return Boolean(state?.recoveryPromise || state?.recoveryQueued); }
 
-export async function connectToVoiceChannel(guild, channel, { allowMove = false } = {}) {
+export function connectToVoiceChannel(guild, channel, options = {}) {
+  const pending = pendingConnects.get(guild.id);
+  if (pending) return pending.channelId === channel.id ? pending.promise : Promise.resolve({ connection: null, status: 'busy-other-channel' });
+  const entry = { channelId: channel.id, promise: null };
+  entry.promise = connectOnce(guild, channel, options).finally(() => {
+    if (pendingConnects.get(guild.id) === entry) pendingConnects.delete(guild.id);
+  });
+  pendingConnects.set(guild.id, entry);
+  return entry.promise;
+}
+
+async function connectOnce(guild, channel, { allowMove = false } = {}) {
   const requestedState = stateFor(guild.id);
   const requestedEpoch = requestedState.epoch;
   return withGuildLock(guild.id, async () => {
@@ -226,6 +243,7 @@ export async function connectToVoiceChannel(guild, channel, { allowMove = false 
 }
 
 export function disconnectGuild(guildId) {
+  pendingConnects.delete(guildId);
   cancelAutoLeave(guildId);
   const state = voiceStates.get(guildId);
   if (!state) { safeDestroy(getVoiceConnection(guildId)); releaseAudio(guildId); return; }

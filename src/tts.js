@@ -516,6 +516,23 @@ function liveOptions(model, signal, windowMs, apiKey) {
   };
 }
 
+function liveWindowMs(remainingMs) {
+  return Math.min(Number(settings.geminiLive?.firstAudioTimeoutMs) || 3500, healthOptions().primaryFirstAudioMs,
+    Math.max(0, remainingMs - (Number(settings.googleTts?.timeoutMs) || 3500)));
+}
+
+export function getEffectiveSpeechTiming() {
+  const budgetMs = Number(settings.geminiLive?.firstAudioBudgetMs) || 7000;
+  const liveMs = liveWindowMs(budgetMs);
+  const options = liveOptions(settings.geminiLive?.primaryModel, null, liveMs, null);
+  const graceMinMs = Math.max(1300, options.audioEndGraceMs);
+  return {
+    budgetMs, liveMs, setupMs: liveMs > 0 ? options.setupTimeoutMs : 0,
+    googleMs: Math.min(budgetMs, Number(settings.googleTts?.timeoutMs) || 3500),
+    graceMinMs, graceMaxMs: Math.max(graceMinMs, Math.min(1800, Math.max(1300, options.streamIdleTimeoutMs - 250)))
+  };
+}
+
 function googleOptions(signal, windowMs) {
   const configuredChunk = Number(settings.googleTts?.chunkLength);
   const maximumLength = !Number.isFinite(configuredChunk) ? 200 : configuredChunk;
@@ -723,8 +740,7 @@ export async function synthesize(text, context = {}) {
   if (geminiKey?.key && !geminiAuthDisabled && Date.now() >= geminiBurstUntil) {
     // Preserve the working 2500ms Live first window and setup cap. Removing
     // intermediate providers leaves Google its complete configured window.
-    const window = Math.min(Number(settings.geminiLive?.firstAudioTimeoutMs) || 3500, health.primaryFirstAudioMs,
-      Math.max(0, remaining() - (Number(settings.googleTts?.timeoutMs) || 3500)));
+    const window = liveWindowMs(remaining());
     let primary = await runAttempt({
       key: 'livePrimary', providerName: 'gemini-3.1-live', windowMs: window, parentSignal, attempts,
       factory: (signal) => synthesizeGeminiLive(value, voice, liveOptions(settings.geminiLive.primaryModel, signal, window, geminiKey.key)),
@@ -813,6 +829,7 @@ export function getTtsProviderStatus() {
   const geminiKeys = getGeminiApiKeyRoundRobinStatus();
   return {
     geminiConfigured: geminiKeys.configuredCount > 0,
+    timing: getEffectiveSpeechTiming(),
     geminiKeyRoundRobin: geminiKeys,
     geminiAuthDisabled,
     geminiLiveEnabled: settings.geminiLive?.enabled !== false,

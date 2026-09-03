@@ -29,6 +29,7 @@ import {
   connectToVoiceChannel,
   disconnectGuild,
   getRuntimeVoiceChannelId,
+  getVoiceRuntimeStatus,
   isVoiceRecovering
 } from './voice.js';
 
@@ -43,7 +44,7 @@ import { getOrAssignTtsVoice, getTtsProviderStatus, restartTtsRuntime } from './
 import { GEMINI_VOICES, GEMINI_VOICE_OPTIONS } from './voices.js';
 import { getSpeakerLabelStatus } from './speaker-label.js';
 import { getFfmpegPath } from './ffmpeg.js';
-import { getAskOptions } from './ask.js';
+import { getAskOptions, getAskRuntimeStatus } from './ask.js';
 import { executeAskRequest } from './ask-command.js';
 import { describeTtsRestartBlockers, getTtsRestartBlockers } from './restart-guard.js';
 
@@ -416,7 +417,9 @@ const restartTtsCommand = {
     const blockers = getTtsRestartBlockers({
       guildIds: [...guildIds],
       getAudioStatus,
-      getProviderStatus: getTtsProviderStatus
+      getProviderStatus: getTtsProviderStatus,
+      getAskStatus: getAskRuntimeStatus,
+      getLabelStatus: getSpeakerLabelStatus
     });
     if (!blockers.safe) {
       await interaction.reply({
@@ -458,7 +461,7 @@ const statusCommand = {
     const audio = getAudioStatus(interaction.guildId);
     const slowThresholdMs = Math.max(250, Number(settings.diagnostics?.slowTtsMs) || 1500);
     const timing = getTtsMetrics(interaction.guildId, slowThresholdMs);
-    const voiceState = isVoiceRecovering(interaction.guildId) ? 'recovering' : (channelId ? 'ready' : 'disconnected');
+    const voiceState = getVoiceRuntimeStatus(interaction.guildId).phase;
     const provider = getTtsProviderStatus();
     const peakLimiter = getPeakLimiterOptions(settings.audioPipeline);
     const personalVoice = getUserTtsVoice(interaction.guildId, interaction.user.id);
@@ -518,6 +521,7 @@ const statusCommand = {
           value: [
             `${audio.phase} • ${audio.queued}/${audio.maximumQueued} queued • backlog ~${formatDelay(audio.estimatedBacklogMs)} • prefetch ${audio.prefetched}/${audio.prefetchTarget}`,
             `Speed ${Math.round(audio.catchUpSpeed * 100)}% • dropped ${audio.droppedMessages} • stale skipped ${audio.staleSkippedMessages}`,
+            `Last ${timing.outcomes.sampleSize} terminal jobs: ${timing.outcomes.finished} finished • ${timing.outcomes.stopped} stopped • ${timing.outcomes.unavailable} failed (includes failures before playback)`,
             `Recovery ${audio.cutoffRecoverySuccesses}/${audio.cutoffRecoveries} • PCM-tail ${audio.mirrorReplays} • duplicate replay prevented ${audio.suppressedCutoffReplays} • runaway recovery suppressed ${audio.runawayRecoveriesSuppressed} • pipeline failures ${audio.pipelineFailures}`,
             `One Discord message = one TTS item. Message combining removed.`
           ].join('\n')
@@ -533,7 +537,8 @@ const statusCommand = {
           value: [
             `Voice: ${personalVoice ?? 'balanced on first TTS'} • pool ${voiceAllocation.totalVoices} • occupied ${voiceAllocation.occupiedVoices} by ${voiceAllocation.assignedUsers} saved users`,
             `Thinking ${String(settings.geminiLive?.profile?.thinkingLevel || 'MINIMAL').toUpperCase()} • fresh one-turn Live sessions only`,
-            `First-audio budget ${settings.geminiLive?.firstAudioBudgetMs}ms • Live window ${settings.providerHealth?.primaryFirstAudioMs}ms • Google ≤${settings.googleTts?.timeoutMs}ms • /ask uses literal Google speech`,
+            `Effective first-audio budget ${provider.timing.budgetMs}ms • Live ≤${provider.timing.liveMs}ms (setup ≤${provider.timing.setupMs}ms) • Google ≤${provider.timing.googleMs}ms`,
+            `Markerless Live audio-end grace adapts ${provider.timing.graceMinMs}–${provider.timing.graceMaxMs}ms • /ask uses literal Google speech`,
             `Preprocess: light-clean • max ${settings.maximumCharacters} graphemes • no Gemini dictionary/grammar rewrite • no merge`
           ].join('\n')
         },

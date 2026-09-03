@@ -47,3 +47,16 @@ test('disconnect aborts readiness waits and retires state without recreating it 
   assert.equal(voice.isVoiceRecovering(f.guild.id), false);
   assert.equal(voice.__test.voiceStates.has(f.guild.id), false);
 });
+
+test('concurrent same-channel joins share one connection wait and report real readiness', async () => {
+  const f = fixture('shared-join');
+  const first = voice.connectToVoiceChannel(f.guild, f.channel);
+  const second = voice.connectToVoiceChannel(f.guild, f.channel);
+  assert.equal(first, second);
+  assert.equal(voice.getVoiceRuntimeStatus(f.guild.id).phase, 'disconnected');
+  await new Promise((resolve) => setImmediate(resolve));
+  f.connection.state = { status: 'ready' }; f.connection.emit('ready');
+  await first;
+  assert.equal(voice.getVoiceRuntimeStatus(f.guild.id).phase, 'ready');
+  voice.disconnectGuild(f.guild.id);
+});

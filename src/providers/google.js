@@ -156,7 +156,7 @@ export async function streamGoogleMalay(text, options = {}) {
   // a healthy long utterance is not truncated by the first-audio budget.
   const timeoutMs = Math.max(250, Math.min(finiteNumber(options.timeoutMs, 3500), 60_000));
   const completionTimeoutMs = Math.max(timeoutMs, Math.min(finiteNumber(options.completionTimeoutMs, 12_000), 30_000));
-  const maxAudioBytes = Math.max(64 * 1024, Math.min(finiteNumber(options.maxAudioBytes, 4 * 1024 * 1024), 32 * 1024 * 1024));
+  const maxAudioBytes = Math.max(64 * 1024, Math.min(finiteNumber(options.maxAudioBytes, 4 * 1024 * 1024), 8 * 1024 * 1024));
   const deadline = combineAbortSignal(options.signal, completionTimeoutMs);
   let firstChunkTimer = setTimeout(() => deadline.cancel(makeTimeoutError(timeoutMs)), timeoutMs);
   firstChunkTimer.unref?.();
