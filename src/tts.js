@@ -659,7 +659,23 @@ async function runAttempt({
     if (releaseGemini) {
       const release = releaseGemini;
       releaseOwnedByCompletion = true;
-      Promise.resolve(generated?.completion).finally(release).catch(() => {});
+      // Explicit queue/user cancellation must release local Gemini ownership
+      // immediately. Waiting for a remote streaming body to notice abort can
+      // otherwise make the next TTS inherit a stale busy limiter/probe state.
+      // release() is idempotent, so normal completion can safely call it again.
+      let parentCancelRelease = null;
+      if (parentSignal) {
+        parentCancelRelease = () => {
+          release();
+          releaseHalfOpenProbe(key, state);
+        };
+        if (parentSignal.aborted) parentCancelRelease();
+        else parentSignal.addEventListener('abort', parentCancelRelease, { once: true });
+      }
+      Promise.resolve(generated?.completion).finally(() => {
+        if (parentSignal && parentCancelRelease) parentSignal.removeEventListener?.('abort', parentCancelRelease);
+        release();
+      }).catch(() => {});
     }
     observeCompletion(key, state, generated, providerName, requestStartedAt, stateOptions(key), geminiProvider, configSignature);
     lastProvider = providerName;
