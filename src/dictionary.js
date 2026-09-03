@@ -13,8 +13,10 @@ const RELOAD_DEBOUNCE_MS = 200;
 
 let dictionary = Object.create(null);
 let dictionaryPattern = null;
+let dictionaryVersion = 0;
 let lastLoadedText = null;
 let reloadTimer;
+const mergedDictionaryCache = new Map();
 
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -44,6 +46,8 @@ function compilePattern(entries) {
 function applyDictionary(nextDictionary, rawText = null) {
   dictionary = nextDictionary;
   dictionaryPattern = compilePattern(nextDictionary);
+  dictionaryVersion += 1;
+  mergedDictionaryCache.clear();
   if (rawText !== null) lastLoadedText = rawText;
 }
 
@@ -83,18 +87,39 @@ export function loadDictionary() {
 }
 
 function mergedDictionary(guildId) {
-  const overrides = guildId ? getGuildDictionaryOverrides(guildId) : {};
-  if (Object.keys(overrides).length === 0) return { entries: dictionary, pattern: dictionaryPattern };
+  if (!guildId) return { entries: dictionary, pattern: dictionaryPattern };
+
+  const id = String(guildId);
+  const overrides = getGuildDictionaryOverrides(id);
+  if (Object.keys(overrides).length === 0) {
+    mergedDictionaryCache.delete(id);
+    return { entries: dictionary, pattern: dictionaryPattern };
+  }
+
+  const signature = JSON.stringify(overrides);
+  const cached = mergedDictionaryCache.get(id);
+  if (cached?.dictionaryVersion === dictionaryVersion && cached.signature === signature) return cached.value;
+
   const entries = { ...dictionary, ...overrides };
-  return { entries, pattern: compilePattern(entries) };
+  const value = { entries, pattern: compilePattern(entries) };
+  mergedDictionaryCache.set(id, { dictionaryVersion, signature, value });
+  return value;
+}
+
+function invalidateGuildDictionaryCache(guildId) {
+  if (guildId != null) mergedDictionaryCache.delete(String(guildId));
 }
 
 export function addDictionaryEntry(guildId, shortform, expanded) {
-  return setGuildDictionaryEntry(guildId, shortform, expanded);
+  const result = setGuildDictionaryEntry(guildId, shortform, expanded);
+  invalidateGuildDictionaryCache(guildId);
+  return result;
 }
 
 export function removeDictionaryEntry(guildId, shortform) {
-  return removeGuildDictionaryEntry(guildId, shortform);
+  const result = removeGuildDictionaryEntry(guildId, shortform);
+  invalidateGuildDictionaryCache(guildId);
+  return result;
 }
 
 export function replaceDictionaryWords(text, guildId = null) {
@@ -131,4 +156,9 @@ fs.watchFile(dictionaryPath, { interval: WATCH_INTERVAL_MS, persistent: false },
   scheduleReload();
 });
 
-export const __test = { normalizeDictionary, compilePattern };
+export const __test = {
+  normalizeDictionary,
+  compilePattern,
+  getMergedCacheSize: () => mergedDictionaryCache.size,
+  getDictionaryVersion: () => dictionaryVersion
+};
