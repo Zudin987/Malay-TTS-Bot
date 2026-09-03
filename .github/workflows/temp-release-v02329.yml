@@ -1,0 +1,138 @@
+name: Prepare v0.23.29 release metadata
+
+on:
+  push:
+    branches:
+      - release/v0.23.29
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: release/v0.23.29
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Update release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          if (pkg.version !== '0.23.28') throw new Error(`Unexpected package version ${pkg.version}`);
+          pkg.version = '0.23.29';
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+
+          const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+          if (lock.version !== '0.23.28' || lock.packages?.['']?.version !== '0.23.28') {
+            throw new Error('Unexpected package-lock version');
+          }
+          lock.version = '0.23.29';
+          lock.packages[''].version = '0.23.29';
+          fs.writeFileSync('package-lock.json', JSON.stringify(lock, null, 2) + '\n');
+
+          const setupPath = 'setup-clean.cmd';
+          let setup = fs.readFileSync(setupPath, 'utf8');
+          const oldBanner = 'Malay TTS Bot clean setup v0.23.28';
+          if (!setup.includes(oldBanner)) throw new Error('setup-clean v0.23.28 banner not found');
+          setup = setup.replace(oldBanner, 'Malay TTS Bot clean setup v0.23.29');
+          fs.writeFileSync(setupPath, setup);
+          NODE
+
+          cat > RELEASE-v0.23.29.txt <<'EOF'
+          Malay TTS Bot v0.23.29 - /ask Gemini TTS Completed-Response Fix
+
+          What changed
+          - Fixed the remaining /ask failure where Gemini 3.1 exact TTS could receive valid audio but keep the streaming Interactions request open until the old 54-second absolute timeout, causing Google TTS to speak very late.
+          - /ask now uses a completed-response Gemini 3.1 Flash TTS Interactions request instead of streaming SSE into a local buffer.
+          - The /ask Gemini request uses stream:false, response_format audio, and store:false, then reads the completed inline audio result before playback.
+          - The completed-response Gemini 3.1 TTS attempt is bounded to 10 seconds. If it genuinely fails or times out, /ask falls back to Google Malay TTS with its existing fresh fallback window.
+          - /status now reports the real /ask buffered Gemini timeout instead of showing streaming first-audio and audio-stall timers that no longer apply to /ask.
+          - Added regression coverage proving /ask selects completed-response mode while normal exact-TTS fallback remains streaming.
+
+          Expected /ask speech path
+          - Normal case: Gemini 3.1 Flash TTS reads the generated /ask answer from a completed audio response.
+          - Failure case: Gemini 3.1 Flash TTS -> Google Malay TTS.
+          - Gemini 3.1 Live and Gemini 2.5 Live remain intentionally excluded from /ask.
+
+          Preserved behavior
+          - Normal Discord chat remains Gemini 3.1 Flash Live -> Gemini 2.5 Native Audio Live -> Gemini 3.1 Flash TTS -> Google Malay TTS.
+          - Normal Gemini 3.1 Live code and timing behavior are unchanged.
+          - Normal exact Gemini TTS fallback remains streaming with the existing short fallback window.
+          - Normal first-audio windows remain 2500/1600/1600ms, overall first-audio budget remains 7000ms, and normal Google reserve remains 1200ms.
+          - /ask still requires complete Gemini TTS audio before playback, preserving the no-partial-answer safety behavior.
+          - Strict no-added-words prompts, FIFO queue ownership, STOP TTS, privacy controls and the approved six Gemini voices are unchanged.
+
+          Upgrade
+          Preserve only .env and data\guilds.json from the old install. Do not copy old runtime caches, logs, locks, node_modules, or config/settings.json over the new release. Extract the v0.23.29 Clean package to C:\Malay-TTS-Bot, restore .env and data\guilds.json, then run setup-clean.cmd.
+          EOF
+
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('RELEASE-v0.23.29.txt')
+          lines = p.read_text(encoding='utf-8').splitlines()
+          p.write_text('\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n', encoding='utf-8')
+          PY
+
+      - name: Validate release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm test
+          npm audit --audit-level=high
+          find src test -name '*.js' -print0 | xargs -0 -n1 node --check
+          node <<'NODE'
+          const fs = require('fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+          const setup = fs.readFileSync('setup-clean.cmd', 'utf8');
+          const ask = fs.readFileSync('src/ask-response.js', 'utf8');
+          const tts = fs.readFileSync('src/tts.js', 'utf8');
+          const gemini = fs.readFileSync('src/providers/gemini.js', 'utf8');
+          const live = fs.readFileSync('src/providers/gemini-live.js', 'utf8');
+          const settings = JSON.parse(fs.readFileSync('config/settings.json', 'utf8'));
+
+          if (pkg.version !== '0.23.29') throw new Error('package version mismatch');
+          if (lock.version !== '0.23.29' || lock.packages?.['']?.version !== '0.23.29') throw new Error('lock version mismatch');
+          if (!setup.includes('clean setup v0.23.29')) throw new Error('setup banner mismatch');
+          if (!fs.existsSync('RELEASE-v0.23.29.txt')) throw new Error('release notes missing');
+
+          if (!ask.includes('skipLive: true') || !ask.includes('forceBuffered: true')) throw new Error('/ask routing guard missing');
+          if (!tts.includes('ASK_EXACT_BUFFERED_TIMEOUT_MS = 10_000')) throw new Error('/ask 10s bounded timeout missing');
+          if (!tts.includes('streaming: !buffered')) throw new Error('/ask completed-response routing missing');
+          if (!gemini.includes('async function startBufferedRequest')) throw new Error('completed-response provider path missing');
+          if (!gemini.includes('stream: false')) throw new Error('non-streaming Interactions request guard missing');
+          if (!gemini.includes("Accept: 'application/json'")) throw new Error('completed JSON response guard missing');
+          if (!live.includes('gemini-3.1-flash-live-preview')) throw new Error('normal 3.1 Live unexpectedly changed');
+
+          if (settings.providerHealth.primaryFirstAudioMs !== 2500) throw new Error('primary window changed');
+          if (settings.providerHealth.fallbackFirstAudioMs !== 1600) throw new Error('fallback window changed');
+          if (settings.providerHealth.exactFirstAudioMs !== 1600) throw new Error('exact fallback window changed');
+          if (settings.geminiLive.firstAudioBudgetMs !== 7000) throw new Error('normal overall budget changed');
+          if (settings.providerHealth.googleReserveMs !== 1200) throw new Error('normal Google reserve changed');
+          if (settings.googleTts.timeoutMs !== 3500) throw new Error('Google fallback timeout changed');
+          NODE
+
+      - name: Commit release metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/temp-release-v02329.yml
+          git config user.name 'MrEz'
+          git config user.email '39240221+Zudin987@users.noreply.github.com'
+          git add -A
+          git commit -m 'Release v0.23.29 - /ask Gemini TTS completed-response fix'
+          git push origin HEAD:release/v0.23.29
