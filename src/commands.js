@@ -33,7 +33,7 @@ import {
 } from './voice.js';
 
 import { getLastSettingsError, loadSettings, settings } from './config.js';
-import { cancelMessageAudio, cancelQueuedAskAudioForUser, cancelUserAudio, enqueue, getAudioStatus } from './audio.js';
+import { cancelMessageAudio, cancelQueuedAskAudioForUser, cancelSupersededAskAudioForUser, cancelUserAudio, enqueue, getAudioStatus } from './audio.js';
 import { getPeakLimiterOptions } from './audio-filters.js';
 import { getAcronymSize } from './acronyms.js';
 import { getMalayDictionarySize } from './malay-dictionary.js';
@@ -44,7 +44,7 @@ import { GEMINI_VOICES, GEMINI_VOICE_OPTIONS } from './providers/gemini.js';
 import { getSpeakerLabelPcm, getSpeakerLabelStatus } from './speaker-label.js';
 import { getFfmpegPath } from './ffmpeg.js';
 import { askGemini, describeAskError, getAskOptions } from './ask.js';
-import { ASK_ALLOWED_MENTIONS, buildAskEmbed, queueAskAnswerTts } from './ask-response.js';
+import { ASK_ALLOWED_MENTIONS, beginAskTtsRequest, buildAskEmbed, queueAskAnswerTts } from './ask-response.js';
 import { describeTtsRestartBlockers, getTtsRestartBlockers } from './restart-guard.js';
 
 const ephemeral = MessageFlags.Ephemeral;
@@ -89,7 +89,8 @@ const askTtsDependencies = {
   connect: connectToVoiceChannel,
   enqueue,
   cancel: cancelMessageAudio,
-  cancelQueuedAsk: cancelQueuedAskAudioForUser
+  cancelQueuedAsk: cancelQueuedAskAudioForUser,
+  cancelSupersededAsk: cancelSupersededAskAudioForUser
 };
 
 const askCommand = {
@@ -107,6 +108,7 @@ const askCommand = {
 
   async execute(interaction) {
     const question = interaction.options.getString('question', true);
+    const askTtsSequence = beginAskTtsRequest(interaction.guildId, interaction.user.id);
     await interaction.deferReply();
     try {
       const { answer } = await askGemini(question, { options: getAskOptions(settings.ask) });
@@ -116,7 +118,7 @@ const askCommand = {
         embeds: [embed],
         allowedMentions: ASK_ALLOWED_MENTIONS
       });
-      void queueAskAnswerTts(interaction, answer, askTtsDependencies).catch((error) => {
+      void queueAskAnswerTts(interaction, answer, askTtsDependencies, { requestSequence: askTtsSequence }).catch((error) => {
         console.warn('[ask-tts]', error?.message || error);
       });
     } catch (error) {

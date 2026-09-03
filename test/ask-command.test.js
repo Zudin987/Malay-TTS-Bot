@@ -310,7 +310,7 @@ test('/ask command posts the embed before detached TTS and normal MessageCreate 
   const commandsSource = fs.readFileSync(new URL('../src/commands.js', import.meta.url), 'utf8').replace(/\r\n?/gu, '\n');
   const indexSource = fs.readFileSync(new URL('../src/index.js', import.meta.url), 'utf8').replace(/\r\n?/gu, '\n');
   const embedReply = commandsSource.indexOf("await interaction.editReply({\n        content: null,\n        embeds: [embed]");
-  const detachedTts = commandsSource.indexOf('void queueAskAnswerTts(interaction, answer, askTtsDependencies)');
+  const detachedTts = commandsSource.indexOf('void queueAskAnswerTts(interaction, answer, askTtsDependencies, { requestSequence: askTtsSequence })');
   assert.ok(embedReply >= 0 && detachedTts > embedReply);
   assert.match(commandsSource, /allowedMentions: ASK_ALLOWED_MENTIONS/u);
   assert.match(indexSource, /message\.author\.bot \|\| message\.webhookId/u);

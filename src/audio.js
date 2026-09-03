@@ -104,6 +104,8 @@ function createQueueItem(text, metadata = {}) {
     playbackSpeed: 1,
     forceBuffered: metadata.forceBuffered === true,
     noPrefetch: metadata.noPrefetch === true,
+    protectFromOverflow: metadata.protectFromOverflow === true,
+    askSequence: Math.max(0, Number(metadata.askSequence) || 0),
     recoveryAttempt: Math.max(0, Number(metadata.recoveryAttempt) || 0),
     isRecovery: metadata.isRecovery === true,
     skipLive: metadata.skipLive === true,
@@ -171,6 +173,20 @@ function abandonUnclaimedGeneration(item, reason = 'Playback item abandoned befo
   if (!item.abortController.signal.aborted) item.abortController.abort(error);
   item.generation.then((result) => cleanupGenerated(result, { cancel: true })).catch(() => {});
   return true;
+}
+
+function waitForGenerationOrCancellation(item, generation) {
+  const signal = item?.abortController?.signal;
+  if (!signal) return Promise.resolve(generation);
+  if (signal.aborted) return Promise.reject(signal.reason || cancelledError('Queue item cancelled before provider handoff.'));
+  let abortListener = null;
+  const cancelled = new Promise((_, reject) => {
+    abortListener = () => reject(signal.reason || cancelledError('Queue item cancelled before provider handoff.'));
+    signal.addEventListener('abort', abortListener, { once: true });
+  });
+  return Promise.race([generation, cancelled]).finally(() => {
+    if (abortListener) signal.removeEventListener?.('abort', abortListener);
+  });
 }
 
 function createPrefetchSpool(generated, signal) {
@@ -267,18 +283,30 @@ function cleanupCancelledQueuedItem(item) {
 
 function dropForQueueOverflow(guildId, state, maximumQueuedMessages) {
   const options = getAdaptiveQueueOptions();
-  let dropIndex = 0;
+  const droppable = state.queue
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => item?.protectFromOverflow !== true);
+  const now = Date.now();
+  if (!droppable.length) {
+    state.droppedMessages += 1;
+    if (now - state.lastQueueWarningAt >= MAX_QUEUE_WARNING_INTERVAL_MS) {
+      state.lastQueueWarningAt = now;
+      console.warn(`[queue:${guildId}] Queue limit ${maximumQueuedMessages} reached; all waiting items are protected, so the incoming message was rejected.`);
+    }
+    return false;
+  }
+  let dropIndex = droppable[0].index;
   if (options.enabled && options.preservePrefetchedOnOverflow) {
-    const firstUnstarted = state.queue.findIndex((item) => !item.generation);
-    if (firstUnstarted >= 0) dropIndex = firstUnstarted;
+    const firstUnstarted = droppable.find(({ item }) => !item.generation);
+    if (firstUnstarted) dropIndex = firstUnstarted.index;
   }
   const [dropped] = state.queue.splice(dropIndex, 1);
   if (dropped) { state.droppedMessages += 1; cleanupCancelledQueuedItem(dropped); }
-  const now = Date.now();
   if (now - state.lastQueueWarningAt >= MAX_QUEUE_WARNING_INTERVAL_MS) {
     state.lastQueueWarningAt = now;
     console.warn(`[queue:${guildId}] Queue limit ${maximumQueuedMessages} reached; dropped one waiting message.`);
   }
+  return Boolean(dropped);
 }
 
 function getWaitingSpeechMs(state) { return state.queue.reduce((sum, item) => sum + (item.estimatedDurationMs || estimateSpeechDurationMs(item.text)), 0); }
@@ -466,7 +494,8 @@ function scheduleRecovery(guildId, state, item, error, { replay = null, fullRetr
     messageId: item.messageId, voiceChannelId: item.voiceChannelId,
     voice: item.voice, speakerLabel: item.speakerLabel, speakerResetSeconds: item.speakerResetSeconds,
     googleText: replacementText ? recoveryText : item.googleText,
-    verificationText: recoveryText, forceBuffered: true,
+    verificationText: recoveryText, forceBuffered: true, noPrefetch: item.noPrefetch,
+    protectFromOverflow: item.protectFromOverflow, askSequence: item.askSequence,
     recoveryAttempt: item.recoveryAttempt + 1, isRecovery: true,
     recoveryEpoch: item.recoveryEpoch,
     skipLive: regeneratedTail ? true : fullRetry ? Boolean(item.skipLive || String(error?.provider || '').includes('live')) : true,
@@ -923,7 +952,10 @@ export function enqueue(guildId, text, metadata = {}) {
       cleanupCancelledQueuedItem(incoming);
       return 'rejected-queue-full';
     }
-    dropForQueueOverflow(guildId, state, maximum);
+    if (!dropForQueueOverflow(guildId, state, maximum)) {
+      cleanupCancelledQueuedItem(incoming);
+      return 'rejected-queue-full';
+    }
   }
   state.queue.push(incoming);
   if (state.running || !state.voiceReady) {
@@ -964,7 +996,7 @@ async function runQueue(guildId, state) {
       speakerLabelWaitMs = labelResult.waitMs;
     }
 
-    generated = await generation;
+    generated = await waitForGenerationOrCancellation(item, generation);
     if (item.cancelled || state.disposed) return;
 
     // Buffered raw outputs can be checked before playback; a clearly truncated
@@ -1135,20 +1167,52 @@ export function cancelUserAudio(guildId, userId) {
   return { cancelledCurrent, cancelledQueued };
 }
 
-function cancelQueuedAskItemsForUser(state, userId) {
+function cancelQueuedAskItemsForUser(state, userId, newerSequence = null) {
   const id = String(userId ?? '');
   if (!state || !id || !Array.isArray(state.queue)) return 0;
+  const threshold = Number(newerSequence);
+  const onlyOlder = Number.isFinite(threshold) && threshold > 0;
   let cancelled = 0;
   const kept = [];
   for (const item of state.queue) {
     const isQueuedAsk = String(item?.messageId ?? '').startsWith('ask:');
-    if (isQueuedAsk && String(item?.userId ?? '') === id) {
+    const sequence = Math.max(0, Number(item?.askSequence) || 0);
+    const superseded = !onlyOlder || sequence === 0 || sequence < threshold;
+    if (isQueuedAsk && String(item?.userId ?? '') === id && superseded) {
       cancelled += 1;
       cleanupCancelledQueuedItem(item);
     } else kept.push(item);
   }
   state.queue = kept;
   return cancelled;
+}
+
+function cancelCurrentAskIfSuperseded(state, userId, newerSequence) {
+  const id = String(userId ?? '');
+  const threshold = Number(newerSequence);
+  const current = state?.currentItem;
+  if (!id || !Number.isFinite(threshold) || threshold <= 0 || !current) return false;
+  if (!String(current?.messageId ?? '').startsWith('ask:') || String(current?.userId ?? '') !== id) return false;
+  // Once the listener has heard any of the old answer, do not interrupt it.
+  if (Number(current.firstAudibleAtEpoch) > 0) return false;
+  const currentSequence = Math.max(0, Number(current.askSequence) || 0);
+  if (currentSequence > 0 && currentSequence >= threshold) return false;
+  current.cancelled = true;
+  const reason = cancelledError('Superseded by a newer /ask before first audible speech.');
+  if (!current.abortController.signal.aborted) current.abortController.abort(reason);
+  current.generation?.then((generated) => { try { generated?.cancel?.(reason); } catch {} }).catch(() => {});
+  try { state.player?.stop?.(true); } catch {}
+  if (state.ffmpeg && !state.ffmpeg.killed) state.ffmpeg.kill();
+  return true;
+}
+
+export function cancelSupersededAskAudioForUser(guildId, userId, newerSequence) {
+  const state = states.get(guildId);
+  if (!state) return { cancelledCurrent: false, cancelledQueued: 0 };
+  const cancelledQueued = cancelQueuedAskItemsForUser(state, userId, newerSequence);
+  const cancelledCurrent = cancelCurrentAskIfSuperseded(state, userId, newerSequence);
+  if (!state.running && state.voiceReady && state.queue.length) void runQueue(guildId, state);
+  return { cancelledCurrent, cancelledQueued };
 }
 
 export function cancelQueuedAskAudioForUser(guildId, userId) {
@@ -1244,4 +1308,4 @@ export function getAudioStatus(guildId) {
   };
 }
 
-export const __test = { mp3DurationMs, decideSpeakerLabel, buildPcmTail, buildTranscriptTextTail, handleCompletionRecovery, getGeneratedAudioDurationMs, getRecoveryResumeStartMs, createQueueItem, cancelQueuedItemsForUser, cancelQueuedAskItemsForUser, cancelCurrentItemForUser, createPrefetchSpool, wireProviderToInput, scheduleRecovery, scheduleCompletionGraceCancel, canRunQueue, takeNextItem, abandonUnclaimedGeneration, hasPrefetchBarrier };
+export const __test = { mp3DurationMs, decideSpeakerLabel, buildPcmTail, buildTranscriptTextTail, handleCompletionRecovery, getGeneratedAudioDurationMs, getRecoveryResumeStartMs, createQueueItem, cancelQueuedItemsForUser, cancelQueuedAskItemsForUser, cancelCurrentAskIfSuperseded, cancelCurrentItemForUser, cancelSupersededAskItemsForUser: (state, userId, newerSequence) => ({ cancelledQueued: cancelQueuedAskItemsForUser(state, userId, newerSequence), cancelledCurrent: cancelCurrentAskIfSuperseded(state, userId, newerSequence) }), dropForQueueOverflow, waitForGenerationOrCancellation, createPrefetchSpool, wireProviderToInput, scheduleRecovery, scheduleCompletionGraceCancel, canRunQueue, takeNextItem, abandonUnclaimedGeneration, hasPrefetchBarrier };

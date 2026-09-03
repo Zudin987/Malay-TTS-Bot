@@ -21,7 +21,7 @@ function newProviderState() {
     runawayIncidentCount: 0, budgetMissCount: 0, lastFailureAt: 0, lastError: null,
     lastFailureKind: null, lastAttemptMs: 0, maxAttemptMs: 0, totalAttemptMs: 0,
     consecutiveFailures: 0, consecutiveQuotaFailures: 0,
-    halfOpenProbeInFlight: false,
+    halfOpenProbeInFlight: false, halfOpenProbeToken: null,
     disabledUntilConfigChange: false, disabledConfigSignature: null,
     disabledReason: null
   };
@@ -37,6 +37,7 @@ let geminiAuthDisabled = false;
 let sharedLiveTransportUntil = 0;
 let geminiBurstUntil = 0;
 let globalHalfOpenProbeKey = null;
+let halfOpenProbeSequence = 0;
 let geminiSuccessCount = 0;
 let fallbackCount = 0;
 let lastProvider = null;
@@ -180,18 +181,32 @@ function recordGeminiQuotaFailure(key) {
   }
 }
 
-function releaseHalfOpenProbe(key, state) {
+function releaseHalfOpenProbe(key, state, token = undefined) {
+  // Internal async completions pass the lease token they acquired. A late
+  // completion from an older request must never clear a newer half-open probe.
+  // Undefined is retained only for direct/manual test cleanup compatibility.
+  if (token === null) return false;
+  if (token !== undefined && state.halfOpenProbeToken !== token) return false;
   state.halfOpenProbeInFlight = false;
+  state.halfOpenProbeToken = null;
   if (globalHalfOpenProbeKey === key) globalHalfOpenProbeKey = null;
+  return true;
 }
 
-function beginHalfOpenProbe(key, state) {
-  if (key === 'google' || state.consecutiveFailures <= 0) return true;
-  if (state.halfOpenProbeInFlight) return false;
-  if (globalHalfOpenProbeKey && globalHalfOpenProbeKey !== key) return false;
+function beginHalfOpenProbeLease(key, state) {
+  if (key === 'google' || state.consecutiveFailures <= 0) return { allowed: true, token: null };
+  if (state.halfOpenProbeInFlight) return { allowed: false, token: null };
+  if (globalHalfOpenProbeKey && globalHalfOpenProbeKey !== key) return { allowed: false, token: null };
+  const token = ++halfOpenProbeSequence;
   state.halfOpenProbeInFlight = true;
+  state.halfOpenProbeToken = token;
   globalHalfOpenProbeKey = key;
-  return true;
+  return { allowed: true, token };
+}
+
+// Preserve the existing boolean helper for characterization tests and callers.
+function beginHalfOpenProbe(key, state) {
+  return beginHalfOpenProbeLease(key, state).allowed;
 }
 
 function providerReady(key, state, signature = providerConfigSignature(key)) {
@@ -232,7 +247,7 @@ function logProviderFailure(providerName, error, phase = 'initial') {
   console.warn(`[provider-fail:${providerName}] phase=${phase}${metadata ? ` ${metadata}` : ''} message=${sanitizeProviderError(error)}`);
 }
 
-function setProviderFailure(state, error, options = {}, { phase = 'initial', budget = false, key = 'unknown', configSignature = null } = {}) {
+function setProviderFailure(state, error, options = {}, { phase = 'initial', budget = false, key = 'unknown', configSignature = null, probeToken = undefined } = {}) {
   // Budget/deadline failures must affect health even if a downstream provider
   // wrapped the abort as a cancellation. Explicit user/queue cancellation stays neutral.
   if (error?.cancelled && !budget) return;
@@ -297,18 +312,18 @@ function setProviderFailure(state, error, options = {}, { phase = 'initial', bud
   if (budget) state.budgetMissCount += 1;
   if (phase === 'midstream') state.midstreamFailureCount += 1;
   else state.initialFailureCount += 1;
-  releaseHalfOpenProbe(key, state);
+  releaseHalfOpenProbe(key, state, probeToken);
   if (key !== 'google' && error?.quotaLike) recordGeminiQuotaFailure(key);
 }
 
 function markFirstAudio(state) { state.firstAudioSuccessCount += 1; }
-function markCompleted(state, requestStartedAt, geminiProvider = true, key = 'unknown') {
+function markCompleted(state, requestStartedAt, geminiProvider = true, key = 'unknown', probeToken = undefined) {
   if (Number(requestStartedAt) >= Number(state.lastFailureAt || 0)) {
     state.cooldownUntil = 0; state.cooldownReason = null; state.lastError = null; state.lastFailureKind = null; state.lastFailureAt = 0;
     state.disabledUntilConfigChange = false; state.disabledConfigSignature = null; state.disabledReason = null;
     state.consecutiveFailures = 0; state.consecutiveQuotaFailures = 0;
   }
-  releaseHalfOpenProbe(key, state);
+  releaseHalfOpenProbe(key, state, probeToken);
   state.successCount += 1;
   if (geminiProvider) geminiSuccessCount += 1;
   else fallbackCount += 1;
@@ -396,7 +411,7 @@ function attemptSignal(parentSignal, maxMs, providerName) {
   };
 }
 
-function recordRunawayMidstreamFailure(state, error, key = 'unknown') {
+function recordRunawayMidstreamFailure(state, error, key = 'unknown', probeToken = undefined) {
   const now = Date.now();
   state.runawayIncidentCount += 1;
   state.failureCount += 1;
@@ -407,7 +422,7 @@ function recordRunawayMidstreamFailure(state, error, key = 'unknown') {
   // First audio was healthy; runaway extra speech is model behavior, not
   // evidence that the provider cannot serve the next message. Do not apply
   // the normal provider cooldown or increment consecutive health failures.
-  releaseHalfOpenProbe(key, state);
+  releaseHalfOpenProbe(key, state, probeToken);
 }
 
 function shouldIsolateLiveMidstreamFailure(error, key) {
@@ -424,7 +439,7 @@ function shouldIsolateLiveMidstreamFailure(error, key) {
     && !error?.configLike;
 }
 
-function recordIsolatedLiveMidstreamFailure(state, error, key = 'unknown') {
+function recordIsolatedLiveMidstreamFailure(state, error, key = 'unknown', probeToken = undefined) {
   state.failureCount += 1;
   state.midstreamFailureCount += 1;
   state.lastFailureAt = Date.now();
@@ -432,29 +447,29 @@ function recordIsolatedLiveMidstreamFailure(state, error, key = 'unknown') {
   state.lastFailureKind = error?.transportLike ? 'midstream/transport' : 'midstream/temporary';
   // Do not increment consecutiveFailures or apply a provider cooldown. Recovery
   // still handles the current audio; the next message gets a fresh Live turn.
-  releaseHalfOpenProbe(key, state);
+  releaseHalfOpenProbe(key, state, probeToken);
 }
 
-function observeCompletion(key, state, generated, providerName, requestStartedAt, options, geminiProvider, configSignature) {
+function observeCompletion(key, state, generated, providerName, requestStartedAt, options, geminiProvider, configSignature, probeToken = undefined) {
   const completion = generated?.completion;
   if (!completion || typeof completion.then !== 'function') {
-    markCompleted(state, requestStartedAt, geminiProvider, key);
+    markCompleted(state, requestStartedAt, geminiProvider, key, probeToken);
     return;
   }
-  completion.then(() => markCompleted(state, requestStartedAt, geminiProvider, key)).catch((error) => {
+  completion.then(() => markCompleted(state, requestStartedAt, geminiProvider, key, probeToken)).catch((error) => {
     if (error?.runawayLike) {
-      recordRunawayMidstreamFailure(state, error, key);
+      recordRunawayMidstreamFailure(state, error, key, probeToken);
       console.warn(`[provider-runaway:${providerName}] phase=midstream isolated=true message=${sanitizeProviderError(error)}`);
       return;
     }
     if (shouldIsolateLiveMidstreamFailure(error, key)) {
-      recordIsolatedLiveMidstreamFailure(state, error, key);
+      recordIsolatedLiveMidstreamFailure(state, error, key, probeToken);
       console.warn(`[provider-midstream:${providerName}] isolated=true message=${sanitizeProviderError(error)}`);
       return;
     }
     const budget = Boolean(error?.budgetLike || error?.name === 'TtsFailoverBudgetError');
-    if (error?.cancelled && !budget) { releaseHalfOpenProbe(key, state); return; }
-    setProviderFailure(state, error, options, { phase: 'midstream', budget, key, configSignature });
+    if (error?.cancelled && !budget) { releaseHalfOpenProbe(key, state, probeToken); return; }
+    setProviderFailure(state, error, options, { phase: 'midstream', budget, key, configSignature, probeToken });
     logProviderFailure(providerName, error, 'midstream');
   });
 }
@@ -616,13 +631,15 @@ async function runAttempt({
     attempts.push({ provider: providerName, outcome: state.disabledUntilConfigChange ? 'config-disabled-skip' : 'cooldown-skip', ms: 0 });
     return { result: null, error: null };
   }
-  if (!beginHalfOpenProbe(key, state)) {
+  const probeLease = beginHalfOpenProbeLease(key, state);
+  if (!probeLease.allowed) {
     noteSkipped(state);
     attempts.push({ provider: providerName, outcome: 'half-open-skip', ms: 0 });
     return { result: null, error: null };
   }
+  const probeToken = probeLease.token;
   if (windowMs < 250) {
-    releaseHalfOpenProbe(key, state);
+    releaseHalfOpenProbe(key, state, probeToken);
     noteSkipped(state, { budget: true });
     attempts.push({ provider: providerName, outcome: 'budget-skip', ms: 0 });
     return { result: null, error: makeBudgetError(providerName, windowMs) };
@@ -667,7 +684,7 @@ async function runAttempt({
       if (parentSignal) {
         parentCancelRelease = () => {
           release();
-          releaseHalfOpenProbe(key, state);
+          releaseHalfOpenProbe(key, state, probeToken);
         };
         if (parentSignal.aborted) parentCancelRelease();
         else parentSignal.addEventListener('abort', parentCancelRelease, { once: true });
@@ -677,7 +694,7 @@ async function runAttempt({
         release();
       }).catch(() => {});
     }
-    observeCompletion(key, state, generated, providerName, requestStartedAt, stateOptions(key), geminiProvider, configSignature);
+    observeCompletion(key, state, generated, providerName, requestStartedAt, stateOptions(key), geminiProvider, configSignature, probeToken);
     lastProvider = providerName;
     return { result: generated, error: null, elapsed, firstAudioAt: performance.now() };
   } catch (rawError) {
@@ -686,15 +703,15 @@ async function runAttempt({
     noteAttempt(state, elapsed);
     const budget = Boolean(error?.budgetLike || error?.name === 'TtsFailoverBudgetError');
     if (!providerStarted) {
-      releaseHalfOpenProbe(key, state);
+      releaseHalfOpenProbe(key, state, probeToken);
       noteSkipped(state, { budget });
       attempts.push({ provider: providerName, outcome: budget ? 'limiter-budget-skip' : 'limiter-cancelled', ms: elapsed, error: String(error?.name || 'Error') });
       return { result: null, error, elapsed };
     }
     if (budget || !error?.cancelled) {
-      setProviderFailure(state, error, stateOptions(key), { phase: 'initial', budget, key, configSignature });
+      setProviderFailure(state, error, stateOptions(key), { phase: 'initial', budget, key, configSignature, probeToken });
       if (!budget && !error?.cancelled) logProviderFailure(providerName, error, 'initial');
-    } else releaseHalfOpenProbe(key, state);
+    } else releaseHalfOpenProbe(key, state, probeToken);
 
     const authGateDisabled = maybeDisableGeminiAuth(geminiProvider ? error : null, apiKeySlot);
     if (geminiProvider && error?.authLike && !authGateDisabled) {
@@ -935,4 +952,4 @@ export function getTtsProviderStatus() {
 }
 
 
-export const __test = { makeBudgetError, googleFallbackWindowMs, setProviderFailure, recordRunawayMidstreamFailure, recordIsolatedLiveMidstreamFailure, shouldIsolateLiveMidstreamFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, exactAttemptWindowMs, exactOptions, isBufferedExactContext, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, runAttempt, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };
+export const __test = { makeBudgetError, googleFallbackWindowMs, setProviderFailure, recordRunawayMidstreamFailure, recordIsolatedLiveMidstreamFailure, shouldIsolateLiveMidstreamFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, exactAttemptWindowMs, exactOptions, isBufferedExactContext, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, runAttempt, providerConfigSignature, beginHalfOpenProbe, beginHalfOpenProbeLease, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };
