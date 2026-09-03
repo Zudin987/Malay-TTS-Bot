@@ -33,7 +33,7 @@ import {
 } from './voice.js';
 
 import { getLastSettingsError, loadSettings, settings } from './config.js';
-import { cancelMessageAudio, cancelUserAudio, enqueue, getAudioStatus } from './audio.js';
+import { cancelMessageAudio, cancelQueuedAskAudioForUser, cancelUserAudio, enqueue, getAudioStatus } from './audio.js';
 import { getPeakLimiterOptions } from './audio-filters.js';
 import { getAcronymSize } from './acronyms.js';
 import { getMalayDictionarySize } from './malay-dictionary.js';
@@ -88,7 +88,8 @@ const askTtsDependencies = {
   getVoice: getOrAssignTtsVoice,
   connect: connectToVoiceChannel,
   enqueue,
-  cancel: cancelMessageAudio
+  cancel: cancelMessageAudio,
+  cancelQueuedAsk: cancelQueuedAskAudioForUser
 };
 
 const askCommand = {
@@ -570,7 +571,7 @@ const statusCommand = {
           value: [
             `Voice: ${personalVoice ?? 'balanced on first TTS'} • pool ${voiceAllocation.totalVoices} • occupied ${voiceAllocation.occupiedVoices} by ${voiceAllocation.assignedUsers} saved users`,
             `Thinking ${String(settings.geminiLive?.profile?.thinkingLevel || 'MINIMAL').toUpperCase()} • fresh one-turn Live sessions only`,
-            `First-audio budget ${settings.geminiLive?.firstAudioBudgetMs}ms • windows ${settings.providerHealth?.primaryFirstAudioMs}/${settings.providerHealth?.fallbackFirstAudioMs}/${settings.providerHealth?.exactFirstAudioMs}ms • /ask 3.1 buffered ≤${provider.askExactBufferedTimeoutMs}ms • fresh Google ≤${settings.googleTts?.timeoutMs}ms`,
+            `First-audio budget ${settings.geminiLive?.firstAudioBudgetMs}ms • windows ${settings.providerHealth?.primaryFirstAudioMs}/${settings.providerHealth?.fallbackFirstAudioMs}/${settings.providerHealth?.exactFirstAudioMs}ms • /ask 3.1 stream first ≤${settings.geminiTts?.timeoutMs}ms • stall ≤${settings.geminiTts?.streamIdleTimeoutMs}ms • fresh Google ≤${settings.googleTts?.timeoutMs}ms`,
             `Preprocess: light-clean • max ${settings.maximumCharacters} graphemes • no Gemini dictionary/grammar rewrite • no merge`
           ].join('\n')
         },
