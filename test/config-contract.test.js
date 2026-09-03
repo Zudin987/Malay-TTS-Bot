@@ -7,6 +7,7 @@ process.env.DISCORD_TOKEN ||= 'test-token';
 
 const configModule = await import('../src/config.js');
 
+// audio.js enforces the same 60s hard ceiling; keep configuration and playback aligned.
 test('settings normalization drops obsolete speech/replay controls and matches audio hard maximum', () => {
   const normalized = configModule.__test.normalizeSettings({
     videoPhrase: 'old video',
