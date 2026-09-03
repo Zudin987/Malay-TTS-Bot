@@ -40,7 +40,7 @@ import { getMalayDictionarySize } from './malay-dictionary.js';
 import { getGameDictionarySize } from './game-dictionary.js';
 import { getTtsMetrics } from './tts-metrics.js';
 import { getOrAssignTtsVoice, getTtsProviderStatus, restartTtsRuntime } from './tts.js';
-import { GEMINI_VOICES, GEMINI_VOICE_OPTIONS } from './providers/gemini.js';
+import { GEMINI_VOICES, GEMINI_VOICE_OPTIONS } from './voices.js';
 import { getSpeakerLabelPcm, getSpeakerLabelStatus } from './speaker-label.js';
 import { getFfmpegPath } from './ffmpeg.js';
 import { askGemini, describeAskError, getAskOptions } from './ask.js';
@@ -163,7 +163,7 @@ const ttsPrivacyCommand = {
     await interaction.reply({
       content: [
         'Eligible messages typed in the active Discord voice-channel chat are sent to the selected TTS provider to generate speech.',
-        'Gemini exact TTS uses `store:false`, but unpaid Gemini service terms may still apply to submitted content. Avoid private/confidential content.',
+        'Gemini Live and the unofficial Google Malay endpoint process submitted speech text under their applicable terms.',
         `Your TTS opt-out is currently **${optedOut ? 'enabled' : 'disabled'}**. Use \`/ttsoptout\` to change it.`
       ].join('\n'),
       flags: ephemeral
@@ -506,7 +506,7 @@ const statusCommand = {
     const keyRing = provider.geminiKeyRoundRobin ?? {};
 
     const providerLine = (name, state, standby = false) => {
-      const availability = state.disabled
+      const availability = state.unavailableReason ? state.unavailableReason : state.disabled
         ? `disabled (${state.disabledReason || 'request/config error'})`
         : state.halfOpenProbeInFlight
           ? 'half-open probe'
@@ -542,8 +542,6 @@ const statusCommand = {
             provider.geminiAuthDisabled ? 'Gemini auth disabled for this runtime; /restarttts resets provider state, but .env key edits require a full bot restart.' : 'Gemini auth gate: enabled',
             `Gemini keys: ${keyRing.configuredCount ?? 0} unique${Number(keyRing.configuredEnvCount) > Number(keyRing.configuredCount) ? ` / ${keyRing.configuredEnvCount} populated slots` : ''}${keyRing.duplicateSlots?.length ? ` • duplicate slots ${keyRing.duplicateSlots.map((entry) => `${entry.slot}->${entry.duplicateOf}`).join(', ')}` : ''}`,
             providerLine('3.1 Live', provider.livePrimary),
-            providerLine('2.5 Live', provider.liveFallback, true),
-            providerLine('3.1 TTS', provider.exactTts, true),
             providerLine('Google ms', provider.google, true),
             provider.burstBypassActive ? `Burst bypass: Google-first for ${provider.burstBypassRemainingSeconds}s` : 'Burst bypass: inactive',
             `Gemini concurrency: ${provider.geminiLimiter.active}/${provider.geminiLimiter.max} active • ${provider.geminiLimiter.queued} waiting${provider.halfOpenProbeKey ? ` • probe ${provider.halfOpenProbeKey}` : ''}`,
@@ -573,7 +571,7 @@ const statusCommand = {
           value: [
             `Voice: ${personalVoice ?? 'balanced on first TTS'} • pool ${voiceAllocation.totalVoices} • occupied ${voiceAllocation.occupiedVoices} by ${voiceAllocation.assignedUsers} saved users`,
             `Thinking ${String(settings.geminiLive?.profile?.thinkingLevel || 'MINIMAL').toUpperCase()} • fresh one-turn Live sessions only`,
-            `First-audio budget ${settings.geminiLive?.firstAudioBudgetMs}ms • windows ${settings.providerHealth?.primaryFirstAudioMs}/${settings.providerHealth?.fallbackFirstAudioMs}/${settings.providerHealth?.exactFirstAudioMs}ms • /ask 3.1 stream first ≤${settings.geminiTts?.timeoutMs}ms • stall ≤${settings.geminiTts?.streamIdleTimeoutMs}ms • fresh Google ≤${settings.googleTts?.timeoutMs}ms`,
+            `First-audio budget ${settings.geminiLive?.firstAudioBudgetMs}ms • Live window ${settings.providerHealth?.primaryFirstAudioMs}ms • Google ≤${settings.googleTts?.timeoutMs}ms • /ask uses literal Google speech`,
             `Preprocess: light-clean • max ${settings.maximumCharacters} graphemes • no Gemini dictionary/grammar rewrite • no merge`
           ].join('\n')
         },
@@ -598,8 +596,6 @@ const statusCommand = {
           name: 'Recent provider errors',
           value: [
             provider.livePrimary.lastError ? `3.1 Live: ${String(provider.livePrimary.lastError).slice(0, 220)}` : null,
-            provider.liveFallback.lastError ? `2.5 Live: ${String(provider.liveFallback.lastError).slice(0, 220)}` : null,
-            provider.exactTts.lastError ? `3.1 TTS: ${String(provider.exactTts.lastError).slice(0, 220)}` : null,
             provider.google.lastError ? `Google: ${String(provider.google.lastError).slice(0, 220)}` : null
           ].filter(Boolean).join('\n') || 'None'
         }

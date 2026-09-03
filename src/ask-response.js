@@ -136,14 +136,9 @@ export function buildAskTtsItem(interaction, answer, voiceChannel, voice, reques
       voice,
       speakerLabel: null,
       rejectOnOverflow: true,
-      // /ask output is already generated text. Do not send it back through the
-      // conversational Live model, which can occasionally answer a question in
-      // the transcript instead of reading it. Use dedicated Gemini TTS first,
-      // then the deterministic Google fallback.
+      // The displayed answer is already final. Google reads it literally;
+      // Live's self-transcription cannot independently verify lexical fidelity.
       skipLive: true,
-      // /ask uses dedicated Gemini 3.1 TTS, but starts playback from the
-      // first streamed audio chunk. This keeps conversational Live excluded while
-      // avoiding the multi-second full-answer buffering delay.
       forceBuffered: false,
       // Do not synthesize queued /ask answers speculatively. Repeated /ask calls
       // should not occupy Gemini slots for audio that cannot play yet.

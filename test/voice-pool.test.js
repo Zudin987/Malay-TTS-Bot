@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { GEMINI_VOICE_OPTIONS, GEMINI_VOICES } from '../src/providers/gemini.js';
+import { GEMINI_VOICE_OPTIONS, GEMINI_VOICES } from '../src/voices.js';
 
 const expected = [
   { name: 'Charon', gender: 'Male', style: 'Informative' },

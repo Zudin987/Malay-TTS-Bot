@@ -170,6 +170,7 @@ export async function streamGoogleMalay(text, options = {}) {
   const ready = new Array(chunks.length);
   let nextIndex = 0;
   let totalBytes = 0;
+  let receivedBytes = 0;
 
   const promises = chunks.map((_, i) => {
     const promise = new Promise((resolve, reject) => { ready[i] = { resolve, reject }; });
@@ -196,6 +197,9 @@ export async function streamGoogleMalay(text, options = {}) {
           retryDelayMs: options.retryDelayMs,
           maxAudioBytes
         });
+        throwIfAborted(deadline.signal);
+        receivedBytes += part.length;
+        if (receivedBytes > maxAudioBytes) throw new Error(`Google Malay TTS exceeded ${maxAudioBytes} total audio bytes.`);
         ready[index].resolve(part);
       } catch (error) {
         ready[index].reject(error);

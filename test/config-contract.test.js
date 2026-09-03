@@ -7,6 +7,11 @@ process.env.DISCORD_TOKEN ||= 'test-token';
 
 const configModule = await import('../src/config.js');
 
+test('shipped defaults and missing-file defaults are identical after normalization', () => {
+  const shipped = JSON.parse(fs.readFileSync(new URL('../config/settings.json', import.meta.url), 'utf8'));
+  assert.deepEqual(configModule.__test.normalizeSettings({}), configModule.__test.normalizeSettings(shipped));
+});
+
 // audio.js enforces the same 60s hard ceiling; keep configuration and playback aligned.
 test('settings normalization drops obsolete speech/replay controls and matches audio hard maximum', () => {
   const normalized = configModule.__test.normalizeSettings({

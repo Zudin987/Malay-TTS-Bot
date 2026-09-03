@@ -40,7 +40,7 @@ test('serious Live quota/auth/config failures are not isolated', () => {
   assert.equal(tts.__test.shouldIsolateLiveMidstreamFailure({ quotaLike: true }, 'livePrimary'), false);
   assert.equal(tts.__test.shouldIsolateLiveMidstreamFailure({ authLike: true }, 'livePrimary'), false);
   assert.equal(tts.__test.shouldIsolateLiveMidstreamFailure({ configLike: true }, 'livePrimary'), false);
-  assert.equal(tts.__test.shouldIsolateLiveMidstreamFailure({ transportLike: true }, 'exactTts'), false);
+  assert.equal(tts.__test.shouldIsolateLiveMidstreamFailure({ transportLike: true }, 'google'), false);
 });
 
 test('runaway Live output never schedules cutoff recovery', () => {

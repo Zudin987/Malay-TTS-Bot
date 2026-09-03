@@ -5,8 +5,7 @@ import fs from 'node:fs';
 const settings = JSON.parse(fs.readFileSync(new URL('../config/settings.json', import.meta.url), 'utf8'));
 
 for (const [name, profile] of [
-  ['Gemini Live', settings.geminiLive.profile],
-  ['Gemini TTS', settings.geminiTts.profile]
+  ['Gemini Live', settings.geminiLive.profile]
 ]) {
   test(`${name} allows gentle expression without relaxing lexical fidelity`, () => {
     assert.match(profile.stylePrompt, /mild natural conversational expression/i);
