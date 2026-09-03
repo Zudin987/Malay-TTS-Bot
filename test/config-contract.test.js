@@ -7,6 +7,29 @@ process.env.DISCORD_TOKEN ||= 'test-token';
 
 const configModule = await import('../src/config.js');
 
+test('configuration aligns resource limits and enforces increasing cooldowns', () => {
+  const result = configModule.__test.normalizeSettings({ providerHealth: { quotaFirstSeconds: 500, quotaSecondSeconds: 10, quotaThirdSeconds: 30 }, googleTts: { maxAudioBytes: 999999999 } });
+  assert.equal(result.providerHealth.quotaSecondSeconds, 500);
+  assert.equal(result.providerHealth.quotaThirdSeconds, 500);
+  assert.equal(result.googleTts.maxAudioBytes, 8 * 1024 * 1024);
+  assert.throws(() => configModule.__test.normalizeSettings({ geminiLive: { primaryModel: 'unsupported-speech-model' } }), /Only .* is supported/);
+});
+
+test('effective timing reflects conflicting settings without changing normal Live timing', async () => {
+  const tts = await import('../src/tts.js');
+  const normal = tts.getEffectiveSpeechTiming();
+  assert.equal(normal.liveMs, 2500); assert.equal(normal.setupMs, 1375);
+  assert.equal(normal.graceMinMs, 1300); assert.equal(normal.graceMaxMs, 1800);
+  const live = { ...configModule.settings.geminiLive };
+  const google = { ...configModule.settings.googleTts };
+  try {
+    configModule.settings.geminiLive.firstAudioBudgetMs = 3000;
+    configModule.settings.googleTts.timeoutMs = 2000;
+    const effective = tts.getEffectiveSpeechTiming();
+    assert.equal(effective.liveMs, 1000); assert.equal(effective.setupMs, 550);
+  } finally { Object.assign(configModule.settings.geminiLive, live); Object.assign(configModule.settings.googleTts, google); }
+});
+
 test('shipped defaults and missing-file defaults are identical after normalization', () => {
   const shipped = JSON.parse(fs.readFileSync(new URL('../config/settings.json', import.meta.url), 'utf8'));
   assert.deepEqual(configModule.__test.normalizeSettings({}), configModule.__test.normalizeSettings(shipped));

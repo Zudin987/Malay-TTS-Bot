@@ -11,7 +11,10 @@ import { getGuildSettings, isUserTtsOptedOut } from './store.js';
 import { cleanupTempDirectory, getOrAssignTtsVoice } from './tts.js';
 import { sendVoiceStateLog } from './voice-log.js';
 import { fatalLogSync, flushLogs } from './logger.js';
-import { connectToVoiceChannel, disconnectAllGuilds, evaluateAutoLeave, getRuntimeVoiceChannelId } from './voice.js';
+import { connectToVoiceChannel, disconnectAllGuilds, disconnectGuild, evaluateAutoLeave, getRuntimeVoiceChannelId } from './voice.js';
+import { clearTtsMetrics } from './tts-metrics.js';
+import { invalidateGuildDictionaryCache } from './dictionary.js';
+import { terminateAllChildren } from './child-processes.js';
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
 client.commands = new Collection(commands.map((command) => [command.data.name, command]));
@@ -133,6 +136,7 @@ client.on(Events.VoiceStateUpdate, (oldState, newState) => {
   void sendVoiceStateLog(client, oldState, newState).catch((error) => console.warn('[voice-log]', error));
 });
 client.on(Events.Error, (error) => console.error('[discord-client]', error));
+client.on(Events.GuildDelete, (guild) => { disconnectGuild(guild.id); clearTtsMetrics(guild.id); invalidateGuildDictionaryCache(guild.id); });
 
 function fatalExit(kind, error) {
   if (fatalExiting) return;
@@ -149,15 +153,18 @@ export async function gracefulShutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[shutdown] ${signal}; cleaning up.`);
+  const deadline = setTimeout(() => process.exit(1), 5000);
   try {
     disconnectAllGuilds();
     client.destroy();
+    await terminateAllChildren();
     await cleanupTempDirectory();
     await flushLogs();
   } catch (error) {
     console.error('[shutdown]', error);
     await flushLogs().catch(() => {});
   } finally {
+    clearTimeout(deadline);
     process.exit(0);
   }
 }

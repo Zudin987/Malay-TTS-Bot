@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { spawnManagedProcess, terminateChild } from './child-processes.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { dataDir, settings } from './config.js';
@@ -66,9 +67,9 @@ export function decodeAudioToSpeakerPcm(audioBuffer, { spawnImpl = spawn, timeou
   if (signal?.aborted) return Promise.reject(cancellationError(signal.reason));
   const boundedTimeoutMs = Math.max(500, Math.min(finiteNumber(timeoutMs, 5000), 30_000));
   return new Promise((resolve, reject) => {
-    const ffmpeg = spawnImpl(getFfmpegPath(), [
+    const ffmpeg = spawnManagedProcess(getFfmpegPath(), [
       '-hide_banner', '-loglevel', 'error', '-nostdin', '-f', 'mp3', '-i', 'pipe:0', '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '24000', '-f', 's16le', 'pipe:1'
-    ], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    ], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }, spawnImpl);
     const chunks = [];
     let bytes = 0;
     const maxBytes = Math.ceil(getSpeakerLabelOptions().maxPcmDurationMs * PCM_BYTES_PER_MS);
@@ -81,13 +82,14 @@ export function decodeAudioToSpeakerPcm(audioBuffer, { spawnImpl = spawn, timeou
       settled = true;
       if (timer) clearTimeout(timer);
       if (signal && abortListener) signal.removeEventListener?.('abort', abortListener);
-      callback(value);
+      if (callback === reject) void terminateChild(ffmpeg).then(() => callback(value));
+      else callback(value);
     };
     ffmpeg.stdout.on('data', (chunk) => {
       if (settled) return;
       bytes += chunk.length;
       if (bytes > maxBytes) {
-        try { ffmpeg.kill?.(); } catch {}
+        void terminateChild(ffmpeg);
         finish(reject, new Error('Speaker-label decoder exceeded its PCM limit.'));
         return;
       }
@@ -105,12 +107,12 @@ export function decodeAudioToSpeakerPcm(audioBuffer, { spawnImpl = spawn, timeou
     });
     ffmpeg.stdin.on('error', (error) => { if (error?.code !== 'EPIPE') finish(reject, error); });
     abortListener = () => {
-      try { ffmpeg.kill?.(); } catch {}
+      void terminateChild(ffmpeg);
       finish(reject, cancellationError(signal?.reason));
     };
     if (signal) signal.addEventListener?.('abort', abortListener, { once: true });
     timer = setTimeout(() => {
-      try { ffmpeg.kill?.(); } catch {}
+      void terminateChild(ffmpeg);
       finish(reject, new Error(`Speaker-label FFmpeg decode timed out after ${boundedTimeoutMs}ms.`));
     }, boundedTimeoutMs);
     timer.unref?.();

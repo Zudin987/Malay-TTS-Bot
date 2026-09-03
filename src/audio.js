@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawnManagedProcess, terminateChild } from './child-processes.js';
 import { performance } from 'node:perf_hooks';
 import { PassThrough } from 'node:stream';
 import {
@@ -12,7 +12,7 @@ import {
 import { selectPrefetchCandidates } from './prefetch-plan.js';
 import { synthesize } from './tts.js';
 import { settings } from './config.js';
-import { recordTtsMetrics } from './tts-metrics.js';
+import { recordTtsMetrics, recordTtsOutcome } from './tts-metrics.js';
 import { buildAudioFilters } from './audio-filters.js';
 import { shouldRecoverTranscriptTail } from './recovery-evidence.js';
 import {
@@ -118,7 +118,6 @@ function createQueueItem(text, metadata = {}) {
     replayMimeType: metadata.replayMimeType ? String(metadata.replayMimeType) : null,
     replaySampleRate: Number(metadata.replaySampleRate) || 24_000,
     replayChannels: Number(metadata.replayChannels) || 1,
-    resumeFraction: Math.max(0, Math.min(Number(metadata.resumeFraction) || 0, 0.98)),
     recoveryScheduled: false,
     recoveryEpoch: Math.max(0, Number(metadata.recoveryEpoch) || 0),
     runSerial: Math.max(0, Number(metadata.runSerial) || 0),
@@ -285,6 +284,7 @@ function finishLogicalJob(item, outcome = 'finished') {
   const job = item?.logicalJob;
   if (!job || job.terminal || item.recoveryScheduled) return;
   job.terminal = true;
+  recordTtsOutcome(job.guildId, outcome);
   const callback = job.onTerminal;
   job.onTerminal = null;
   try { Promise.resolve(callback?.(outcome)).catch(() => {}); } catch {}
@@ -479,14 +479,6 @@ function getGeneratedAudioDurationMs(generated) {
   return 0;
 }
 
-function getRecoveryResumeStartMs(item, generated) {
-  const fraction = Math.max(0, Math.min(Number(item?.resumeFraction) || 0, 0.98));
-  const durationMs = getGeneratedAudioDurationMs(generated);
-  if (fraction <= 0 || durationMs <= 0) return 0;
-  const overlapMs = clampNumber(settings.audioPipeline?.playbackResumeOverlapMs, 120, 0, 400);
-  return Math.max(0, durationMs * fraction - overlapMs);
-}
-
 function buildTranscriptTextTail(item, transcript) {
   const source = String(item?.text || '').trim();
   const outputWords = normalizeTranscriptWords(transcript);
@@ -501,13 +493,12 @@ function buildTranscriptTextTail(item, transcript) {
   return tail || null;
 }
 
-function scheduleRecovery(guildId, state, item, error, { replay = null, fullRetry = false, replacementText = null, resumeFraction = 0 } = {}) {
+function scheduleRecovery(guildId, state, item, error, { replay = null, fullRetry = false, replacementText = null } = {}) {
   const maximum = getStreamCutoffRecoveryAttempts();
   const recoveryText = String(replacementText || item.text || '').trim();
-  const safeResumeFraction = Math.max(0, Math.min(Number(resumeFraction) || 0, 0.98));
   if (item.cancelled || item.logicalJob?.cancelled || item.logicalJob?.terminal || state.disposed || item.recoveryScheduled || item.recoveryAttempt >= maximum || !recoveryText) return false;
-  if (!fullRetry && !Buffer.isBuffer(replay?.audioBuffer) && !replacementText && safeResumeFraction <= 0) return false;
-  const regeneratedTail = Boolean(replacementText || safeResumeFraction > 0);
+  if (!fullRetry && !Buffer.isBuffer(replay?.audioBuffer) && !replacementText) return false;
+  const regeneratedTail = Boolean(replacementText);
   const recovery = createQueueItem(recoveryText, {
     messageCreatedAt: item.messageCreatedAt, preprocessMs: item.preprocessMs, userId: item.userId,
     messageId: item.messageId, replyMessageId: item.replyMessageId, logicalJob: item.logicalJob, voiceChannelId: item.voiceChannelId,
@@ -520,13 +511,13 @@ function scheduleRecovery(guildId, state, item, error, { replay = null, fullRetr
     skipLive: regeneratedTail ? true : fullRetry ? Boolean(item.skipLive || String(error?.provider || '').includes('live')) : true,
     replayAudioBuffer: replay?.audioBuffer || null, replayAudioFormat: replay?.audioFormat || null,
     replayMimeType: replay?.mimeType || null, replaySampleRate: replay?.sampleRate || 24_000,
-    replayChannels: replay?.channels || 1, resumeFraction: safeResumeFraction
+    replayChannels: replay?.channels || 1
   });
   item.recoveryScheduled = true;
   state.queue.unshift(recovery);
   state.cutoffRecoveries = (Number(state.cutoffRecoveries) || 0) + 1;
   if (replay?.audioBuffer) state.mirrorReplays = (Number(state.mirrorReplays) || 0) + 1;
-  const kind = replay?.audioBuffer ? 'PCM tail' : replacementText ? 'text tail' : safeResumeFraction > 0 ? 'regenerated tail' : 'full pre-audible';
+  const kind = replay?.audioBuffer ? 'PCM tail' : replacementText ? 'text tail' : 'full pre-audible';
   console.warn(`[queue:${guildId}] Scheduling conservative ${kind} recovery (${error?.message || 'playback failure'}).`);
   if (!state.running && state.voiceReady && !state.disposed) queueMicrotask(() => { if (canRunQueue(state)) void runQueue(guildId, state); });
   return true;
@@ -758,7 +749,7 @@ async function waitForPlayback(state, item, resource, timeoutMs, failures = []) 
 }
 
 function spawnFfmpeg(args) {
-  return spawn(getFfmpegPath(), args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  return spawnManagedProcess(getFfmpegPath(), args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
 }
 
 async function playSpeakerLabel(guildId, state, item) {
@@ -810,7 +801,7 @@ async function playSpeakerLabel(guildId, state, item) {
     return { waitMs, playedMs: played };
   } finally {
     state.player.removeListener('error', onError);
-    if (!ffmpeg.killed) ffmpeg.kill();
+    await terminateChild(ffmpeg);
     if (state.ffmpeg === ffmpeg) state.ffmpeg = null;
   }
 }
@@ -869,10 +860,6 @@ function createMessagePipeline(guildId, state, item, generated, playbackSpeed) {
 
   const volume = clampNumber(settings.fixedVolume, 0.6, 0, 2);
   const filters = buildAudioFilters({ volume, playbackSpeed, audioPipeline: settings.audioPipeline });
-  const recoveryResumeStartMs = getRecoveryResumeStartMs(item, generated);
-  if (recoveryResumeStartMs > 0) {
-    filters.unshift(`atrim=start=${(recoveryResumeStartMs / 1000).toFixed(3)}`, 'asetpts=PTS-STARTPTS');
-  }
   const ffmpegStartedAt = performance.now();
   let firstEncodedAt = 0;
   const ffmpeg = spawnFfmpeg([
@@ -890,7 +877,7 @@ function createMessagePipeline(guildId, state, item, generated, playbackSpeed) {
     const source = generated?.audioStream;
     try { source?.unpipe?.(ffmpeg.stdin); } catch {}
     try { if (!ffmpeg.stdin.destroyed) ffmpeg.stdin.destroy(); } catch {}
-    try { if (!ffmpeg.killed) ffmpeg.kill(); } catch {}
+    void terminateChild(ffmpeg);
   };
   const fail = (error) => {
     if (!monitoring || item.cancelled || state.disposed) return;
@@ -902,7 +889,12 @@ function createMessagePipeline(guildId, state, item, generated, playbackSpeed) {
   ffmpeg.on('error', fail);
   ffmpeg.on('close', (code, signal) => { if (code !== 0 && code !== null && !item.cancelled && !state.disposed) fail(new Error(`FFmpeg exited with code ${code}${signal ? ` (${signal})` : ''}.`)); });
   ffmpeg.stderr.setEncoding('utf8');
-  ffmpeg.stderr.on('data', (chunk) => { const output = chunk.trim(); if (output) console.error(`[ffmpeg:${guildId}] ${output}`); });
+  let diagnosticBytes = 0;
+  ffmpeg.stderr.on('data', (chunk) => {
+    const output = String(chunk).slice(0, Math.max(0, 4096 - diagnosticBytes)).trim();
+    diagnosticBytes += output.length;
+    if (output) console.error(`[ffmpeg:${guildId}] ${output}`);
+  });
   ffmpeg.stdin.on('error', (error) => { if (error?.code !== 'EPIPE' && !item.cancelled && !state.disposed) fail(error); });
   unwireProvider = wireProviderToInput(generated, ffmpeg.stdin, fail);
   const resource = createAudioResource(ffmpeg.stdout, { inputType: StreamType.OggOpus, metadata: { text: item.text } });
@@ -965,6 +957,7 @@ export function enqueue(guildId, text, metadata = {}) {
   const state = getState(guildId);
   const maximum = getMaximumQueuedMessages();
   const incoming = createQueueItem(text, metadata);
+  incoming.logicalJob.guildId = guildId;
   incoming.recoveryEpoch = Number(state.recoveryEpoch) || 0;
   // During a cold voice handshake the first queued channel owns the pending
   // startup. Reject cross-channel arrivals before provider work begins so the
@@ -1045,16 +1038,6 @@ async function runQueue(guildId, state, makePipeline = createMessagePipeline) {
         await cleanupGenerated(generated, { cancel: true });
         item.generation = null; item.skipLive = true;
         generated = await waitForGenerationOrCancellation(item, startGeneration(guildId, item));
-      }
-    }
-
-    if (item.resumeFraction > 0) {
-      const durationMs = getGeneratedAudioDurationMs(generated);
-      const resumeStartMs = getRecoveryResumeStartMs(item, generated);
-      if (durationMs <= 0 || durationMs - resumeStartMs < 300) {
-        state.suppressedCutoffReplays += 1;
-        console.warn(`[queue:${guildId}] Regenerated recovery contained no meaningful unheard tail; replay suppressed.`);
-        return;
       }
     }
 
@@ -1145,7 +1128,7 @@ async function runQueue(guildId, state, makePipeline = createMessagePipeline) {
   } finally {
     if (playerErrorListener) state.player.removeListener('error', playerErrorListener);
     pipeline?.stopMonitoring?.();
-    if (state.ffmpeg && !state.ffmpeg.killed) state.ffmpeg.kill();
+    await terminateChild(state.ffmpeg);
     state.ffmpeg = null;
     await cleanupGenerated(generated, { cancel: item.cancelled });
     if (!item.completionPending && !item.recoveryScheduled) finishLogicalJob(item, outcome);
@@ -1183,7 +1166,7 @@ function cancelCurrentItem(state, outcome = 'stopped') {
   if (!current) return false;
   cleanupCancelledQueuedItem(current, outcome);
   try { state.player?.stop?.(true); } catch {}
-  if (state.ffmpeg && !state.ffmpeg.killed) state.ffmpeg.kill();
+  void terminateChild(state.ffmpeg);
   return true;
 }
 
@@ -1285,7 +1268,7 @@ export function clearAudio(guildId) {
   for (const item of state.queue) cleanupCancelledQueuedItem(item);
   state.queue.length = 0;
   state.player.stop(true);
-  if (state.ffmpeg && !state.ffmpeg.killed) state.ffmpeg.kill();
+  void terminateChild(state.ffmpeg);
 }
 
 export function releaseAudio(guildId) {
@@ -1311,7 +1294,7 @@ function estimateBacklogMs(state) {
 export function getAudioStatus(guildId) {
   const state = states.get(guildId);
   const empty = {
-    queued: 0, playing: false, phase: 'idle', voiceReady: false, pausedForVoice: false, maximumQueued: getMaximumQueuedMessages(), estimatedBacklogMs: 0,
+    queued: 0, active: false, playing: false, phase: 'idle', voiceReady: false, pausedForVoice: false, maximumQueued: getMaximumQueuedMessages(), estimatedBacklogMs: 0,
     oldestWaitingMs: 0, prefetched: 0, prefetchTarget: 1, catchUpSpeed: 1, queueMode: 'normal',
     droppedMessages: 0, staleSkippedMessages: 0, streamingPrefetches: 0,
     cutoffRecoveries: 0, cutoffRecoverySuccesses: 0, cutoffRecoveryFailures: 0,
@@ -1324,6 +1307,7 @@ export function getAudioStatus(guildId) {
   const oldest = state.queue.length ? Math.max(0, Date.now() - Math.min(...state.queue.map((item) => item.messageCreatedAt))) : 0;
   return {
     ...empty,
+    active: Boolean(state.currentItem || state.running || state.pendingCompletions?.size),
     queued: state.queue.length, playing: Boolean(state.currentItem && !state.currentItem.cancelled && state.player.state.status === AudioPlayerStatus.Playing),
     phase: state.currentItem?.cancelled ? 'cancelling' : state.voicePaused ? 'paused' : state.running ? state.player.state.status === AudioPlayerStatus.Idle ? 'generating' : state.player.state.status : 'idle', voiceReady: state.voiceReady, pausedForVoice: state.voicePaused,
     estimatedBacklogMs: estimateBacklogMs(state), oldestWaitingMs: oldest, prefetched,
@@ -1338,4 +1322,4 @@ export function getAudioStatus(guildId) {
   };
 }
 
-export const __test = { getState, runQueue, waitForPlaying, waitForIdleWithActiveTimeout, cleanupCancelledQueuedItem, mp3DurationMs, decideSpeakerLabel, buildPcmTail, buildTranscriptTextTail, handleCompletionRecovery, getGeneratedAudioDurationMs, getRecoveryResumeStartMs, createQueueItem, cancelQueuedItemsForUser, cancelQueuedAskItemsForUser, cancelCurrentAskIfSuperseded, cancelCurrentItemForUser, cancelSupersededAskItemsForUser: (state, userId, newerSequence) => ({ cancelledQueued: cancelQueuedAskItemsForUser(state, userId, newerSequence), cancelledCurrent: cancelCurrentAskIfSuperseded(state, userId, newerSequence) }), dropForQueueOverflow, waitForGenerationOrCancellation, createPrefetchSpool, wireProviderToInput, scheduleRecovery, scheduleCompletionGraceCancel, canRunQueue, takeNextItem, abandonUnclaimedGeneration, hasPrefetchBarrier };
+export const __test = { getState, runQueue, waitForPlaying, waitForIdleWithActiveTimeout, cleanupCancelledQueuedItem, mp3DurationMs, decideSpeakerLabel, buildPcmTail, buildTranscriptTextTail, handleCompletionRecovery, getGeneratedAudioDurationMs, createQueueItem, cancelQueuedItemsForUser, cancelQueuedAskItemsForUser, cancelCurrentAskIfSuperseded, cancelCurrentItemForUser, cancelSupersededAskItemsForUser: (state, userId, newerSequence) => ({ cancelledQueued: cancelQueuedAskItemsForUser(state, userId, newerSequence), cancelledCurrent: cancelCurrentAskIfSuperseded(state, userId, newerSequence) }), dropForQueueOverflow, waitForGenerationOrCancellation, createPrefetchSpool, wireProviderToInput, scheduleRecovery, scheduleCompletionGraceCancel, canRunQueue, takeNextItem, abandonUnclaimedGeneration, hasPrefetchBarrier };

@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { PassThrough } from 'node:stream';
 import { GEMINI_VOICES } from '../voices.js';
 import { neutralizeGeminiAudioTags } from '../gemini-speech-text.js';
+import { raceWithSignal } from '../cancellation.js';
 
 const WS_ENDPOINT = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
 const DEFAULT_MODEL = 'gemini-3.1-flash-live-preview';
@@ -186,6 +187,11 @@ async function startFreshTurn(text, voiceName, options) {
   let maximumObservedAudioGapMs = 0;
   let audioChunkCount = 0;
   let messageQueue = Promise.resolve();
+  let pendingFrames = 0;
+  let pendingFrameBytes = 0;
+  let transcriptCharacters = 0;
+  let lifetimeTimer = null;
+  const lifetime = new AbortController();
   let audioBytes = 0;
   let mimeType = null;
   let usage = null;
@@ -222,8 +228,14 @@ async function startFreshTurn(text, voiceName, options) {
     audioEndTimer.unref?.();
   };
   const closeSocket = (code = 1000, reason = 'single turn complete') => {
+    clearTimeout(lifetimeTimer);
+    lifetime.abort(cancellationError('Live turn ended.'));
     const target = socket;
     socket = null;
+    if (target) {
+      target.onopen = null; target.onmessage = null; target.onclose = null;
+      target.onerror = () => {}; // Late errors must not retain the completed turn.
+    }
     if (target && target.readyState < 2) { try { target.close(code, reason); } catch {} }
   };
   const attachPartial = (error) => {
@@ -313,11 +325,12 @@ async function startFreshTurn(text, voiceName, options) {
   const handleMessage = async (event) => {
     if (settled) return;
     let response;
-    const raw = await messageToString(event?.data);
+    const raw = await raceWithSignal(messageToString(event?.data), lifetime.signal);
     if (settled || options.signal?.aborted) return;
+    if (Buffer.byteLength(raw) > 4 * 1024 * 1024) return fail(new GeminiLiveError('Gemini Live frame exceeded 4 MiB.'));
     try { response = JSON.parse(raw); }
     catch {
-      return fail(new GeminiLiveError(`Gemini Live returned an unreadable WebSocket frame (${String(raw).slice(0, 60)}).`, { setupLike: !setupComplete, transportLike: true }));
+      return fail(new GeminiLiveError('Gemini Live returned an unreadable WebSocket frame.', { setupLike: !setupComplete, transportLike: true }));
     }
     const apiError = serverError(response, !setupComplete);
     if (apiError) return fail(apiError);
@@ -329,7 +342,11 @@ async function startFreshTurn(text, voiceName, options) {
     const content = response.serverContent;
     if (content) {
       const transcript = String(content.outputTranscription?.text ?? '').trim();
-      if (transcript) transcriptParts.push(transcript);
+      if (transcript) {
+        transcriptCharacters += transcript.length;
+        if (transcriptCharacters > 16_384) return fail(new GeminiLiveError('Gemini Live transcription exceeded its size limit.'));
+        transcriptParts.push(transcript);
+      }
       if (content.modelTurn?.parts) {
         for (const part of content.modelTurn.parts) {
           if (!part?.inlineData?.data) continue;
@@ -344,12 +361,12 @@ async function startFreshTurn(text, voiceName, options) {
           lastAudioChunkAt = chunkAt;
           audioChunkCount += 1;
           seenAudio = true;
-          audioBytes += audio.length;
-          if (audioBytes > maxAudioBytes) {
+          if (audioBytes + audio.length > maxAudioBytes) {
             const error = new GeminiLiveError(`Gemini Live runaway-audio guard stopped output after ~${Math.round(maxAudioMs)}ms.`);
             error.runawayLike = true;
             return fail(error);
           }
+          audioBytes += audio.length;
           if (!streamOutput || mirrorStreamingPcm) chunks.push(audio);
           if (streamOutput && output && !output.destroyed) output.write(audio);
           if (streamOutput) ready.resolve(generatedStreamingResult());
@@ -380,6 +397,9 @@ async function startFreshTurn(text, voiceName, options) {
 
   try {
     const url = `${WS_ENDPOINT}?key=${encodeURIComponent(apiKey)}`;
+    const lifetimeMs = clamp(options.lifetimeMs, Math.min(65_000, setupTimeoutMs + firstAudioTimeoutMs + configuredMaxOutputMs + streamIdleTimeoutMs), 25, 65_000);
+    lifetimeTimer = setTimeout(() => fail(new GeminiLiveError('Gemini Live turn exceeded its total lifetime.', { transportLike: true })), lifetimeMs);
+    lifetimeTimer.unref?.();
     try { socket = factory(url); }
     catch (error) {
       throw new GeminiLiveError(`Failed to create Gemini Live WebSocket: ${error.message}`, { setupLike: true, transportLike: true });
@@ -405,7 +425,16 @@ async function startFreshTurn(text, voiceName, options) {
       }
     };
     socket.onmessage = (event) => {
-      messageQueue = messageQueue.then(() => handleMessage(event)).catch((error) => fail(error instanceof GeminiLiveError ? error : new GeminiLiveError(`Failed to decode Gemini Live message: ${error.message}`, { setupLike: !setupComplete, transportLike: true })));
+      if (settled) return;
+      const data = event?.data;
+      const size = typeof data === 'string' ? Buffer.byteLength(data) : Number(data?.byteLength ?? data?.size) || 4 * 1024 * 1024;
+      if (size > 4 * 1024 * 1024 || pendingFrames >= 64 || pendingFrameBytes + size > 8 * 1024 * 1024) {
+        return fail(new GeminiLiveError('Gemini Live pending frames exceeded their resource limit.', { transportLike: true }));
+      }
+      pendingFrames += 1; pendingFrameBytes += size;
+      messageQueue = messageQueue.then(() => handleMessage(event))
+        .catch((error) => fail(error instanceof GeminiLiveError ? error : new GeminiLiveError(`Failed to decode Gemini Live message: ${error.message}`, { setupLike: !setupComplete, transportLike: true })))
+        .finally(() => { pendingFrames -= 1; pendingFrameBytes -= size; });
     };
     socket.onerror = () => fail(new GeminiLiveError('Gemini Live WebSocket connection error.', { setupLike: !setupComplete, transportLike: true }));
     socket.onclose = (event) => {

@@ -3,6 +3,17 @@ import assert from 'node:assert/strict';
 
 const { getTtsRestartBlockers, describeTtsRestartBlockers } = await import('../src/restart-guard.js');
 
+test('restart guard distinguishes audible playback from generation and metadata ownership', () => {
+  const blockers = getTtsRestartBlockers({ guildIds: ['google-guild'], getAudioStatus: () => ({ active: true, playing: false, queued: 0 }) });
+  assert.equal(blockers.safe, false);
+  assert.equal(blockers.busyGuilds[0].playing, false);
+});
+
+test('restart guard includes text generation and speaker-label work', () => {
+  assert.equal(getTtsRestartBlockers({ getAskStatus: () => ({ active: 1 }) }).safe, false);
+  assert.equal(getTtsRestartBlockers({ getLabelStatus: () => ({ inflight: 1 }) }).safe, false);
+});
+
 test('restart guard permits a globally idle runtime', () => {
   const blockers = getTtsRestartBlockers({
     guildIds: ['1', '2'],

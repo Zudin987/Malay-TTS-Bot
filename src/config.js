@@ -179,6 +179,9 @@ function normalizeSettings(parsed) {
   const adaptive = isObject(parsed.adaptiveQueue) ? parsed.adaptiveQueue : {};
   const live = isObject(parsed.geminiLive) ? parsed.geminiLive : {};
   const google = isObject(parsed.googleTts) ? parsed.googleTts : {};
+  if (live.primaryModel != null && String(live.primaryModel).trim() !== defaults.geminiLive.primaryModel) {
+    throw new TypeError(`Only ${defaults.geminiLive.primaryModel} is supported for Live speech.`);
+  }
   const rawProfile = isObject(live.profile) ? live.profile : {};
 
   const profile = { ...defaults.geminiLive.profile, ...rawProfile };
@@ -188,7 +191,7 @@ function normalizeSettings(parsed) {
 
 
   const speakerMode = ['cakap', 'username', 'none'].includes(parsed.speakerMode) ? parsed.speakerMode : defaults.speakerMode;
-  return {
+  const normalized = {
     speakerMode,
     speakerResetSeconds: clampInt(parsed.speakerResetSeconds, defaults.speakerResetSeconds, 5, 300),
     speakerLabel: {
@@ -308,9 +311,15 @@ function normalizeSettings(parsed) {
       parallelChunks: clampInt(google.parallelChunks, defaults.googleTts.parallelChunks, 1, 3),
       retryCount: clampInt(google.retryCount, defaults.googleTts.retryCount, 0, 3),
       retryDelayMs: clampInt(google.retryDelayMs, defaults.googleTts.retryDelayMs, 0, 5000),
-      maxAudioBytes: clampInt(google.maxAudioBytes, defaults.googleTts.maxAudioBytes, 256 * 1024, 16 * 1024 * 1024)
+      maxAudioBytes: clampInt(google.maxAudioBytes, defaults.googleTts.maxAudioBytes, 256 * 1024, 8 * 1024 * 1024)
     }
   };
+  for (const family of ['quota', 'error', 'budget']) {
+    const health = normalized.providerHealth;
+    health[`${family}SecondSeconds`] = Math.max(health[`${family}FirstSeconds`], health[`${family}SecondSeconds`]);
+    health[`${family}ThirdSeconds`] = Math.max(health[`${family}SecondSeconds`], health[`${family}ThirdSeconds`]);
+  }
+  return normalized;
 }
 
 export const config = {

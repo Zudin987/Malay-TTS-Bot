@@ -102,11 +102,12 @@ function mergedDictionary(guildId) {
 
   const entries = { ...dictionary, ...overrides };
   const value = { entries, pattern: compilePattern(entries) };
+  if (!mergedDictionaryCache.has(id) && mergedDictionaryCache.size >= 256) mergedDictionaryCache.delete(mergedDictionaryCache.keys().next().value);
   mergedDictionaryCache.set(id, { dictionaryVersion, signature, value });
   return value;
 }
 
-function invalidateGuildDictionaryCache(guildId) {
+export function invalidateGuildDictionaryCache(guildId) {
   if (guildId != null) mergedDictionaryCache.delete(String(guildId));
 }
 

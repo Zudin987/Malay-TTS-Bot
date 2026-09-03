@@ -1,4 +1,5 @@
 const histories = new Map();
+const terminalHistories = new Map();
 const MAX_SAMPLES = 60;
 
 function finite(value) {
@@ -51,6 +52,7 @@ export function recordTtsMetrics(guildId, sample) {
 
   let history = histories.get(guildId);
   if (!history) {
+    if (histories.size >= 256) histories.delete(histories.keys().next().value);
     history = [];
     histories.set(guildId, history);
   }
@@ -95,10 +97,13 @@ function attemptBreakdown(samples) {
 
 export function getTtsMetrics(guildId, slowThresholdMs = 1500) {
   const samples = histories.get(guildId) ?? [];
+  const terminalSamples = terminalHistories.get(guildId) ?? [];
+  const outcomes = Object.fromEntries(['finished', 'stopped', 'unavailable'].map((outcome) => [outcome, terminalSamples.filter((sample) => sample.outcome === outcome).length]));
+  outcomes.sampleSize = terminalSamples.length;
   if (!samples.length) {
     return {
       count: 0, last: null, average: null, percentiles: null, maxima: null,
-      slowCount: 0, sampleSize: 0, providers: {}, attempts: {}
+      slowCount: 0, sampleSize: 0, providers: {}, attempts: {}, outcomes
     };
   }
 
@@ -111,6 +116,7 @@ export function getTtsMetrics(guildId, slowThresholdMs = 1500) {
 
   return {
     count: samples.length,
+    outcomes,
     sampleSize: samples.length,
     last: samples.at(-1),
     average: averageValues,
@@ -132,6 +138,16 @@ export function getTtsMetrics(guildId, slowThresholdMs = 1500) {
 
 export function clearTtsMetrics(guildId) {
   histories.delete(guildId);
+  terminalHistories.delete(guildId);
+}
+
+export function recordTtsOutcome(guildId, outcome) {
+  if (!guildId) return;
+  if (!terminalHistories.has(guildId) && terminalHistories.size >= 256) terminalHistories.delete(terminalHistories.keys().next().value);
+  const samples = terminalHistories.get(guildId) ?? [];
+  samples.push({ at: Date.now(), outcome });
+  if (samples.length > MAX_SAMPLES) samples.shift();
+  terminalHistories.set(guildId, samples);
 }
 
 export const __test = { percentile, providerBreakdown, attemptBreakdown };

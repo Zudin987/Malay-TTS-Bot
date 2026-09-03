@@ -1,4 +1,4 @@
-export function getTtsRestartBlockers({ guildIds = [], getAudioStatus, getProviderStatus } = {}) {
+export function getTtsRestartBlockers({ guildIds = [], getAudioStatus, getProviderStatus, getAskStatus, getLabelStatus } = {}) {
   const uniqueGuildIds = [...new Set((guildIds ?? []).map((value) => String(value ?? '').trim()).filter(Boolean))];
   const busyGuilds = [];
 
@@ -7,7 +7,7 @@ export function getTtsRestartBlockers({ guildIds = [], getAudioStatus, getProvid
       const audio = getAudioStatus(guildId) ?? {};
       const queued = Math.max(0, Number(audio.queued) || 0);
       const playing = Boolean(audio.playing);
-      if (playing || queued > 0) busyGuilds.push({ guildId, playing, queued });
+      if (audio.active || playing || queued > 0) busyGuilds.push({ guildId, playing, queued });
     }
   }
 
@@ -15,12 +15,14 @@ export function getTtsRestartBlockers({ guildIds = [], getAudioStatus, getProvid
   const limiter = provider.geminiLimiter ?? {};
   const providerActive = Math.max(0, Number(limiter.active) || 0);
   const providerQueued = Math.max(0, Number(limiter.queued) || 0);
+  const askActive = Math.max(0, Number(getAskStatus?.()?.active) || 0);
+  const labelActive = Math.max(0, Number(getLabelStatus?.()?.inflight) || 0);
 
   return {
-    safe: busyGuilds.length === 0 && providerActive === 0 && providerQueued === 0,
+    safe: busyGuilds.length === 0 && providerActive === 0 && providerQueued === 0 && askActive === 0 && labelActive === 0,
     busyGuilds,
     providerActive,
-    providerQueued
+    providerQueued, askActive, labelActive
   };
 }
 
@@ -35,5 +37,7 @@ export function describeTtsRestartBlockers(blockers = {}) {
   const active = Math.max(0, Number(blockers.providerActive) || 0);
   const waiting = Math.max(0, Number(blockers.providerQueued) || 0);
   if (active || waiting) parts.push(`Gemini work ${active} active • ${waiting} waiting`);
+  if (blockers.askActive) parts.push(`/ask ${blockers.askActive} active`);
+  if (blockers.labelActive) parts.push(`speaker labels ${blockers.labelActive} active`);
   return parts.join(' • ') || 'runtime busy';
 }
