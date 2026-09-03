@@ -41,7 +41,7 @@ import { getGameDictionarySize } from './game-dictionary.js';
 import { getTtsMetrics } from './tts-metrics.js';
 import { getOrAssignTtsVoice, getTtsProviderStatus, restartTtsRuntime } from './tts.js';
 import { GEMINI_VOICES, GEMINI_VOICE_OPTIONS } from './voices.js';
-import { getSpeakerLabelPcm, getSpeakerLabelStatus } from './speaker-label.js';
+import { getSpeakerLabelStatus } from './speaker-label.js';
 import { getFfmpegPath } from './ffmpeg.js';
 import { askGemini, describeAskError, getAskOptions } from './ask.js';
 import { ASK_ALLOWED_MENTIONS, beginAskTtsRequest, buildAskEmbed, queueAskAnswerTts } from './ask-response.js';
@@ -142,8 +142,8 @@ const ttsOptOutCommand = {
 
   async execute(interaction) {
     const enabled = interaction.options.getBoolean('enabled', true);
-    setUserTtsOptOut(interaction.guildId, interaction.user.id, enabled);
     const cancelled = enabled ? cancelUserAudio(interaction.guildId, interaction.user.id) : null;
+    setUserTtsOptOut(interaction.guildId, interaction.user.id, enabled);
     await interaction.reply({
       content: enabled
         ? `TTS opt-out **enabled**. Your eligible voice-channel messages will not be sent to Gemini or Google TTS.${cancelled && (cancelled.cancelledCurrent || cancelled.cancelledQueued) ? ' Your current/queued TTS items were cancelled.' : ''}`
@@ -233,19 +233,6 @@ const speakerCommand = {
     if (reset !== null) patch.speakerResetSeconds = reset;
     updateGuildSettings(interaction.guildId, patch);
 
-    if (mode !== 'none') {
-      const latest = getGuildSettings(interaction.guildId);
-      const labels = new Set(Object.values(latest.userAliases ?? {}).filter(Boolean));
-      const currentChannelId = getRuntimeVoiceChannelId(interaction.guildId);
-      const voiceChannel = currentChannelId ? interaction.guild.channels.cache.get(currentChannelId) : null;
-      for (const member of voiceChannel?.members?.values?.() ?? []) {
-        if (!member.user?.bot) labels.add(latest.userAliases?.[member.id] || member.displayName || member.user?.username);
-      }
-      for (const value of [...labels].filter(Boolean).slice(0, 20)) {
-        void getSpeakerLabelPcm(mode === 'cakap' ? `${value} cakap` : value);
-      }
-    }
-
     await interaction.reply({
       content: `Speaker mode: **${mode}**${reset !== null ? `; reset: **${reset}s**` : ''}`,
       flags: ephemeral
@@ -323,10 +310,6 @@ const nameCommand = {
     if (subcommand === 'add') {
       const alias = interaction.options.getString('name', true).trim();
       setUserAlias(interaction.guildId, user.id, alias);
-      // Speaker-label generation may be lazy; these calls opportunistically
-      // create handles without forcing privacy-sensitive provider work.
-      void getSpeakerLabelPcm(alias);
-      void getSpeakerLabelPcm(`${alias} cakap`);
       await interaction.reply({
         content: `TTS name for ${user} is now **${alias}**.`,
         flags: ephemeral

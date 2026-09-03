@@ -64,3 +64,59 @@ test('privacy cancellation aborts active speaker-label provider work', async () 
   assert.equal(await pending, null);
   assert.equal(providerAborted, true);
 });
+
+test('privacy opt-out during cache lookup prevents a later Google request', async () => {
+  let finishRead;
+  let remoteCalls = 0;
+  const pending = speaker.__test.getSpeakerLabelPcmNow(`lookup-${Date.now()}`, {
+    readFileImpl: () => new Promise(resolve => { finishRead = resolve; }),
+    synthesizeImpl: async () => { remoteCalls++; return Buffer.alloc(512); },
+    decodeImpl: async () => Buffer.alloc(4800)
+  });
+  assert.ok(speaker.getSpeakerLabelStatus().inflight > 0);
+  speaker.cancelAllSpeakerLabelGeneration(new Error('opt-out during read'));
+  finishRead(null);
+  assert.equal(await pending, null);
+  assert.equal(remoteCalls, 0);
+  assert.equal(speaker.getSpeakerLabelStatus().inflight, 0);
+});
+
+test('cancellation during cache directory creation cannot start remote synthesis', async () => {
+  let mkdirStarted;
+  const started = new Promise(resolve => { mkdirStarted = resolve; });
+  let finishMkdir;
+  let remoteCalls = 0;
+  const label = `mkdir-${Date.now()}`;
+  const pending = speaker.__test.getSpeakerLabelPcmNow(label, {
+    readFileImpl: async () => { throw Object.assign(new Error('absent'), { code: 'ENOENT' }); },
+    mkdirImpl: () => { mkdirStarted(); return new Promise(resolve => { finishMkdir = resolve; }); },
+    synthesizeImpl: async () => { remoteCalls++; return Buffer.alloc(512); }
+  });
+  await started;
+  speaker.cancelAllSpeakerLabelGeneration(new Error('opt-out during mkdir'));
+  finishMkdir();
+  assert.equal(await pending, null);
+  assert.equal(remoteCalls, 0);
+  await assert.rejects(fs.access(path.join(cacheDir, `${speaker.speakerLabelCacheKey(label)}.pcm`)));
+});
+
+test('lazy handles created before privacy cancellation cannot start afterwards', async () => {
+  let remoteCalls = 0;
+  const handle = speaker.getSpeakerLabelPcm(`old-lazy-${Date.now()}`, { synthesizeImpl: async () => { remoteCalls++; } });
+  speaker.cancelAllSpeakerLabelGeneration();
+  assert.equal(await handle, null);
+  assert.equal(remoteCalls, 0);
+});
+
+test('one cancelled label consumer does not abort another active consumer', async () => {
+  const label = `shared-${Date.now()}`;
+  const first = new AbortController();
+  let finishRead;
+  const options = { readFileImpl: () => new Promise(resolve => { finishRead = resolve; }) };
+  const one = speaker.__test.getSpeakerLabelPcmNow(label, { ...options, signal: first.signal });
+  const two = speaker.__test.getSpeakerLabelPcmNow(label, options);
+  first.abort(new Error('one stopped'));
+  assert.equal(await one, null);
+  finishRead(Buffer.alloc(4800));
+  assert.equal((await two).length, 4800);
+});
