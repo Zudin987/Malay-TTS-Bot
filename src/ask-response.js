@@ -15,6 +15,25 @@ export const ASK_ALLOWED_MENTIONS = Object.freeze({
 });
 
 export const ASK_STOP_BUTTON_PREFIX = 'ask-stop:';
+let askRequestSequence = 0;
+const latestAskSequenceByUser = new Map();
+
+function askSequenceKey(guildId, userId) {
+  return `${String(guildId ?? '')}:${String(userId ?? '')}`;
+}
+
+export function beginAskTtsRequest(guildId, userId) {
+  const key = askSequenceKey(guildId, userId);
+  const sequence = ++askRequestSequence;
+  latestAskSequenceByUser.set(key, sequence);
+  return sequence;
+}
+
+export function isLatestAskTtsRequest(guildId, userId, sequence) {
+  const value = Number(sequence);
+  if (!Number.isFinite(value) || value <= 0) return true;
+  return latestAskSequenceByUser.get(askSequenceKey(guildId, userId)) === value;
+}
 
 export function getAskDisplayName(interaction) {
   const value = interaction?.member?.displayName
@@ -103,7 +122,7 @@ export async function handleAskStopButton(interaction, cancelMessageAudio) {
   return true;
 }
 
-export function buildAskTtsItem(interaction, answer, voiceChannel, voice) {
+export function buildAskTtsItem(interaction, answer, voiceChannel, voice, requestSequence = null) {
   const text = String(answer ?? '').trim();
   return {
     text,
@@ -128,15 +147,20 @@ export function buildAskTtsItem(interaction, answer, voiceChannel, voice) {
       forceBuffered: false,
       // Do not synthesize queued /ask answers speculatively. Repeated /ask calls
       // should not occupy Gemini slots for audio that cannot play yet.
-      noPrefetch: true
+      noPrefetch: true,
+      // Once /ask has been accepted into the queue, normal-chat overflow must
+      // not silently discard it after the visible AI answer/STOP button exists.
+      protectFromOverflow: true,
+      askSequence: Math.max(0, Number(requestSequence) || 0)
     }
   };
 }
 
-export async function queueAskAnswerTts(interaction, answer, dependencies) {
+export async function queueAskAnswerTts(interaction, answer, dependencies, { requestSequence = null } = {}) {
   const text = String(answer ?? '').trim();
   if (!text) return 'empty';
   if (!interaction?.guildId || !interaction?.guild || !interaction?.user?.id) return 'invalid-interaction';
+  if (!isLatestAskTtsRequest(interaction.guildId, interaction.user.id, requestSequence)) return 'superseded';
 
   const {
     isOptedOut,
@@ -146,7 +170,8 @@ export async function queueAskAnswerTts(interaction, answer, dependencies) {
     connect,
     enqueue,
     cancel,
-    cancelQueuedAsk
+    cancelQueuedAsk,
+    cancelSupersededAsk
   } = dependencies;
 
   if (isOptedOut(interaction.guildId, interaction.user.id)) return 'opted-out';
@@ -157,11 +182,15 @@ export async function queueAskAnswerTts(interaction, answer, dependencies) {
   const activeChannelId = getRuntimeVoiceChannelId(interaction.guildId);
   if (activeChannelId && String(activeChannelId) !== String(voiceChannel.id)) return 'other-channel';
 
-  // A newer /ask from the same user supersedes only their older queued
-  // /ask speech. Never interrupt the answer that is already speaking, and never
-  // touch normal message TTS. This prevents stale /ask answers building a long
-  // FIFO backlog during rapid follow-up questions.
-  cancelQueuedAsk?.(interaction.guildId, interaction.user.id);
+  // A newer /ask from the same user supersedes older queued speech and
+  // may cancel an older current /ask only while it is still pre-audible. Once
+  // speech has started, preserve it. Sequence ordering prevents a slower older
+  // text-generation request from winning merely because it finished later.
+  if (Number(requestSequence) > 0 && typeof cancelSupersededAsk === 'function') {
+    cancelSupersededAsk(interaction.guildId, interaction.user.id, Number(requestSequence));
+  } else {
+    cancelQueuedAsk?.(interaction.guildId, interaction.user.id);
+  }
 
   const audio = getAudioStatus(interaction.guildId);
   if (audio && Number(audio.queued) >= Number(audio.maximumQueued)) return 'queue-full';
@@ -169,7 +198,7 @@ export async function queueAskAnswerTts(interaction, answer, dependencies) {
   const voice = getVoice(interaction.guildId, interaction.user.id);
   if (isOptedOut(interaction.guildId, interaction.user.id)) return 'opted-out';
 
-  const item = buildAskTtsItem(interaction, text, voiceChannel, voice);
+  const item = buildAskTtsItem(interaction, text, voiceChannel, voice, requestSequence);
   const enqueueStatus = enqueue(interaction.guildId, item.text, item.metadata);
   if (String(enqueueStatus).startsWith('rejected-')) return enqueueStatus;
 
