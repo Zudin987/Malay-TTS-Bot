@@ -13,8 +13,18 @@ const inflight = new Map();
 const memoryCache = new Map();
 let lastPruneAt = 0;
 
-const stats = { memoryHits: 0, diskHits: 0, misses: 0, generated: 0, failures: 0, waitTimeouts: 0, invalidCacheFiles: 0, prunedFiles: 0 };
+const stats = { memoryHits: 0, diskHits: 0, misses: 0, generated: 0, failures: 0, waitTimeouts: 0, invalidCacheFiles: 0, prunedFiles: 0, cancellations: 0 };
 function finiteNumber(value, fallback) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : fallback; }
+
+function cancellationError(reason, fallback = 'Speaker-label generation cancelled.') {
+  const error = reason instanceof Error ? reason : new Error(String(reason || fallback));
+  error.cancelled = true;
+  return error;
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw cancellationError(signal.reason);
+}
 
 export function getSpeakerLabelOptions() {
   const configured = settings.speakerLabel && typeof settings.speakerLabel === 'object' ? settings.speakerLabel : {};
@@ -47,9 +57,9 @@ function speakerLabelSpeakText(value) {
   if (!label) return '';
   return /[.!?…]$/u.test(label) ? label : `${label}.`;
 }
-function googleOptions() {
+function googleOptions(signal = null) {
   const configured = settings.googleTts ?? {};
-  return { timeoutMs: configured.timeoutMs, maximumLength: 120, retryCount: configured.retryCount, retryDelayMs: configured.retryDelayMs, parallelChunks: 1, maxAudioBytes: configured.maxAudioBytes };
+  return { timeoutMs: configured.timeoutMs, maximumLength: 120, retryCount: configured.retryCount, retryDelayMs: configured.retryDelayMs, parallelChunks: 1, maxAudioBytes: configured.maxAudioBytes, signal };
 }
 
 function validPcm(pcm) {
@@ -58,8 +68,9 @@ function validPcm(pcm) {
   return pcm.length <= maxBytes;
 }
 
-export function decodeAudioToSpeakerPcm(audioBuffer, { spawnImpl = spawn, timeoutMs = 5000 } = {}) {
+export function decodeAudioToSpeakerPcm(audioBuffer, { spawnImpl = spawn, timeoutMs = 5000, signal = null } = {}) {
   if (!Buffer.isBuffer(audioBuffer) || audioBuffer.length === 0) return Promise.reject(new Error('Speaker-label decoder received empty audio.'));
+  if (signal?.aborted) return Promise.reject(cancellationError(signal.reason));
   const boundedTimeoutMs = Math.max(500, Math.min(finiteNumber(timeoutMs, 5000), 30_000));
   return new Promise((resolve, reject) => {
     const ffmpeg = spawnImpl(getFfmpegPath(), [
@@ -69,10 +80,12 @@ export function decodeAudioToSpeakerPcm(audioBuffer, { spawnImpl = spawn, timeou
     let stderr = '';
     let settled = false;
     let timer = null;
+    let abortListener = null;
     const finish = (callback, value) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (signal && abortListener) signal.removeEventListener?.('abort', abortListener);
       callback(value);
     };
     ffmpeg.stdout.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
@@ -86,10 +99,17 @@ export function decodeAudioToSpeakerPcm(audioBuffer, { spawnImpl = spawn, timeou
       finish(resolve, pcm);
     });
     ffmpeg.stdin.on('error', (error) => { if (error?.code !== 'EPIPE') finish(reject, error); });
+    abortListener = () => {
+      try { ffmpeg.kill?.(); } catch {}
+      finish(reject, cancellationError(signal?.reason));
+    };
+    if (signal) signal.addEventListener?.('abort', abortListener, { once: true });
     timer = setTimeout(() => {
       try { ffmpeg.kill?.(); } catch {}
       finish(reject, new Error(`Speaker-label FFmpeg decode timed out after ${boundedTimeoutMs}ms.`));
     }, boundedTimeoutMs);
+    timer.unref?.();
+    if (signal?.aborted) { abortListener(); return; }
     ffmpeg.stdin.end(audioBuffer);
   });
 }
@@ -127,26 +147,41 @@ export async function pruneSpeakerLabelCache({ force = false } = {}) {
   return removed;
 }
 
-async function generateAndCache(label, key) {
+async function generateAndCache(label, key, signal, { synthesizeImpl = synthesizeGoogleMalay, decodeImpl = decodeAudioToSpeakerPcm } = {}) {
   const speakText = speakerLabelSpeakText(label);
   if (!speakText) return null;
+  throwIfAborted(signal);
   await fs.mkdir(CACHE_DIR, { recursive: true });
   void pruneSpeakerLabelCache().catch(() => {});
   const target = path.join(CACHE_DIR, `${key}.pcm`);
   const temp = path.join(CACHE_DIR, `.${key}.${process.pid}.${randomUUID()}.tmp`);
-  const mp3 = await synthesizeGoogleMalay(speakText, googleOptions());
-  const pcm = await decodeAudioToSpeakerPcm(mp3);
-  await fs.writeFile(temp, pcm);
-  try { await fs.rename(temp, target); } catch (error) {
+  let installedTarget = false;
+  try {
+    const mp3 = await synthesizeImpl(speakText, googleOptions(signal));
+    throwIfAborted(signal);
+    const pcm = await decodeImpl(mp3, { signal });
+    throwIfAborted(signal);
+    await fs.writeFile(temp, pcm);
+    throwIfAborted(signal);
+    try {
+      await fs.rename(temp, target);
+      installedTarget = true;
+    } catch (error) {
+      await fs.rm(temp, { force: true }).catch(() => {});
+      if (error?.code !== 'EEXIST') throw error;
+    }
+    throwIfAborted(signal);
+    stats.generated += 1;
+    remember(key, pcm);
+    return pcm;
+  } catch (error) {
     await fs.rm(temp, { force: true }).catch(() => {});
-    if (error?.code !== 'EEXIST') throw error;
+    if (installedTarget && signal?.aborted) await fs.rm(target, { force: true }).catch(() => {});
+    throw error;
   }
-  stats.generated += 1;
-  remember(key, pcm);
-  return pcm;
 }
 
-export async function getSpeakerLabelPcm(value) {
+async function getSpeakerLabelPcmNow(value, options = {}) {
   const { enabled } = getSpeakerLabelOptions();
   const label = normalizeSpeakerLabelText(value);
   if (!enabled || !label) return null;
@@ -162,11 +197,54 @@ export async function getSpeakerLabelPcm(value) {
   } catch (error) {
     if (error?.code !== 'ENOENT') console.warn(`[speaker-label] Cache read failed: ${error.message}`);
   }
-  if (inflight.has(key)) return inflight.get(key);
+  const existing = inflight.get(key);
+  if (existing) return existing.promise;
   stats.misses += 1;
-  const promise = generateAndCache(label, key).catch((error) => { stats.failures += 1; console.warn(`[speaker-label] Could not generate "${label}": ${error.message}`); return null; }).finally(() => inflight.delete(key));
-  inflight.set(key, promise);
-  return promise;
+  const controller = new AbortController();
+  const entry = { controller, promise: null };
+  entry.promise = generateAndCache(label, key, controller.signal, options)
+    .catch((error) => {
+      if (error?.cancelled || controller.signal.aborted) {
+        stats.cancellations += 1;
+        return null;
+      }
+      stats.failures += 1;
+      console.warn(`[speaker-label] Could not generate "${label}": ${error.message}`);
+      return null;
+    })
+    .finally(() => { if (inflight.get(key) === entry) inflight.delete(key); });
+  inflight.set(key, entry);
+  return entry.promise;
+}
+
+function lazySpeakerLabel(value, options) {
+  let started = null;
+  const start = () => {
+    started ||= getSpeakerLabelPcmNow(value, options);
+    return started;
+  };
+  return {
+    then(onFulfilled, onRejected) { return start().then(onFulfilled, onRejected); },
+    catch(onRejected) { return start().catch(onRejected); },
+    finally(onFinally) { return start().finally(onFinally); }
+  };
+}
+
+// Intentionally lazy: queue prefetch and /speaker warm-up calls may obtain a
+// handle, but no Google request begins until playback actually awaits the label.
+export function getSpeakerLabelPcm(value, options = {}) {
+  return lazySpeakerLabel(value, options);
+}
+
+export function cancelAllSpeakerLabelGeneration(reason = new Error('Speaker-label generation cancelled by privacy/runtime change.')) {
+  let cancelled = 0;
+  for (const entry of inflight.values()) {
+    if (entry?.controller && !entry.controller.signal.aborted) {
+      cancelled += 1;
+      entry.controller.abort(cancellationError(reason));
+    }
+  }
+  return cancelled;
 }
 
 export async function waitForSpeakerLabelPcm(promise) {
@@ -194,4 +272,4 @@ export function getSpeakerLabelStatus() {
   return { ...getSpeakerLabelOptions(), provider: 'Google Malay', cache: 'disk + tiny memory LRU', memoryEntries: memoryCache.size, inflight: inflight.size, ...stats };
 }
 
-export const __test = { validPcm };
+export const __test = { validPcm, getSpeakerLabelPcmNow };
