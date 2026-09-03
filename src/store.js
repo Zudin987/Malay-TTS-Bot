@@ -235,11 +235,11 @@ export function isUserTtsOptedOut(guildId, userId) {
 export function setUserTtsOptOut(guildId, userId, enabled) {
   const current = getGuildSettings(guildId);
   current.ttsOptOutUserIds = updateOptOutIds(current.ttsOptOutUserIds, userId, enabled);
-  save();
   // Speaker-label generation is an independent Google request. Abort any
   // currently active label work as soon as privacy opt-out becomes effective;
   // queued/current message audio is cancelled separately by audio.js.
   if (enabled) cancelAllSpeakerLabelGeneration(new Error('TTS privacy opt-out enabled.'));
+  save();
   return enabled;
 }
 

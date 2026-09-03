@@ -5,6 +5,7 @@ import path from 'node:path';
 import { dataDir, settings } from './config.js';
 import { synthesizeGoogleMalay } from './providers/google.js';
 import { getFfmpegPath } from './ffmpeg.js';
+import { cancellationError, deadlineSignal, raceWithSignal, throwIfAborted } from './cancellation.js';
 
 const CACHE_VERSION = 'v2-ms-24k-mono-s16le';
 const CACHE_DIR = path.join(dataDir, 'speaker-label-cache');
@@ -12,19 +13,11 @@ const PCM_BYTES_PER_MS = (24_000 * 1 * 2) / 1000;
 const inflight = new Map();
 const memoryCache = new Map();
 let lastPruneAt = 0;
+let privacyEpoch = 0;
+const MAX_LABEL_JOBS = 4;
 
 const stats = { memoryHits: 0, diskHits: 0, misses: 0, generated: 0, failures: 0, waitTimeouts: 0, invalidCacheFiles: 0, prunedFiles: 0, cancellations: 0 };
 function finiteNumber(value, fallback) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : fallback; }
-
-function cancellationError(reason, fallback = 'Speaker-label generation cancelled.') {
-  const error = reason instanceof Error ? reason : new Error(String(reason || fallback));
-  error.cancelled = true;
-  return error;
-}
-
-function throwIfAborted(signal) {
-  if (signal?.aborted) throw cancellationError(signal.reason);
-}
 
 export function getSpeakerLabelOptions() {
   const configured = settings.speakerLabel && typeof settings.speakerLabel === 'object' ? settings.speakerLabel : {};
@@ -59,7 +52,7 @@ function speakerLabelSpeakText(value) {
 }
 function googleOptions(signal = null) {
   const configured = settings.googleTts ?? {};
-  return { timeoutMs: configured.timeoutMs, maximumLength: 120, retryCount: configured.retryCount, retryDelayMs: configured.retryDelayMs, parallelChunks: 1, maxAudioBytes: configured.maxAudioBytes, signal };
+  return { timeoutMs: configured.timeoutMs, maximumLength: 120, retryCount: configured.retryCount, retryDelayMs: configured.retryDelayMs, parallelChunks: 1, maxAudioBytes: Math.min(Number(configured.maxAudioBytes) || 512 * 1024, 512 * 1024), signal };
 }
 
 function validPcm(pcm) {
@@ -77,6 +70,8 @@ export function decodeAudioToSpeakerPcm(audioBuffer, { spawnImpl = spawn, timeou
       '-hide_banner', '-loglevel', 'error', '-nostdin', '-f', 'mp3', '-i', 'pipe:0', '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '24000', '-f', 's16le', 'pipe:1'
     ], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     const chunks = [];
+    let bytes = 0;
+    const maxBytes = Math.ceil(getSpeakerLabelOptions().maxPcmDurationMs * PCM_BYTES_PER_MS);
     let stderr = '';
     let settled = false;
     let timer = null;
@@ -88,11 +83,21 @@ export function decodeAudioToSpeakerPcm(audioBuffer, { spawnImpl = spawn, timeou
       if (signal && abortListener) signal.removeEventListener?.('abort', abortListener);
       callback(value);
     };
-    ffmpeg.stdout.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+    ffmpeg.stdout.on('data', (chunk) => {
+      if (settled) return;
+      bytes += chunk.length;
+      if (bytes > maxBytes) {
+        try { ffmpeg.kill?.(); } catch {}
+        finish(reject, new Error('Speaker-label decoder exceeded its PCM limit.'));
+        return;
+      }
+      chunks.push(Buffer.from(chunk));
+    });
     ffmpeg.stderr.setEncoding('utf8');
-    ffmpeg.stderr.on('data', (chunk) => { stderr += chunk; });
+    ffmpeg.stderr.on('data', (chunk) => { if (!settled) stderr = (stderr + chunk).slice(-4096); });
     ffmpeg.on('error', (error) => finish(reject, error));
     ffmpeg.on('close', (code) => {
+      if (settled) return;
       if (code !== 0) return finish(reject, new Error(`Speaker-label FFmpeg decode failed (${code})${stderr.trim() ? `: ${stderr.trim()}` : ''}`));
       const pcm = Buffer.concat(chunks);
       if (!validPcm(pcm)) return finish(reject, new Error(`Speaker-label FFmpeg decode produced invalid/oversized PCM (${pcm.length} bytes).`));
@@ -147,19 +152,20 @@ export async function pruneSpeakerLabelCache({ force = false } = {}) {
   return removed;
 }
 
-async function generateAndCache(label, key, signal, { synthesizeImpl = synthesizeGoogleMalay, decodeImpl = decodeAudioToSpeakerPcm } = {}) {
+async function generateAndCache(label, key, signal, { synthesizeImpl = synthesizeGoogleMalay, decodeImpl = decodeAudioToSpeakerPcm, mkdirImpl = fs.mkdir } = {}) {
   const speakText = speakerLabelSpeakText(label);
   if (!speakText) return null;
   throwIfAborted(signal);
-  await fs.mkdir(CACHE_DIR, { recursive: true });
+  await raceWithSignal(mkdirImpl(CACHE_DIR, { recursive: true }), signal);
+  throwIfAborted(signal);
   void pruneSpeakerLabelCache().catch(() => {});
   const target = path.join(CACHE_DIR, `${key}.pcm`);
   const temp = path.join(CACHE_DIR, `.${key}.${process.pid}.${randomUUID()}.tmp`);
   let installedTarget = false;
   try {
-    const mp3 = await synthesizeImpl(speakText, googleOptions(signal));
+    const mp3 = await raceWithSignal(synthesizeImpl(speakText, googleOptions(signal)), signal);
     throwIfAborted(signal);
-    const pcm = await decodeImpl(mp3, { signal });
+    const pcm = await raceWithSignal(decodeImpl(mp3, { signal }), signal);
     throwIfAborted(signal);
     await fs.writeFile(temp, pcm);
     throwIfAborted(signal);
@@ -184,43 +190,61 @@ async function generateAndCache(label, key, signal, { synthesizeImpl = synthesiz
 async function getSpeakerLabelPcmNow(value, options = {}) {
   const { enabled } = getSpeakerLabelOptions();
   const label = normalizeSpeakerLabelText(value);
-  if (!enabled || !label) return null;
+  if (!enabled || !label || options.signal?.aborted) return null;
   const key = speakerLabelCacheKey(label);
   const memory = memoryCache.get(key);
   if (memory && validPcm(memory)) { stats.memoryHits += 1; remember(key, memory); return memory; }
-  const target = path.join(CACHE_DIR, `${key}.pcm`);
-  try {
-    const pcm = await fs.readFile(target);
-    if (validPcm(pcm)) { stats.diskHits += 1; remember(key, pcm); return pcm; }
-    stats.invalidCacheFiles += 1;
-    await fs.rm(target, { force: true }).catch(() => {});
-  } catch (error) {
-    if (error?.code !== 'ENOENT') console.warn(`[speaker-label] Cache read failed: ${error.message}`);
-  }
-  const existing = inflight.get(key);
-  if (existing) return existing.promise;
-  stats.misses += 1;
-  const controller = new AbortController();
-  const entry = { controller, promise: null };
-  entry.promise = generateAndCache(label, key, controller.signal, options)
-    .catch((error) => {
-      if (error?.cancelled || controller.signal.aborted) {
-        stats.cancellations += 1;
-        return null;
+  let entry = inflight.get(key);
+  if (entry?.deadline.signal.aborted) { inflight.delete(key); entry = null; }
+  if (!entry) {
+    if (inflight.size >= MAX_LABEL_JOBS) return null;
+    const deadline = deadlineSignal(null, 12_000, new Error('Speaker-label job deadline exceeded.'));
+    entry = { controller: { signal: deadline.signal, abort: deadline.cancel }, deadline, consumers: new Set(), promise: null };
+    // Register ownership synchronously, BEFORE the first filesystem await.
+    inflight.set(key, entry);
+    const owned = entry;
+    entry.promise = raceWithSignal((async () => {
+      const signal = deadline.signal;
+      const target = path.join(CACHE_DIR, `${key}.pcm`);
+      try {
+        const read = options.readFileImpl || fs.readFile;
+        const pcm = await raceWithSignal(read(target, { signal }), signal);
+        throwIfAborted(signal);
+        if (validPcm(pcm)) { stats.diskHits += 1; remember(key, pcm); return pcm; }
+        stats.invalidCacheFiles += 1;
+        await fs.rm(target, { force: true }).catch(() => {});
+      } catch (error) {
+        throwIfAborted(signal);
+        if (error?.code !== 'ENOENT') console.warn(`[speaker-label] Cache read failed: ${error.message}`);
       }
+      throwIfAborted(signal);
+      stats.misses += 1;
+      return generateAndCache(label, key, signal, options);
+    })(), deadline.signal).catch((error) => {
+      if (error?.cancelled || deadline.signal.aborted) { stats.cancellations += 1; return null; }
       stats.failures += 1;
-      console.warn(`[speaker-label] Could not generate "${label}": ${error.message}`);
+      console.warn(`[speaker-label] Could not generate label: ${error.message}`);
       return null;
-    })
-    .finally(() => { if (inflight.get(key) === entry) inflight.delete(key); });
-  inflight.set(key, entry);
-  return entry.promise;
+    }).finally(() => {
+      deadline.cleanup();
+      if (inflight.get(key) === owned) inflight.delete(key);
+    });
+  }
+  const consumer = Symbol('label-consumer');
+  entry.consumers.add(consumer);
+  try { return await raceWithSignal(entry.promise, options.signal); }
+  catch (error) { if (options.signal?.aborted) return null; throw error; }
+  finally {
+    entry.consumers.delete(consumer);
+    if (!entry.consumers.size && inflight.get(key) === entry) entry.deadline.cancel(cancellationError('No speech item owns this label.'));
+  }
 }
 
 function lazySpeakerLabel(value, options) {
   let started = null;
+  const epoch = privacyEpoch;
   const start = () => {
-    started ||= getSpeakerLabelPcmNow(value, options);
+    started ||= epoch === privacyEpoch ? getSpeakerLabelPcmNow(value, options) : Promise.resolve(null);
     return started;
   };
   return {
@@ -230,13 +254,13 @@ function lazySpeakerLabel(value, options) {
   };
 }
 
-// Intentionally lazy: queue prefetch and /speaker warm-up calls may obtain a
-// handle, but no Google request begins until playback actually awaits the label.
+// Queue construction is lazy; no Google request begins before playback awaits it.
 export function getSpeakerLabelPcm(value, options = {}) {
   return lazySpeakerLabel(value, options);
 }
 
 export function cancelAllSpeakerLabelGeneration(reason = new Error('Speaker-label generation cancelled by privacy/runtime change.')) {
+  privacyEpoch += 1;
   let cancelled = 0;
   for (const entry of inflight.values()) {
     if (entry?.controller && !entry.controller.signal.aborted) {

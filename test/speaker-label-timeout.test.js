@@ -25,3 +25,19 @@ test('speaker-label FFmpeg decoder times out and terminates a wedged child', asy
   );
   assert.equal(killed, true);
 });
+
+test('speaker decoder enforces its PCM byte cap before collecting more output', async () => {
+  let child;
+  let killed = false;
+  const decoding = decodeAudioToSpeakerPcm(Buffer.alloc(250), { spawnImpl() {
+    child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = () => { killed = true; return true; };
+    return child;
+  } });
+  child.stdout.write(Buffer.alloc(500000));
+  await assert.rejects(decoding, /PCM limit/);
+  assert.equal(killed, true);
+});
