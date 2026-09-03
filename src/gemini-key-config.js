@@ -11,36 +11,88 @@ function normalizeRequestedSlot(value) {
   return Number.isInteger(parsed) && parsed >= 1 && parsed <= MAX_GEMINI_API_KEYS ? parsed : 1;
 }
 
-function configuredEntries(env = process.env) {
+function analyzeConfiguredEntries(env = process.env) {
   const configured = [];
+  const configuredEnvSlots = [];
+  const duplicateSlots = [];
+  const canonicalSlotByKey = new Map();
+
   for (let slot = 1; slot <= MAX_GEMINI_API_KEYS; slot += 1) {
     const key = String(env?.[slotEnvName(slot)] ?? '').trim();
-    if (key) configured.push({ slot, key });
+    if (!key) continue;
+    configuredEnvSlots.push(slot);
+    const duplicateOf = canonicalSlotByKey.get(key);
+    if (duplicateOf != null) {
+      duplicateSlots.push({ slot, duplicateOf });
+      continue;
+    }
+    canonicalSlotByKey.set(key, slot);
+    configured.push({ slot, key });
   }
-  return configured;
+
+  return {
+    configured,
+    configuredEnvSlots,
+    configuredEnvCount: configuredEnvSlots.length,
+    duplicateSlots
+  };
+}
+
+function configuredEntries(env = process.env) {
+  return analyzeConfiguredEntries(env).configured;
+}
+
+function effectiveRequestedSlot(requestedSlot, duplicateSlots) {
+  return duplicateSlots.find((entry) => entry.slot === requestedSlot)?.duplicateOf ?? requestedSlot;
+}
+
+export function getGeminiApiKeyConfiguration(env = process.env) {
+  const analysis = analyzeConfiguredEntries(env);
+  const requestedSlot = normalizeRequestedSlot(env?.GEMINI_API_KEY_SLOT);
+  const effectiveSlot = effectiveRequestedSlot(requestedSlot, analysis.duplicateSlots);
+  const selected = analysis.configured.find((entry) => entry.slot === effectiveSlot)
+    ?? analysis.configured.find((entry) => entry.slot === 1)
+    ?? analysis.configured[0]
+    ?? null;
+
+  return {
+    requestedSlot,
+    selectedSlot: selected?.slot ?? null,
+    configuredCount: analysis.configured.length,
+    configuredSlots: analysis.configured.map((entry) => entry.slot),
+    configuredEnvCount: analysis.configuredEnvCount,
+    configuredEnvSlots: analysis.configuredEnvSlots,
+    duplicateSlots: analysis.duplicateSlots.map((entry) => ({ ...entry }))
+  };
 }
 
 export function getGeminiApiKeySelection(env = process.env) {
-  const configured = configuredEntries(env);
+  const analysis = analyzeConfiguredEntries(env);
   const requestedSlot = normalizeRequestedSlot(env?.GEMINI_API_KEY_SLOT);
-  const selected = configured.find((entry) => entry.slot === requestedSlot)
-    ?? configured.find((entry) => entry.slot === 1)
-    ?? configured[0]
+  const effectiveSlot = effectiveRequestedSlot(requestedSlot, analysis.duplicateSlots);
+  const selected = analysis.configured.find((entry) => entry.slot === effectiveSlot)
+    ?? analysis.configured.find((entry) => entry.slot === 1)
+    ?? analysis.configured[0]
     ?? null;
 
   return {
     key: selected?.key ?? null,
     selectedSlot: selected?.slot ?? null,
     requestedSlot,
-    configuredCount: configured.length,
-    configuredSlots: configured.map((entry) => entry.slot)
+    configuredCount: analysis.configured.length,
+    configuredSlots: analysis.configured.map((entry) => entry.slot),
+    configuredEnvCount: analysis.configuredEnvCount,
+    configuredEnvSlots: analysis.configuredEnvSlots,
+    duplicateSlots: analysis.duplicateSlots.map((entry) => ({ ...entry }))
   };
 }
 
 export function createGeminiApiKeyRoundRobin(env = process.env) {
-  const configured = configuredEntries(env);
+  const analysis = analyzeConfiguredEntries(env);
+  const configured = analysis.configured;
   const requestedSlot = normalizeRequestedSlot(env?.GEMINI_API_KEY_SLOT);
-  let startIndex = configured.findIndex((entry) => entry.slot === requestedSlot);
+  const effectiveSlot = effectiveRequestedSlot(requestedSlot, analysis.duplicateSlots);
+  let startIndex = configured.findIndex((entry) => entry.slot === effectiveSlot);
   if (startIndex < 0) startIndex = 0;
   let cursor = startIndex;
   let lastSlot = null;
@@ -60,6 +112,9 @@ export function createGeminiApiKeyRoundRobin(env = process.env) {
     return {
       configuredCount: configured.length,
       configuredSlots: configured.map((entry) => entry.slot),
+      configuredEnvCount: analysis.configuredEnvCount,
+      configuredEnvSlots: [...analysis.configuredEnvSlots],
+      duplicateSlots: analysis.duplicateSlots.map((entry) => ({ ...entry })),
       availableCount: availableEntries().length,
       disabledSlots: [...disabledSlots].sort((a, b) => a - b),
       requestedSlot,
@@ -120,4 +175,4 @@ export function getGeminiApiKeyRoundRobinStatus() {
   return runtimeRoundRobin.status();
 }
 
-export const __test = { MAX_GEMINI_API_KEYS, slotEnvName, normalizeRequestedSlot, configuredEntries };
+export const __test = { MAX_GEMINI_API_KEYS, slotEnvName, normalizeRequestedSlot, configuredEntries, analyzeConfiguredEntries, effectiveRequestedSlot };

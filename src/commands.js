@@ -45,6 +45,7 @@ import { getSpeakerLabelPcm, getSpeakerLabelStatus } from './speaker-label.js';
 import { getFfmpegPath } from './ffmpeg.js';
 import { askGemini, describeAskError, getAskOptions } from './ask.js';
 import { ASK_ALLOWED_MENTIONS, buildAskEmbed, queueAskAnswerTts } from './ask-response.js';
+import { describeTtsRestartBlockers, getTtsRestartBlockers } from './restart-guard.js';
 
 const ephemeral = MessageFlags.Ephemeral;
 function formatMegabytes(bytes) {
@@ -319,7 +320,8 @@ const nameCommand = {
     if (subcommand === 'add') {
       const alias = interaction.options.getString('name', true).trim();
       setUserAlias(interaction.guildId, user.id, alias);
-      // Pre-warm both speaker variants so a later /speaker mode change stays hot.
+      // Speaker-label generation may be lazy; these calls opportunistically
+      // create handles without forcing privacy-sensitive provider work.
       void getSpeakerLabelPcm(alias);
       void getSpeakerLabelPcm(`${alias} cakap`);
       await interaction.reply({
@@ -444,10 +446,16 @@ const restartTtsCommand = {
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   async execute(interaction) {
-    const audio = getAudioStatus(interaction.guildId);
-    if (audio.playing || audio.queued > 0) {
+    const guildIds = new Set([String(interaction.guildId)]);
+    for (const guildId of interaction.client?.guilds?.cache?.keys?.() ?? []) guildIds.add(String(guildId));
+    const blockers = getTtsRestartBlockers({
+      guildIds: [...guildIds],
+      getAudioStatus,
+      getProviderStatus: getTtsProviderStatus
+    });
+    if (!blockers.safe) {
       await interaction.reply({
-        content: `TTS is busy (${audio.playing ? 'playing' : 'idle'} • ${audio.queued} queued). Run /restarttts again when the queue is idle so no speech is cut off.`,
+        content: `TTS runtime is busy across the process (${describeTtsRestartBlockers(blockers)}). Run /restarttts again after all queues/provider work are idle so another guild is not interrupted.`,
         flags: ephemeral
       });
       return;
@@ -467,7 +475,7 @@ const restartTtsCommand = {
     const profile = settings.geminiLive?.profile ?? {};
     const thinking = String(profile.thinkingLevel || 'MINIMAL').toUpperCase();
     await interaction.reply({
-      content: `TTS profile ${changed ? 'reloaded from config/settings.json' : 're-applied from the current settings'} and Gemini Live sessions restarted. Thinking: **${thinking}**. Your next message will open a fresh Live session with the new profile.`,
+      content: `TTS profile ${changed ? 'reloaded from config/settings.json' : 're-applied from the current settings'} and Gemini Live sessions restarted. Thinking: **${thinking}**. Your next message will open a fresh Live session with the new profile. Changes to Gemini keys or GEMINI_API_KEY_SLOT in .env still require a full bot process restart.`,
       flags: ephemeral
     });
   }
@@ -492,6 +500,7 @@ const statusCommand = {
     const voiceAllocation = getTtsVoiceAllocation(interaction.guildId, GEMINI_VOICES);
     const speakerLabel = getSpeakerLabelStatus();
     const settingsError = getLastSettingsError();
+    const keyRing = provider.geminiKeyRoundRobin ?? {};
 
     const providerLine = (name, state, standby = false) => {
       const availability = state.disabled
@@ -527,7 +536,8 @@ const statusCommand = {
         {
           name: 'Providers',
           value: [
-            provider.geminiAuthDisabled ? 'Gemini auth disabled for this runtime; /restarttts re-enables after key/config correction.' : 'Gemini auth gate: enabled',
+            provider.geminiAuthDisabled ? 'Gemini auth disabled for this runtime; /restarttts resets provider state, but .env key edits require a full bot restart.' : 'Gemini auth gate: enabled',
+            `Gemini keys: ${keyRing.configuredCount ?? 0} unique${Number(keyRing.configuredEnvCount) > Number(keyRing.configuredCount) ? ` / ${keyRing.configuredEnvCount} populated slots` : ''}${keyRing.duplicateSlots?.length ? ` • duplicate slots ${keyRing.duplicateSlots.map((entry) => `${entry.slot}->${entry.duplicateOf}`).join(', ')}` : ''}`,
             providerLine('3.1 Live', provider.livePrimary),
             providerLine('2.5 Live', provider.liveFallback, true),
             providerLine('3.1 TTS', provider.exactTts, true),

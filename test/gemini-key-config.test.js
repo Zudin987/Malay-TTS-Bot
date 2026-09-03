@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 const {
+  getGeminiApiKeyConfiguration,
   getGeminiApiKeySelection,
   createGeminiApiKeyRoundRobin,
   formatGeminiApiKeySelectionLog
@@ -74,6 +75,41 @@ test('round robin skips empty numbered slots without creating phantom keys', () 
 
   assert.deepEqual([ring.next()?.slot, ring.next()?.slot, ring.next()?.slot, ring.next()?.slot], [1, 3, 10, 1]);
   assert.deepEqual(ring.status().configuredSlots, [1, 3, 10]);
+});
+
+test('duplicate key slots are ignored as independent credentials', () => {
+  const env = {
+    GEMINI_API_KEY: 'same-key',
+    GEMINI_API_KEY_2: 'same-key',
+    GEMINI_API_KEY_3: 'unique-three',
+    GEMINI_API_KEY_10: 'same-key'
+  };
+  const config = getGeminiApiKeyConfiguration(env);
+  assert.equal(config.configuredEnvCount, 4);
+  assert.equal(config.configuredCount, 2);
+  assert.deepEqual(config.configuredEnvSlots, [1, 2, 3, 10]);
+  assert.deepEqual(config.configuredSlots, [1, 3]);
+  assert.deepEqual(config.duplicateSlots, [
+    { slot: 2, duplicateOf: 1 },
+    { slot: 10, duplicateOf: 1 }
+  ]);
+
+  const ring = createGeminiApiKeyRoundRobin(env);
+  assert.deepEqual([ring.next()?.slot, ring.next()?.slot, ring.next()?.slot], [1, 3, 1]);
+  assert.deepEqual(ring.status().duplicateSlots, config.duplicateSlots);
+});
+
+test('requesting a duplicate slot starts at its canonical credential', () => {
+  const ring = createGeminiApiKeyRoundRobin({
+    GEMINI_API_KEY: 'key-one',
+    GEMINI_API_KEY_2: 'key-two',
+    GEMINI_API_KEY_3: 'key-two',
+    GEMINI_API_KEY_SLOT: '3'
+  });
+
+  assert.equal(ring.status().requestedSlot, 3);
+  assert.equal(ring.status().startSlot, 2);
+  assert.equal(ring.next()?.slot, 2);
 });
 
 test('single-key round robin remains backward-compatible', () => {
