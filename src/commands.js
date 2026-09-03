@@ -554,7 +554,7 @@ const statusCommand = {
         {
           name: 'Queue & recovery',
           value: [
-            `${audio.playing ? 'Playing' : 'Idle'} • ${audio.queued}/${audio.maximumQueued} queued • backlog ~${formatDelay(audio.estimatedBacklogMs)} • prefetch ${audio.prefetched}/${audio.prefetchTarget}`,
+            `${audio.phase} • ${audio.queued}/${audio.maximumQueued} queued • backlog ~${formatDelay(audio.estimatedBacklogMs)} • prefetch ${audio.prefetched}/${audio.prefetchTarget}`,
             `Speed ${Math.round(audio.catchUpSpeed * 100)}% • dropped ${audio.droppedMessages} • stale skipped ${audio.staleSkippedMessages}`,
             `Recovery ${audio.cutoffRecoverySuccesses}/${audio.cutoffRecoveries} • PCM-tail ${audio.mirrorReplays} • duplicate replay prevented ${audio.suppressedCutoffReplays} • runaway recovery suppressed ${audio.runawayRecoveriesSuppressed} • pipeline failures ${audio.pipelineFailures}`,
             `One Discord message = one TTS item. Message combining removed.`

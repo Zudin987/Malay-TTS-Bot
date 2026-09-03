@@ -1,6 +1,8 @@
 import { entersState, getVoiceConnection, joinVoiceChannel, VoiceConnectionStatus } from '@discordjs/voice';
 import { pauseAudioForVoice, releaseAudio, resumeAudioForVoice, subscribePlayer } from './audio.js';
 import { settings } from './config.js';
+import { cancellationError, deadlineSignal, raceWithSignal } from './cancellation.js';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const leaveTimers = new Map();
 const voiceStates = new Map();
@@ -9,11 +11,15 @@ const NORMAL_RECOVERY_WAIT_MS = 8_000;
 const FRESH_RETRY_DELAYS_MS = [1_000, 3_000];
 const FRESH_READY_TIMEOUT_MS = 15_000;
 
-function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+async function waitReady(connection, timeoutMs, signal) {
+  const wait = deadlineSignal(signal, timeoutMs, new Error(`Voice readiness timed out after ${timeoutMs}ms.`));
+  try { return await raceWithSignal(entersState(connection, VoiceConnectionStatus.Ready, wait.signal), wait.signal); }
+  finally { wait.cancel(cancellationError('Voice wait ended.')); wait.cleanup(); }
+}
 function stateFor(guildId) {
   let state = voiceStates.get(guildId);
   if (!state) {
-    state = { desiredChannelId: null, connection: null, epoch: 0, recoveryPromise: null };
+    state = { desiredChannelId: null, connection: null, epoch: 0, recoveryPromise: null, recoveryQueued: null, controller: new AbortController() };
     voiceStates.set(guildId, state);
   }
   return state;
@@ -58,7 +64,9 @@ function attachHandlers(guild, channelId, connection, state, epoch) {
     if (newState.status === VoiceConnectionStatus.Disconnected || newState.status === VoiceConnectionStatus.Destroyed) {
       // Stop local playback from advancing while Discord has no subscriber.
       pauseAudioForVoice(guild.id);
-      void scheduleRecovery(guild, channelId, connection, epoch, newState.status.toLowerCase());
+      void scheduleRecovery(guild, channelId, connection, epoch, newState.status.toLowerCase()).catch((error) => {
+        if (!error?.cancelled) console.warn(`[voice:${guild.id}] Recovery stopped: ${error.message}`);
+      });
     }
   });
 }
@@ -75,17 +83,30 @@ function trackRecovery(state, factory) {
 
 function scheduleRecovery(guild, channelId, failedConnection, epoch, reason) {
   const state = stateFor(guild.id);
-  return trackRecovery(state, () => withGuildLock(guild.id, () => recoverLocked(guild, channelId, failedConnection, epoch, reason)));
+  if (state.recoveryPromise) return state.recoveryPromise;
+  if (state.recoveryQueued) return state.recoveryQueued;
+  // Recovery ownership begins only after acquiring the guild lock. A connect
+  // call holding that lock must never await a recovery queued behind itself.
+  let job;
+  job = withGuildLock(guild.id, () => {
+    if (!stillOwns(state, channelId, epoch, failedConnection)) return false;
+    if (failedConnection.state?.status === VoiceConnectionStatus.Ready) return true;
+    return trackRecovery(state, () => recoverLocked(guild, channelId, failedConnection, epoch, reason));
+  }).finally(() => { if (state.recoveryQueued === job) state.recoveryQueued = null; });
+  state.recoveryQueued = job;
+  return job;
 }
 
 async function recoverLocked(guild, channelId, failedConnection, epoch, reason) {
-  const state = stateFor(guild.id);
+  const state = voiceStates.get(guild.id);
+  if (!state) return false;
+  const signal = state.controller.signal;
   if (!stillOwns(state, channelId, epoch, failedConnection)) return false;
   console.warn(`[voice:${guild.id}] Connection ${reason}; playback paused and recovery started.`);
 
   if (failedConnection.state?.status !== VoiceConnectionStatus.Destroyed) {
     try {
-      await entersState(failedConnection, VoiceConnectionStatus.Ready, NORMAL_RECOVERY_WAIT_MS);
+      await waitReady(failedConnection, NORMAL_RECOVERY_WAIT_MS, signal);
       if (!stillOwns(state, channelId, epoch, failedConnection)) return false;
       subscribePlayer(guild.id, failedConnection, channelId);
       resumeAudioForVoice(guild.id);
@@ -100,7 +121,7 @@ async function recoverLocked(guild, channelId, failedConnection, epoch, reason) 
   safeDestroy(failedConnection);
 
   for (let attempt = 0; attempt < FRESH_RETRY_DELAYS_MS.length; attempt += 1) {
-    await sleep(FRESH_RETRY_DELAYS_MS[attempt]);
+    try { await delay(FRESH_RETRY_DELAYS_MS[attempt], undefined, { signal }); } catch { return false; }
     if (state.epoch !== epoch || state.desiredChannelId !== channelId) return false;
     const channel = guild.channels.cache.get(channelId);
     if (!channel?.isVoiceBased()) break;
@@ -113,7 +134,7 @@ async function recoverLocked(guild, channelId, failedConnection, epoch, reason) 
     }
     console.warn(`[voice:${guild.id}] Fresh reconnect attempt ${attempt + 1}/${FRESH_RETRY_DELAYS_MS.length}.`);
     try {
-      await entersState(fresh, VoiceConnectionStatus.Ready, FRESH_READY_TIMEOUT_MS);
+      await waitReady(fresh, FRESH_READY_TIMEOUT_MS, signal);
       if (!stillOwns(state, channelId, epoch, fresh)) { safeDestroy(fresh); return false; }
       subscribePlayer(guild.id, fresh, channelId);
       resumeAudioForVoice(guild.id);
@@ -137,12 +158,16 @@ async function recoverLocked(guild, channelId, failedConnection, epoch, reason) 
   return false;
 }
 
-export function getRuntimeVoiceChannelId(guildId) { return stateFor(guildId).desiredChannelId ?? null; }
-export function isVoiceRecovering(guildId) { return Boolean(stateFor(guildId).recoveryPromise); }
+export function getRuntimeVoiceChannelId(guildId) { return voiceStates.get(guildId)?.desiredChannelId ?? null; }
+export function isVoiceRecovering(guildId) { const state = voiceStates.get(guildId); return Boolean(state?.recoveryPromise || state?.recoveryQueued); }
 
 export async function connectToVoiceChannel(guild, channel, { allowMove = false } = {}) {
+  const requestedState = stateFor(guild.id);
+  const requestedEpoch = requestedState.epoch;
   return withGuildLock(guild.id, async () => {
-    const state = stateFor(guild.id);
+    const state = requestedState;
+    if (voiceStates.get(guild.id) !== state) throw cancellationError('Voice join was cancelled.');
+    if (state.controller.signal.aborted && state.epoch !== requestedEpoch) throw cancellationError('Voice join was cancelled.');
     const external = getVoiceConnection(guild.id);
     if (!state.connection && external && state.desiredChannelId === channel.id) state.connection = external;
     const current = state.connection;
@@ -157,11 +182,15 @@ export async function connectToVoiceChannel(guild, channel, { allowMove = false 
       const epoch = state.epoch;
       const recovered = await trackRecovery(state, () => recoverLocked(guild, channel.id, current, epoch, 'not-ready'));
       if (recovered && state.connection) return { connection: state.connection, status: 'recovered' };
+      if (state.controller.signal.aborted || voiceStates.get(guild.id) !== state) throw cancellationError('Voice join was cancelled.');
+      throw new Error('Voice recovery failed. Join again to retry.');
     }
 
     if (current && currentId !== channel.id && !allowMove) return { connection: null, status: 'busy-other-channel' };
 
     state.epoch += 1;
+    state.controller.abort(cancellationError('Voice connection replaced.'));
+    state.controller = new AbortController();
     const epoch = state.epoch;
     if (current) { state.connection = null; safeDestroy(current); releaseAudio(guild.id); }
     state.desiredChannelId = channel.id;
@@ -174,7 +203,7 @@ export async function connectToVoiceChannel(guild, channel, { allowMove = false 
       throw error;
     }
     try {
-      await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
+      await waitReady(connection, 20_000, state.controller.signal);
     } catch (error) {
       if (stillOwns(state, channel.id, epoch, connection)) { state.connection = null; state.desiredChannelId = null; }
       safeDestroy(connection);
@@ -198,13 +227,16 @@ export async function connectToVoiceChannel(guild, channel, { allowMove = false 
 
 export function disconnectGuild(guildId) {
   cancelAutoLeave(guildId);
-  const state = stateFor(guildId);
+  const state = voiceStates.get(guildId);
+  if (!state) { safeDestroy(getVoiceConnection(guildId)); releaseAudio(guildId); return; }
   state.epoch += 1;
+  state.controller.abort(cancellationError('Voice disconnected.'));
   const connection = state.connection || getVoiceConnection(guildId);
   state.connection = null;
   state.desiredChannelId = null;
   safeDestroy(connection);
   releaseAudio(guildId);
+  voiceStates.delete(guildId);
 }
 
 export function disconnectAllGuilds() {
@@ -215,7 +247,8 @@ export function disconnectAllGuilds() {
 }
 
 export function evaluateAutoLeave(guild) {
-  const state = stateFor(guild.id);
+  const state = voiceStates.get(guild.id);
+  if (!state) return;
   const channelId = state.desiredChannelId;
   if (!channelId) return;
   const channel = guild.channels.cache.get(channelId);
@@ -226,7 +259,8 @@ export function evaluateAutoLeave(guild) {
   const autoLeaveSeconds = Math.max(1, Number(settings.autoLeaveSeconds) || 60);
   const timer = setTimeout(() => {
     leaveTimers.delete(guild.id);
-    const latestState = stateFor(guild.id);
+    const latestState = voiceStates.get(guild.id);
+    if (!latestState) return;
     if (latestState.desiredChannelId !== channelId) return;
     const latest = guild.channels.cache.get(channelId);
     const stillEmpty = !latest?.isVoiceBased() || latest.members.filter((member) => !member.user.bot).size === 0;
@@ -242,4 +276,4 @@ function cancelAutoLeave(guildId) {
   leaveTimers.delete(guildId);
 }
 
-export const __test = { trackRecovery };
+export const __test = { trackRecovery, withGuildLock, scheduleRecovery, stateFor, waitReady, voiceStates, guildLocks };

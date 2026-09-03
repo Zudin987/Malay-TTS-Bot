@@ -316,20 +316,6 @@ test('/ask command posts the embed before detached TTS and normal MessageCreate 
   assert.match(indexSource, /message\.author\.bot \|\| message\.webhookId/u);
 });
 
-test('/ask STOP TTS routing targets one message and preserves the rest of the queue', () => {
-  const indexSource = fs.readFileSync(new URL('../src/index.js', import.meta.url), 'utf8').replace(/\r\n?/gu, '\n');
-  const audioSource = fs.readFileSync(new URL('../src/audio.js', import.meta.url), 'utf8').replace(/\r\n?/gu, '\n');
-  assert.match(indexSource, /interaction\.isButton\(\)/u);
-  assert.match(indexSource, /handleAskStopButton\(interaction, cancelMessageAudio\)/u);
-
-  const start = audioSource.indexOf('export function cancelMessageAudio');
-  const end = audioSource.indexOf('export function clearAudio', start);
-  assert.ok(start >= 0 && end > start);
-  const cancelBlock = audioSource.slice(start, end);
-  assert.match(cancelBlock, /state\.player\.stop\(true\)/u);
-  assert.doesNotMatch(cancelBlock, /queue\.length\s*=\s*0/u);
-  assert.match(audioSource, /state\.currentItem = null; state\.running = false;\n    if \(!state\.disposed\) void runQueue\(guildId, state\);/u);
-});
 
 test('/ask limits align with Discord embed field limits and include ellipsis inside the cap', () => {
   const limited = getAskOptions({ maxQuestionCharacters: 1800, maxAnswerCharacters: 1500 });

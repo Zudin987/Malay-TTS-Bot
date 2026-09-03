@@ -590,7 +590,9 @@ async function runAttempt({
       const limiterWaitStarted = performance.now();
       const wait = deadlineSignal(parentSignal, 15_000, makeBudgetError(providerName, 15_000));
       let promotionTimer;
+      let promotedAt = null;
       const promote = () => {
+        promotedAt = performance.now();
         promotionTimer = setTimeout(() => wait.cancel(makeBudgetError(providerName, windowMs)), windowMs);
         promotionTimer.unref?.();
       };
@@ -604,7 +606,8 @@ async function runAttempt({
       // Speculative prefetch should not burn a remote first-audio window while
       // merely waiting for a local Gemini concurrency slot.
       providerStartedAt = performance.now();
-      abortable = attemptSignal(parentSignal, windowMs, providerName);
+      const firstAudioRemaining = promotedAt == null ? windowMs : Math.max(1, windowMs - (performance.now() - promotedAt));
+      abortable = attemptSignal(parentSignal, firstAudioRemaining, providerName);
     } else {
       abortable = attemptSignal(parentSignal, windowMs, providerName);
       if (geminiProvider) releaseGemini = await acquireGeminiSlot(priority, abortable.signal, promotionSignal);

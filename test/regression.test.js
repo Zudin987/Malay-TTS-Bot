@@ -182,7 +182,7 @@ test('late completion transcript recovers only the missing spoken suffix', async
   assert.equal(state.queue[0].skipLive, true);
 });
 
-test('late severe cutoff without transcript schedules a trimmed regenerated tail', () => {
+test('late cutoff without a verified lexical tail never guesses a resume fraction', () => {
   const text = 'aku nak pergi ke kedai membeli beras';
   const item = audio.__test.createQueueItem(text, { verificationText: text });
   const state = {
@@ -196,10 +196,8 @@ test('late severe cutoff without transcript schedules a trimmed regenerated tail
   const recovered = audio.__test.handleCompletionRecovery('test-guild', state, item, {
     audioFormat: 's16le', sampleRate: 24_000, channels: 1
   }, 1100, 1, { error });
-  assert.equal(recovered, true);
-  assert.equal(state.queue.length, 1);
-  assert.ok(state.queue[0].resumeFraction > 0 && state.queue[0].resumeFraction < 0.95);
-  assert.equal(state.queue[0].text, text);
+  assert.equal(recovered, false);
+  assert.equal(state.queue.length, 0);
 });
 
 test('Discord cleanup resolves role/channel markers without fixed placeholder collisions', () => {
@@ -540,7 +538,7 @@ test('post-playback completion grace is asynchronous and never blocks queue prog
     const completion = new Promise(() => {});
     const state = { completionGraceTimeouts: 0 };
     const started = Date.now();
-    const scheduled = audio.__test.scheduleCompletionGraceCancel('test-guild', state, { completion, cancel() { cancelled += 1; } });
+    const scheduled = audio.__test.scheduleCompletionGraceCancel('test-guild', state, { completion, cancel() { cancelled += 1; } }, { item: audio.__test.createQueueItem('finished') });
     assert.equal(scheduled, true);
     assert.ok(Date.now() - started < 30);
     await new Promise((resolve) => setTimeout(resolve, 300));
