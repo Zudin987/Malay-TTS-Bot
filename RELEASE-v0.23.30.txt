@@ -1,19 +1,26 @@
 Malay TTS Bot v0.23.30 - /ask Lifecycle Hardening
 
 What changed
-- Fixed rapid same-user /ask ordering so a slower older request cannot finish later and replace the newer request.
-- Added request-owned half-open provider probe leases so stale completion or cancellation callbacks cannot clear a newer request's probe state.
+- /ask now uses the low-latency Gemini 3.1 Flash TTS streaming path again instead of waiting for the complete buffered answer before playback. Conversational Gemini Live remains excluded from /ask.
+- Queued /ask answers are no-prefetch so unheard AI answers cannot occupy Gemini slots ahead of FIFO playback.
+- Rapid same-user /ask ordering is invocation-based: a slower older request cannot finish later and replace the newer request.
+- A newer same-user /ask supersedes older queued /ask speech and may cancel an older current /ask only before the old answer becomes audible. Once speech has started, it is preserved.
 - Accepted /ask queue items are protected from normal-chat overflow; normal waiting speech is dropped first, and new incoming speech is rejected if every waiting item is protected.
-- A newer same-user /ask may cancel an older current /ask only before the old answer becomes audible. Once speech has started, it is preserved.
-- STOP TTS now races queue cancellation against provider generation, so the queue can advance even if remote Gemini teardown does not settle promptly.
-- Added regression coverage proving STOP releases stuck Gemini limiter ownership and the next normal Gemini 3.1 Live message can begin immediately.
+- STOP TTS teardown now releases local Gemini limiter/probe ownership immediately and directly cancels the Gemini response body, so a stopped request cannot leave stale provider work blocking the next message.
+- Queue playback now races provider generation against explicit cancellation, so STOP can advance the queue even if remote teardown itself never settles promptly.
+- Half-open Gemini provider probes now use request-owned lease tokens so stale completion/cancellation callbacks cannot clear a newer request's probe state.
+- Added regression coverage for rapid /ask follow-ups, STOP before first audio, STOP during active work, overflow protection, stuck provider teardown, and STOP -> next normal Gemini 3.1 Live recovery.
+
+Expected /ask speech path
+- Gemini 3.1 Flash TTS streaming -> Google Malay TTS fallback.
+- Gemini 3.1 Live and Gemini 2.5 Live remain intentionally excluded from /ask.
+- Gemini 3.1 TTS first-audio timeout remains 4000ms, stream inactivity guard remains 2500ms, and Google fallback timeout remains 3500ms.
 
 Preserved behavior
 - Normal Discord chat remains Gemini 3.1 Flash Live -> Gemini 2.5 Native Audio Live -> Gemini 3.1 Flash TTS -> Google Malay TTS.
 - Normal Gemini 3.1 Live provider implementation and timing behavior are unchanged.
 - Normal first-audio windows remain 2500/1600/1600ms, overall first-audio budget remains 7000ms, and Google reserve remains 1200ms.
-- /ask remains separate from conversational Live and uses Gemini 3.1 Flash TTS -> Google Malay TTS fallback.
-- Strict no-added-words behavior, FIFO ownership, privacy controls, six approved Gemini voices and existing /ask text-response behavior are unchanged.
+- Strict no-added-words behavior, normal FIFO ownership, privacy controls, STOP TTS scope, six approved Gemini voices and /ask text-response behavior are unchanged.
 
 Upgrade
 Preserve only .env and data\guilds.json from the old install. Do not copy old caches, logs, locks, node_modules, or config\settings.json over the new release. Extract the v0.23.30 Clean package to C:\Malay-TTS-Bot, restore .env and data\guilds.json, then run setup-clean.cmd.
