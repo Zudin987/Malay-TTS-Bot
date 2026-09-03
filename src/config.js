@@ -39,7 +39,6 @@ function clampInt(value, fallback, min, max) {
   return Math.floor(clamp(value, fallback, min, max));
 }
 
-
 const defaults = {
   speakerMode: 'username',
   speakerResetSeconds: 30,
@@ -58,10 +57,6 @@ const defaults = {
   maximumCharacters: 400,
   maximumQueuedMessages: 10,
   imagePhrase: 'hantar gambar',
-  videoPhrase: 'hantar video',
-  gifPhrase: 'hantar GIF',
-  filePhrase: 'hantar fail',
-  linkPhrase: 'hantar link',
   fixedVolume: 0.6,
   voiceLogEnabled: false,
   intonation: { enabled: true },
@@ -110,8 +105,6 @@ const defaults = {
     mirrorStreamingPcm: true,
     verifyStreamingPlayback: true,
     transcriptCutoffGuard: true,
-    transcriptReplayEnabled: false,
-    durationReplayEnabled: false,
     playbackCoverageMin: 0.82,
     playbackMissingToleranceMs: 350,
     hardPlaybackCoverageMax: 0.55,
@@ -215,7 +208,7 @@ function normalizeSettings(parsed) {
   const rawExactProfile = isObject(exact.profile) ? exact.profile : {};
 
   const profile = { ...defaults.geminiLive.profile, ...rawProfile };
-  delete profile.messageTemplate; // fixed delimiters are intentionally unsupported; providers generate a per-turn nonce.
+  delete profile.messageTemplate;
   const thinking = String(profile.thinkingLevel || 'MINIMAL').trim().toUpperCase();
   profile.thinkingLevel = ['MINIMAL', 'LOW', 'MEDIUM', 'HIGH'].includes(thinking) ? thinking : 'MINIMAL';
 
@@ -241,10 +234,6 @@ function normalizeSettings(parsed) {
     maximumCharacters: clampInt(parsed.maximumCharacters, defaults.maximumCharacters, 20, 2000),
     maximumQueuedMessages: clampInt(parsed.maximumQueuedMessages, defaults.maximumQueuedMessages, 1, 50),
     imagePhrase: String(parsed.imagePhrase ?? defaults.imagePhrase).trim() || defaults.imagePhrase,
-    videoPhrase: String(parsed.videoPhrase ?? defaults.videoPhrase).trim() || defaults.videoPhrase,
-    gifPhrase: String(parsed.gifPhrase ?? defaults.gifPhrase).trim() || defaults.gifPhrase,
-    filePhrase: String(parsed.filePhrase ?? defaults.filePhrase).trim() || defaults.filePhrase,
-    linkPhrase: String(parsed.linkPhrase ?? defaults.linkPhrase).trim() || defaults.linkPhrase,
     fixedVolume: clamp(parsed.fixedVolume, defaults.fixedVolume, 0, 2),
     voiceLogEnabled: parsed.voiceLogEnabled === true,
     intonation: { enabled: intonation.enabled !== false },
@@ -290,9 +279,12 @@ function normalizeSettings(parsed) {
       googleReserveMs: clampInt(providerHealth.googleReserveMs, defaults.providerHealth.googleReserveMs, 500, 3000)
     },
     audioPipeline: {
-      ...defaults.audioPipeline,
-      ...pipeline,
+      lowLatencyFfmpeg: pipeline.lowLatencyFfmpeg !== false,
+      streamCutoffRecovery: pipeline.streamCutoffRecovery !== false,
       streamCutoffRecoveryAttempts: clampInt(pipeline.streamCutoffRecoveryAttempts, defaults.audioPipeline.streamCutoffRecoveryAttempts, 0, 2),
+      mirrorStreamingPcm: pipeline.mirrorStreamingPcm !== false,
+      verifyStreamingPlayback: pipeline.verifyStreamingPlayback !== false,
+      transcriptCutoffGuard: pipeline.transcriptCutoffGuard !== false,
       playbackCoverageMin: clamp(pipeline.playbackCoverageMin, defaults.audioPipeline.playbackCoverageMin, 0.60, 0.97),
       playbackMissingToleranceMs: clampInt(pipeline.playbackMissingToleranceMs, defaults.audioPipeline.playbackMissingToleranceMs, 150, 1500),
       hardPlaybackCoverageMax: clamp(pipeline.hardPlaybackCoverageMax, defaults.audioPipeline.hardPlaybackCoverageMax, 0.20, 0.80),
@@ -302,7 +294,7 @@ function normalizeSettings(parsed) {
       transcriptMinCoverage: clamp(pipeline.transcriptMinCoverage, defaults.audioPipeline.transcriptMinCoverage, 0.3, 0.95),
       completionGraceMs: clampInt(pipeline.completionGraceMs, defaults.audioPipeline.completionGraceMs, 250, 3000),
       playbackSafetyMs: clampInt(pipeline.playbackSafetyMs, defaults.audioPipeline.playbackSafetyMs, 3000, 30_000),
-      playbackHardMaxMs: clampInt(pipeline.playbackHardMaxMs, defaults.audioPipeline.playbackHardMaxMs, 15_000, 90_000),
+      playbackHardMaxMs: clampInt(pipeline.playbackHardMaxMs, defaults.audioPipeline.playbackHardMaxMs, 15_000, 60_000),
       progressWatchdogMs: clampInt(pipeline.progressWatchdogMs, defaults.audioPipeline.progressWatchdogMs, 3000, 30_000),
       peakLimiter: {
         enabled: limiter.enabled !== false,
@@ -373,7 +365,7 @@ function normalizeSettings(parsed) {
 
 export const config = {
   token: required('DISCORD_TOKEN'),
-  clientId: required('DISCORD_CLIENT_ID'),
+  clientId: process.env.DISCORD_CLIENT_ID?.trim() || null,
   guildId: process.env.DISCORD_GUILD_ID?.trim() || null,
   geminiApiKey: process.env.GEMINI_API_KEY?.trim() || null
 };
@@ -399,13 +391,14 @@ export function loadSettings() {
   } catch (error) {
     if (error.code === 'ENOENT') {
       const wasPresent = settingsFilePresent;
+      const wasInitialized = Object.keys(settings).length > 0;
       settingsFilePresent = false;
       lastSettingsText = null;
       const next = normalizeSettings({});
       for (const key of Object.keys(settings)) delete settings[key];
       Object.assign(settings, next);
       lastSettingsError = null;
-      if (wasPresent || Object.keys(settings).length === 0) console.warn('[settings] config/settings.json not found; using defaults.');
+      if (wasPresent || !wasInitialized) console.warn('[settings] config/settings.json not found; using defaults.');
       return true;
     }
 
