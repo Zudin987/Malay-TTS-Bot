@@ -354,6 +354,15 @@ function makeBudgetError(provider, ms) {
   return error;
 }
 
+function googleFallbackWindowMs(context = {}, remainingMs = 0) {
+  const remaining = Math.max(0, Number(remainingMs) || 0);
+  if (context?.skipLive !== true) return remaining;
+  // /ask intentionally uses dedicated exact TTS before Google. Buffering exact
+  // audio can outlive the normal 7s first-audio budget, so a failed exact stream
+  // must not starve the deterministic fallback with a 0ms window.
+  return Math.max(500, Math.min(Number(settings.googleTts?.timeoutMs) || 3500, 15_000));
+}
+
 function attemptSignal(parentSignal, maxMs, providerName) {
   const controller = new AbortController();
   let timer = null;
@@ -787,7 +796,7 @@ export async function synthesize(text, context = {}) {
     }
   }
 
-  const googleWindow = remaining();
+  const googleWindow = googleFallbackWindowMs(context, remaining());
   if (googleWindow < 250) {
     noteSkipped(providerStates.google, { budget: true });
     attempts.push({ provider: 'google-ms-fallback', outcome: 'budget-skip', ms: 0 });
@@ -890,4 +899,4 @@ export function getTtsProviderStatus() {
 }
 
 
-export const __test = { makeBudgetError, setProviderFailure, recordRunawayMidstreamFailure, recordIsolatedLiveMidstreamFailure, shouldIsolateLiveMidstreamFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, runAttempt, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };
+export const __test = { makeBudgetError, googleFallbackWindowMs, setProviderFailure, recordRunawayMidstreamFailure, recordIsolatedLiveMidstreamFailure, shouldIsolateLiveMidstreamFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, runAttempt, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };
