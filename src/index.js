@@ -119,6 +119,11 @@ client.on(Events.MessageCreate, async (message) => {
   }
 });
 
+client.on(Events.MessageDelete, (message) => {
+  if (shuttingDown || !message.guild || !message.id) return;
+  cancelMessageAudio(message.guild.id, message.id);
+});
+
 client.on(Events.VoiceStateUpdate, (oldState, newState) => {
   evaluateAutoLeave(newState.guild ?? oldState.guild);
   void sendVoiceStateLog(client, oldState, newState).catch((error) => console.warn('[voice-log]', error));
