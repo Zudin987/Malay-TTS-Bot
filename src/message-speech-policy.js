@@ -55,18 +55,24 @@ function isGifAttachment(attachment) {
   return String(attachment?.contentType ?? '').toLowerCase() === 'image/gif' || /\.gif$/iu.test(attachment?.name ?? '');
 }
 
-function isImageAttachment(attachment) {
+export function isSpeakableImageAttachment(attachment) {
   return !isGifAttachment(attachment) && (
     String(attachment?.contentType ?? '').toLowerCase().startsWith('image/') ||
     /\.(png|jpe?g|jfif|webp|bmp|avif|heic|heif|jxl|tiff?)$/iu.test(attachment?.name ?? '')
   );
 }
 
-function isImageEmbed(embed) {
+export function isSpeakableImageEmbed(embed) {
   const type = String(embed?.type ?? '').toLowerCase();
   if (type === 'gifv' || type === 'video' || embed?.video) return false;
   if (type === 'link' || type === 'article' || type === 'rich') return false;
   return type === 'image' || Boolean(embed?.image);
+}
+
+export function hasSpeakableImage(message) {
+  const attachments = [...(message?.attachments?.values?.() ?? [])];
+  const embeds = [...(message?.embeds ?? [])];
+  return attachments.some(isSpeakableImageAttachment) || embeds.some(isSpeakableImageEmbed);
 }
 
 export function sanitizeSpeechContent(input) {
@@ -91,9 +97,9 @@ export function sanitizeSpeechContent(input) {
 export function buildSpeakableMessage(message) {
   const content = sanitizeSpeechContent(message?.content ?? '');
   const attachments = new Map(
-    [...(message?.attachments?.entries?.() ?? [])].filter(([, attachment]) => isImageAttachment(attachment))
+    [...(message?.attachments?.entries?.() ?? [])].filter(([, attachment]) => isSpeakableImageAttachment(attachment))
   );
-  const embeds = [...(message?.embeds ?? [])].filter(isImageEmbed);
+  const embeds = [...(message?.embeds ?? [])].filter(isSpeakableImageEmbed);
 
   const hasMention = DISCORD_MENTION_PATTERN.test(content) || /(^|\s)@(everyone|here)(?=\s|$|[.,!?;:])/iu.test(content);
   const hasNormalText = /[\p{L}\p{N}]/u.test(content);
@@ -111,4 +117,10 @@ export function buildSpeakableMessage(message) {
   };
 }
 
-export const __test = { stripUnicodeEmoji, stripBareDomains, isLikelyFileToken, isImageAttachment, isImageEmbed };
+export const __test = {
+  stripUnicodeEmoji,
+  stripBareDomains,
+  isLikelyFileToken,
+  isImageAttachment: isSpeakableImageAttachment,
+  isImageEmbed: isSpeakableImageEmbed
+};

@@ -160,3 +160,17 @@ test('sanitizer removes non-chat payloads without damaging nearby words', () => 
   assert.equal(sanitizeSpeechContent('weh [buka ni](https://example.com) bro'), 'weh bro');
   assert.equal(sanitizeSpeechContent('cek service.tech/status sekarang'), 'cek sekarang');
 });
+
+test('preprocess itself reuses canonical policy and cannot resurrect non-chat payloads', () => {
+  const speech = prepareSpeechVariants(makeMessage({
+    content: 'hello 😄 example.xyz `npm install discord.js`',
+    attachments: [
+      { name: 'clip.mp4', contentType: 'video/mp4' },
+      { name: 'notes.pdf', contentType: 'application/pdf' }
+    ],
+    embeds: [{ type: 'gifv', url: 'https://giphy.com/x' }]
+  }), guildSettings);
+  assert.match(speech.geminiText, /^hello[.!?]?$/iu);
+  assert.doesNotMatch(speech.geminiText, /example|npm|discord|hantar (?:video|fail|GIF|link)/iu);
+  assert.doesNotMatch(speech.googleText, /example|npm|discord|hantar (?:video|fail|GIF|link)/iu);
+});
