@@ -1,0 +1,24 @@
+Malay TTS Bot v0.23.28 - /ask TTS Hotfix
+
+What changed
+- Fixed /ask frequently falling through to Google Malay TTS even after Gemini 3.1 exact TTS had already produced valid audio.
+- Gemini 3.1 exact TTS now treats the audio model-output step.stop event as the end of completed audio instead of waiting for delayed interaction.completed metadata.
+- After first audio, only real audio chunks refresh the exact-TTS stall timer. Non-audio SSE/status traffic can no longer keep a stuck buffered /ask request alive until the old 54-second absolute provider wall.
+- If buffered Gemini 3.1 TTS genuinely stalls or fails, /ask now gives Google Malay TTS a fresh configured fallback window instead of inheriting an exhausted first-audio budget.
+- /status now separates /ask Gemini first-audio timeout, post-audio stall timeout, and fresh Google fallback timeout so the diagnostics match actual runtime behavior.
+- Added regression coverage for delayed final metadata, non-audio SSE chatter after first audio, and exhausted-budget Google fallback.
+
+Expected /ask speech path
+- Normal case: Gemini 3.1 Flash TTS reads the generated /ask answer.
+- Failure case: Gemini 3.1 Flash TTS -> Google Malay TTS.
+- Conversational Gemini 3.1 Live and Gemini 2.5 Live remain intentionally excluded from /ask so they cannot answer/react to the already-generated text instead of reading it verbatim.
+
+Preserved behavior
+- Normal Discord chat remains Gemini 3.1 Flash Live -> Gemini 2.5 Native Audio Live -> Gemini 3.1 Flash TTS -> Google Malay TTS.
+- Normal first-audio windows remain 2500/1600/1600ms, overall first-audio budget remains 7000ms, and normal Google reserve remains 1200ms.
+- /ask Gemini 3.1 first-audio timeout remains 4000ms; exact-TTS audio-stall timeout remains 2500ms; fresh Google fallback uses the configured 3500ms window.
+- /ask still buffers exact TTS before playback so incomplete Gemini audio is not played.
+- Strict no-added-words prompts, FIFO queue ownership, STOP TTS, privacy controls and the approved six Gemini voices are unchanged.
+
+Upgrade
+Preserve only .env and data\guilds.json from the old install. Do not copy old runtime caches, logs, locks, node_modules, or config/settings.json over the new release. Extract the v0.23.28 Clean package to C:\Malay-TTS-Bot, restore .env and data\guilds.json, then run setup-clean.cmd.
