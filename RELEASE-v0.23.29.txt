@@ -1,0 +1,25 @@
+Malay TTS Bot v0.23.29 - /ask Gemini TTS Completed-Response Fix
+
+What changed
+- Fixed the remaining /ask failure where Gemini 3.1 exact TTS could receive valid audio but keep the streaming Interactions request open until the old 54-second absolute timeout, causing Google TTS to speak very late.
+- /ask now uses a completed-response Gemini 3.1 Flash TTS Interactions request instead of streaming SSE into a local buffer.
+- The /ask Gemini request uses stream:false, response_format audio, and store:false, then reads the completed inline audio result before playback.
+- The completed-response Gemini 3.1 TTS attempt is bounded to 10 seconds. If it genuinely fails or times out, /ask falls back to Google Malay TTS with its existing fresh fallback window.
+- /status now reports the real /ask buffered Gemini timeout instead of showing streaming first-audio and audio-stall timers that no longer apply to /ask.
+- Added regression coverage proving /ask selects completed-response mode while normal exact-TTS fallback remains streaming.
+
+Expected /ask speech path
+- Normal case: Gemini 3.1 Flash TTS reads the generated /ask answer from a completed audio response.
+- Failure case: Gemini 3.1 Flash TTS -> Google Malay TTS.
+- Gemini 3.1 Live and Gemini 2.5 Live remain intentionally excluded from /ask.
+
+Preserved behavior
+- Normal Discord chat remains Gemini 3.1 Flash Live -> Gemini 2.5 Native Audio Live -> Gemini 3.1 Flash TTS -> Google Malay TTS.
+- Normal Gemini 3.1 Live code and timing behavior are unchanged.
+- Normal exact Gemini TTS fallback remains streaming with the existing short fallback window.
+- Normal first-audio windows remain 2500/1600/1600ms, overall first-audio budget remains 7000ms, and normal Google reserve remains 1200ms.
+- /ask still requires complete Gemini TTS audio before playback, preserving the no-partial-answer safety behavior.
+- Strict no-added-words prompts, FIFO queue ownership, STOP TTS, privacy controls and the approved six Gemini voices are unchanged.
+
+Upgrade
+Preserve only .env and data\guilds.json from the old install. Do not copy old runtime caches, logs, locks, node_modules, or config/settings.json over the new release. Extract the v0.23.29 Clean package to C:\Malay-TTS-Bot, restore .env and data\guilds.json, then run setup-clean.cmd.
