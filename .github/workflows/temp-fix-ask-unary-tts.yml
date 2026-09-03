@@ -27,15 +27,18 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
-          def replace_once(path, old, new):
-              p = Path(path)
-              text = p.read_text(encoding='utf-8')
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f'{path}: expected one replacement anchor, got {count}')
-              p.write_text(text.replace(old, new, 1), encoding='utf-8')
+          def read(path):
+              return Path(path).read_text(encoding='utf-8')
 
-          gemini_insert = r'''function extractBufferedAudio(interaction) {
+          def write(path, text):
+              Path(path).write_text(text, encoding='utf-8')
+
+          # Provider: add a completed-response (non-streaming) Interactions TTS path.
+          gemini = read('src/providers/gemini.js')
+          marker = 'async function startStreamingRequest(fetchImpl, text, voiceName, apiKey, options) {'
+          if gemini.count(marker) != 1:
+              raise SystemExit('gemini streaming function anchor mismatch')
+          buffered_provider = r'''function extractBufferedAudio(interaction) {
             const direct = interaction?.output_audio ?? interaction?.outputAudio;
             if (direct?.data) return direct;
 
@@ -64,9 +67,8 @@ jobs:
             const maxOutputAudioMs = Math.max(2_000, Math.min(finiteNumber(options.maxOutputAudioMs, 45_000), 60_000));
             const maxAudioBytes = Math.max(256_000, Math.min(finiteNumber(options.maxAudioBytes, Math.ceil(24_000 * 2 * maxOutputAudioMs / 1000 * 1.25)), 16 * 1024 * 1024));
             const linked = linkedController(options.signal, timeoutMs);
-            let response;
             try {
-              response = await fetchImpl(ENDPOINT, {
+              const response = await fetchImpl(ENDPOINT, {
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/json',
@@ -125,8 +127,7 @@ jobs:
                 throw error;
               }
 
-              const mimeType = audio.mime_type || audio.mimeType || null;
-              const detected = sniffAudioFormat(audioBuffer, mimeType);
+              const detected = sniffAudioFormat(audioBuffer, audio.mime_type || audio.mimeType || null);
               return {
                 audioBuffer,
                 audioFormat: detected.format,
@@ -147,37 +148,29 @@ jobs:
           }
 
           '''
-          replace_once(
-              'src/providers/gemini.js',
-              'async function startStreamingRequest(fetchImpl, text, voiceName, apiKey, options) {',
-              gemini_insert + 'async function startStreamingRequest(fetchImpl, text, voiceName, apiKey, options) {'
-          )
-          replace_once(
-              'src/providers/gemini.js',
-              "    try { return await startStreamingRequest(fetchImpl, text, voiceName, apiKey, options); }",
-              "    try {\n      return options.streaming === false\n        ? await startBufferedRequest(fetchImpl, text, voiceName, apiKey, options)\n        : await startStreamingRequest(fetchImpl, text, voiceName, apiKey, options);\n    }"
-          )
-          replace_once(
-              'src/providers/gemini.js',
-              'export const __test = { makeBoundary, buildSpeechTurn, parseSseBlock, sniffAudioFormat, cancellationError, sanitizeHttpErrorDetail };',
-              'export const __test = { makeBoundary, buildSpeechTurn, parseSseBlock, sniffAudioFormat, cancellationError, sanitizeHttpErrorDetail, extractBufferedAudio };'
-          )
+          gemini = gemini.replace(marker, buffered_provider + marker, 1)
+          dispatch_old = "    try { return await startStreamingRequest(fetchImpl, text, voiceName, apiKey, options); }"
+          dispatch_new = "    try {\n      return options.streaming === false\n        ? await startBufferedRequest(fetchImpl, text, voiceName, apiKey, options)\n        : await startStreamingRequest(fetchImpl, text, voiceName, apiKey, options);\n    }"
+          if gemini.count(dispatch_old) != 1:
+              raise SystemExit('gemini synthesize dispatch anchor mismatch')
+          gemini = gemini.replace(dispatch_old, dispatch_new, 1)
+          old_export = 'export const __test = { makeBoundary, buildSpeechTurn, parseSseBlock, sniffAudioFormat, cancellationError, sanitizeHttpErrorDetail };'
+          new_export = 'export const __test = { makeBoundary, buildSpeechTurn, parseSseBlock, sniffAudioFormat, cancellationError, sanitizeHttpErrorDetail, extractBufferedAudio };'
+          if gemini.count(old_export) != 1:
+              raise SystemExit('gemini test export anchor mismatch')
+          gemini = gemini.replace(old_export, new_export, 1)
+          write('src/providers/gemini.js', gemini)
 
-          replace_once(
-              'src/tts.js',
-              'const FALLBACK_QUOTA_BACKOFF_SECONDS = 30 * 60;',
-              'const FALLBACK_QUOTA_BACKOFF_SECONDS = 30 * 60;\nconst ASK_EXACT_BUFFERED_TIMEOUT_MS = 10_000;'
-          )
-          old = '''function exactFirstAudioWindowCap(context = {}, health = healthOptions()) {
-            // Explicit skipLive is the dedicated exact-TTS path used by /ask. Normal
-            // Live-first chat keeps the short exact fallback window for latency.
-            return context.skipLive === true
-              ? Math.max(500, Number(settings.geminiTts?.timeoutMs) || 4000)
-              : health.exactFirstAudioMs;
-          }
-          '''
-          new = old + '''
-          function isBufferedExactContext(context = {}) {
+          # Orchestrator: /ask gets a bounded 10s completed-response request; normal paths stay unchanged.
+          tts = read('src/tts.js')
+          const_anchor = 'const FALLBACK_QUOTA_BACKOFF_SECONDS = 30 * 60;'
+          if tts.count(const_anchor) != 1:
+              raise SystemExit('tts constant anchor mismatch')
+          tts = tts.replace(const_anchor, const_anchor + '\nconst ASK_EXACT_BUFFERED_TIMEOUT_MS = 10_000;', 1)
+
+          function_start = tts.index('function exactFirstAudioWindowCap(context = {}, health = healthOptions()) {')
+          insert_at = tts.index('\nfunction stepValue(', function_start)
+          helpers = '''\nfunction isBufferedExactContext(context = {}) {
             return context.skipLive === true && context.liveStreamOutput === false;
           }
 
@@ -186,23 +179,11 @@ jobs:
             return exactFirstAudioWindowCap(context, health);
           }
           '''
-          replace_once('src/tts.js', old, new)
+          tts = tts[:insert_at] + helpers + tts[insert_at:]
 
-          old_exact_options = '''function exactOptions(signal, windowMs, apiKey) {
-            return {
-              apiKey,
-              model: settings.geminiTts?.model,
-              timeoutMs: Math.max(500, Math.min(Number(settings.geminiTts?.timeoutMs) || 4000, windowMs)),
-              streamIdleTimeoutMs: Number(settings.geminiTts?.streamIdleTimeoutMs) || 2500,
-              maxOutputAudioMs: Number(settings.geminiTts?.maxOutputAudioMs) || 45_000,
-              retryCount: 0,
-              retryDelayMs: settings.geminiTts?.retryDelayMs,
-              profile: exactProfile(),
-              signal
-            };
-          }
-          '''
-          new_exact_options = '''function exactOptions(signal, windowMs, apiKey, context = {}) {
+          exact_start = tts.index('function exactOptions(signal, windowMs, apiKey) {')
+          google_start = tts.index('\nfunction googleOptions(', exact_start)
+          exact_options = '''function exactOptions(signal, windowMs, apiKey, context = {}) {
             const buffered = isBufferedExactContext(context);
             return {
               apiKey,
@@ -219,31 +200,18 @@ jobs:
             };
           }
           '''
-          replace_once('src/tts.js', old_exact_options, new_exact_options)
+          tts = tts[:exact_start] + exact_options + tts[google_start:]
 
-          old_block = '''  if (requestGeminiUsable && !burstBypass() && !geminiAuthDisabled && settings.geminiTts?.enabled !== false) {
-            const rem = remaining();
-            const exactWindowCap = exactFirstAudioWindowCap(context, health);
-            const window = Math.min(Number(settings.geminiTts?.timeoutMs) || 4000, exactWindowCap, Math.max(350, rem - health.googleReserveMs));
-            let exact = await runAttempt({
-              key: 'exactTts', providerName: 'gemini-3.1-tts', windowMs: window, parentSignal, attempts,
-              factory: (signal) => synthesizeGemini(value, voice, exactOptions(signal, window, requestApiKey)),
-              priority: attemptPriority,
-              apiKeySlot: requestApiKeySlot,
-              deferBudgetUntilGeminiSlot: deferGeminiBudgetForPrefetch,
-              onLimiterWait: creditLimiterWait
-            });
-            exact = await bufferSelected(exact, 'gemini-3.1-tts');
-            if (exact.result) return generatedResult(exact.result, 'gemini-3.1-tts', exact.elapsed, (exact.firstAudioAt ?? performance.now()) - started, attempts);
-          }
-          '''
-          new_block = '''  if (requestGeminiUsable && !burstBypass() && !geminiAuthDisabled && settings.geminiTts?.enabled !== false) {
+          synth_start = tts.index('export async function synthesize(text, context = {}) {')
+          exact_block_start = tts.index("  if (requestGeminiUsable && !burstBypass() && !geminiAuthDisabled && settings.geminiTts?.enabled !== false) {", synth_start)
+          exact_block_end = tts.index('\n  if (hasGemini && burstBypass()) {', exact_block_start)
+          exact_block = '''  if (requestGeminiUsable && !burstBypass() && !geminiAuthDisabled && settings.geminiTts?.enabled !== false) {
             const rem = remaining();
             const bufferedExact = isBufferedExactContext(context);
             const exactWindowCap = exactAttemptWindowMs(context, health);
-            // /ask already requires a complete audio result before playback. Use the
-            // documented unary Interactions TTS request instead of streaming into a
-            // buffer, and give that completed-response request one bounded window.
+            // /ask already requires complete audio before playback. Use a completed
+            // Interactions TTS response instead of streaming SSE into a local buffer.
+            // Normal chat's exact fallback remains streaming and keeps its old window.
             const window = bufferedExact
               ? exactWindowCap
               : Math.min(Number(settings.geminiTts?.timeoutMs) || 4000, exactWindowCap, Math.max(350, rem - health.googleReserveMs));
@@ -259,37 +227,43 @@ jobs:
             if (exact.result) return generatedResult(exact.result, 'gemini-3.1-tts', exact.elapsed, (exact.firstAudioAt ?? performance.now()) - started, attempts);
           }
           '''
-          replace_once('src/tts.js', old_block, new_block)
-          replace_once(
-              'src/tts.js',
-              '    geminiExactTtsEnabled: settings.geminiTts?.enabled !== false,',
-              '    geminiExactTtsEnabled: settings.geminiTts?.enabled !== false,\n    askExactBufferedTimeoutMs: ASK_EXACT_BUFFERED_TIMEOUT_MS,'
-          )
-          replace_once(
-              'src/tts.js',
-              'export const __test = { makeBudgetError, googleFallbackWindowMs, setProviderFailure, recordRunawayMidstreamFailure, recordIsolatedLiveMidstreamFailure, shouldIsolateLiveMidstreamFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, runAttempt, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };',
-              'export const __test = { makeBudgetError, googleFallbackWindowMs, setProviderFailure, recordRunawayMidstreamFailure, recordIsolatedLiveMidstreamFailure, shouldIsolateLiveMidstreamFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, exactAttemptWindowMs, exactOptions, isBufferedExactContext, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, runAttempt, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };'
-          )
+          tts = tts[:exact_block_start] + exact_block + tts[exact_block_end:]
 
-          replace_once(
-              'src/commands.js',
-              "            `First-audio budget ${settings.geminiLive?.firstAudioBudgetMs}ms • windows ${settings.providerHealth?.primaryFirstAudioMs}/${settings.providerHealth?.fallbackFirstAudioMs}/${settings.providerHealth?.exactFirstAudioMs}ms • /ask 3.1 first ≤${settings.geminiTts?.timeoutMs}ms • audio stall ≤${settings.geminiTts?.streamIdleTimeoutMs}ms • fresh Google ≤${settings.googleTts?.timeoutMs}ms`,",
-              "            `First-audio budget ${settings.geminiLive?.firstAudioBudgetMs}ms • windows ${settings.providerHealth?.primaryFirstAudioMs}/${settings.providerHealth?.fallbackFirstAudioMs}/${settings.providerHealth?.exactFirstAudioMs}ms • /ask 3.1 buffered ≤${provider.askExactBufferedTimeoutMs}ms • fresh Google ≤${settings.googleTts?.timeoutMs}ms`,"
-          )
+          status_anchor = '    geminiExactTtsEnabled: settings.geminiTts?.enabled !== false,'
+          if tts.count(status_anchor) != 1:
+              raise SystemExit('tts status anchor mismatch')
+          tts = tts.replace(status_anchor, status_anchor + '\n    askExactBufferedTimeoutMs: ASK_EXACT_BUFFERED_TIMEOUT_MS,', 1)
+          old_test_export = 'export const __test = { makeBudgetError, googleFallbackWindowMs, setProviderFailure, recordRunawayMidstreamFailure, recordIsolatedLiveMidstreamFailure, shouldIsolateLiveMidstreamFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, runAttempt, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };'
+          new_test_export = 'export const __test = { makeBudgetError, googleFallbackWindowMs, setProviderFailure, recordRunawayMidstreamFailure, recordIsolatedLiveMidstreamFailure, shouldIsolateLiveMidstreamFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, exactAttemptWindowMs, exactOptions, isBufferedExactContext, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, runAttempt, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };'
+          if tts.count(old_test_export) != 1:
+              raise SystemExit('tts test export anchor mismatch')
+          tts = tts.replace(old_test_export, new_test_export, 1)
+          write('src/tts.js', tts)
 
+          commands = read('src/commands.js')
+          old_status = '`First-audio budget ${settings.geminiLive?.firstAudioBudgetMs}ms • windows ${settings.providerHealth?.primaryFirstAudioMs}/${settings.providerHealth?.fallbackFirstAudioMs}/${settings.providerHealth?.exactFirstAudioMs}ms • /ask 3.1 first ≤${settings.geminiTts?.timeoutMs}ms • audio stall ≤${settings.geminiTts?.streamIdleTimeoutMs}ms • fresh Google ≤${settings.googleTts?.timeoutMs}ms`'
+          new_status = '`First-audio budget ${settings.geminiLive?.firstAudioBudgetMs}ms • windows ${settings.providerHealth?.primaryFirstAudioMs}/${settings.providerHealth?.fallbackFirstAudioMs}/${settings.providerHealth?.exactFirstAudioMs}ms • /ask 3.1 buffered ≤${provider.askExactBufferedTimeoutMs}ms • fresh Google ≤${settings.googleTts?.timeoutMs}ms`'
+          if commands.count(old_status) != 1:
+              raise SystemExit('status timing anchor mismatch')
+          write('src/commands.js', commands.replace(old_status, new_status, 1))
+
+          ask_response = read('src/ask-response.js')
           old_comment = '''      // /ask prioritizes a complete audible answer over first-chunk latency.
                 // Buffer the dedicated Gemini TTS stream before playback so a midstream
                 // failure is detected inside synthesize() and can fall through to Google
-                // instead of being accepted on first audio and then dying silently.
-                forceBuffered: true'''
+                // instead of being accepted on first audio and then dying silently.'''.replace('                //', '      //')
           new_comment = '''      // /ask prioritizes a complete audible answer over first-chunk latency.
-                // This flag selects the completed-response Gemini 3.1 TTS request rather
-                // than streaming SSE into a buffer. If that bounded request fails, the
-                // deterministic Google Malay fallback is used.
-                forceBuffered: true'''
-          replace_once('src/ask-response.js', old_comment, new_comment)
+                // This selects a bounded completed-response Gemini 3.1 TTS request instead
+                // of streaming SSE into a buffer. On failure it falls through to Google.'''.replace('                //', '      //')
+          if ask_response.count(old_comment) != 1:
+              raise SystemExit('ask-response comment anchor mismatch')
+          write('src/ask-response.js', ask_response.replace(old_comment, new_comment, 1))
 
-          new_test = r'''test('Gemini 3.1 TTS supports unary completed-audio interactions for buffered /ask', async () => {
+          request_test = read('test/gemini-tts-request.test.js')
+          test_marker = "test('Gemini TTS surfaces sanitized plain-text HTTP 400 details', async () => {"
+          if request_test.count(test_marker) != 1:
+              raise SystemExit('gemini request test anchor mismatch')
+          unary_test = r'''test('Gemini 3.1 TTS supports completed-audio Interactions for buffered /ask', async () => {
             const apiKey = 'fixture-unary-key';
             const pcm = Buffer.from([1, 2, 3, 4, 5, 6]);
             let captured = null;
@@ -298,24 +272,14 @@ jobs:
               return new Response(JSON.stringify({
                 id: 'int_fixture',
                 status: 'completed',
-                steps: [{
-                  type: 'model_output',
-                  content: [{
-                    type: 'audio',
-                    data: pcm.toString('base64'),
-                    mime_type: 'audio/l16',
-                    sample_rate: 24000,
-                    channels: 1
-                  }]
-                }]
+                steps: [{ type: 'model_output', content: [{
+                  type: 'audio', data: pcm.toString('base64'), mime_type: 'audio/l16', sample_rate: 24000, channels: 1
+                }] }]
               }), { status: 200, headers: { 'content-type': 'application/json' } });
             };
 
             const generated = await synthesizeGemini('baca jawapan ini', 'Gacrux', {
-              apiKey,
-              fetchImpl,
-              streaming: false,
-              bufferedTimeoutMs: 1000
+              apiKey, fetchImpl, streaming: false, bufferedTimeoutMs: 2500
             });
 
             assert.equal(captured.url, endpoint);
@@ -334,13 +298,13 @@ jobs:
           });
 
           '''
-          replace_once(
-              'test/gemini-tts-request.test.js',
-              "test('Gemini TTS surfaces sanitized plain-text HTTP 400 details', async () => {",
-              new_test + "test('Gemini TTS surfaces sanitized plain-text HTTP 400 details', async () => {"
-          )
+          write('test/gemini-tts-request.test.js', request_test.replace(test_marker, unary_test + test_marker, 1))
 
-          new_watchdog_test = r'''test('/ask exact TTS uses bounded unary mode while normal exact fallback stays streaming', () => {
+          watchdog = read('test/ask-buffered-tts-watchdog.test.js')
+          watchdog_marker = "test('/ask Google fallback receives a fresh first-audio window after exact TTS exhausts the normal budget', () => {"
+          if watchdog.count(watchdog_marker) != 1:
+              raise SystemExit('ask watchdog test anchor mismatch')
+          route_test = r'''test('/ask exact TTS uses bounded completed-response mode while normal exact fallback stays streaming', () => {
             assert.equal(tts.__test.isBufferedExactContext({ skipLive: true, liveStreamOutput: false }), true);
             assert.equal(tts.__test.exactAttemptWindowMs({ skipLive: true, liveStreamOutput: false }), 10000);
             assert.equal(tts.__test.exactAttemptWindowMs({ skipLive: true, liveStreamOutput: true }), 4000);
@@ -353,11 +317,7 @@ jobs:
           });
 
           '''
-          replace_once(
-              'test/ask-buffered-tts-watchdog.test.js',
-              "test('/ask Google fallback receives a fresh first-audio window after exact TTS exhausts the normal budget', () => {",
-              new_watchdog_test + "test('/ask Google fallback receives a fresh first-audio window after exact TTS exhausts the normal budget', () => {"
-          )
+          write('test/ask-buffered-tts-watchdog.test.js', watchdog.replace(watchdog_marker, route_test + watchdog_marker, 1))
           PY
       - name: Validate
         shell: bash
@@ -371,11 +331,13 @@ jobs:
           const g = fs.readFileSync('src/providers/gemini.js', 'utf8');
           const t = fs.readFileSync('src/tts.js', 'utf8');
           const a = fs.readFileSync('src/ask-response.js', 'utf8');
-          if (!g.includes('async function startBufferedRequest')) throw new Error('unary provider path missing');
-          if (!g.includes('stream: false')) throw new Error('unary Interactions request guard missing');
+          const live = fs.readFileSync('src/providers/gemini-live.js', 'utf8');
+          if (!g.includes('async function startBufferedRequest')) throw new Error('completed-response provider path missing');
+          if (!g.includes('stream: false')) throw new Error('non-streaming Interactions request guard missing');
           if (!t.includes('ASK_EXACT_BUFFERED_TIMEOUT_MS = 10_000')) throw new Error('bounded /ask timeout missing');
-          if (!t.includes('streaming: !buffered')) throw new Error('/ask unary routing missing');
-          if (!a.includes('completed-response Gemini 3.1 TTS request')) throw new Error('/ask lifecycle documentation missing');
+          if (!t.includes('streaming: !buffered')) throw new Error('/ask routing missing');
+          if (!a.includes('bounded completed-response Gemini 3.1 TTS request')) throw new Error('/ask lifecycle documentation missing');
+          if (!live.includes('gemini-3.1-flash-live-preview')) throw new Error('normal 3.1 Live unexpectedly changed');
           NODE
       - name: Commit focused fix
         shell: bash
@@ -384,5 +346,5 @@ jobs:
           git config user.name 'MrEz'
           git config user.email '39240221+Zudin987@users.noreply.github.com'
           git add -A
-          git commit -m 'Fix /ask Gemini TTS with bounded unary audio'
+          git commit -m 'Fix /ask Gemini TTS with bounded completed audio'
           git push origin HEAD:fix/ask-unary-gemini-tts
