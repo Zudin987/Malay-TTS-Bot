@@ -123,9 +123,8 @@ export function buildAskTtsItem(interaction, answer, voiceChannel, voice) {
       // then the deterministic Google fallback.
       skipLive: true,
       // /ask prioritizes a complete audible answer over first-chunk latency.
-      // Buffer the dedicated Gemini TTS stream before playback so a midstream
-      // failure is detected inside synthesize() and can fall through to Google
-      // instead of being accepted on first audio and then dying silently.
+      // This selects a bounded completed-response Gemini 3.1 TTS request instead
+      // of streaming SSE into a buffer. On failure it falls through to Google.
       forceBuffered: true
     }
   };
