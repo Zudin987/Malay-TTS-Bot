@@ -26,18 +26,18 @@ function timeoutAfter(ms, message = 'test timed out') {
 test('half-open probe lease cannot be cleared by a stale older request', () => {
   const state = tts.__test.newProviderState();
   state.consecutiveFailures = 1;
-  const first = tts.__test.beginHalfOpenProbeLease('exactTts', state);
+  const first = tts.__test.beginHalfOpenProbeLease('livePrimary', state);
   assert.equal(first.allowed, true);
   assert.ok(first.token > 0);
-  assert.equal(tts.__test.releaseHalfOpenProbe('exactTts', state, first.token), true);
+  assert.equal(tts.__test.releaseHalfOpenProbe('livePrimary', state, first.token), true);
 
-  const second = tts.__test.beginHalfOpenProbeLease('exactTts', state);
+  const second = tts.__test.beginHalfOpenProbeLease('livePrimary', state);
   assert.equal(second.allowed, true);
   assert.notEqual(second.token, first.token);
-  assert.equal(tts.__test.releaseHalfOpenProbe('exactTts', state, first.token), false);
+  assert.equal(tts.__test.releaseHalfOpenProbe('livePrimary', state, first.token), false);
   assert.equal(state.halfOpenProbeInFlight, true);
   assert.equal(state.halfOpenProbeToken, second.token);
-  assert.equal(tts.__test.releaseHalfOpenProbe('exactTts', state, second.token), true);
+  assert.equal(tts.__test.releaseHalfOpenProbe('livePrimary', state, second.token), true);
 });
 
 test('slower older /ask cannot replace a newer request that was invoked later', async () => {
@@ -156,11 +156,11 @@ test('STOP releases two stuck /ask Gemini slots so next normal 3.1 Live attempt 
   const b = new AbortController();
 
   const first = await tts.__test.runAttempt({
-    key: 'exactTts', providerName: 'gemini-3.1-tts', windowMs: 1000,
+    key: 'livePrimary', providerName: 'gemini-3.1-live', windowMs: 1000,
     parentSignal: a.signal, attempts: [], factory: async () => makeGenerated()
   });
   const second = await tts.__test.runAttempt({
-    key: 'exactTts', providerName: 'gemini-3.1-tts', windowMs: 1000,
+    key: 'livePrimary', providerName: 'gemini-3.1-live', windowMs: 1000,
     parentSignal: b.signal, attempts: [], factory: async () => makeGenerated()
   });
   assert.ok(first.result && second.result);

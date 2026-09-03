@@ -13,12 +13,9 @@ Lightweight design: Gemini first, Google Malay fallback, no local AI model, and 
 5. Run `doctor.cmd` if you want to verify dependencies/audio.
 6. Start the existing **Malay TTS Bot** Task Scheduler task.
 
-Provider order:
+Speech providers: **Gemini 3.1 Flash Live → Google Malay (`google-ms`)**.
 
-1. Gemini 3.1 Flash Live
-2. Gemini 2.5 Native Audio Live
-3. Gemini 3.1 Flash TTS
-4. Google Malay TTS fallback
+Live keeps a fresh one-turn session, a 2500 ms first-audio window and the existing setup timing. Google starts directly after an initial Live failure, with up to its configured 3500 ms first-audio window. The overall first-audio budget remains 7000 ms; there are no intermediate speech providers.
 
 Normal eligible Discord messages remain strict TTS-only and are not treated as questions for the bot to answer. The explicit `/ask` command is the separate opt-in chat-answer path. Usernames are spoken separately with Google Malay TTS.
 
@@ -42,11 +39,9 @@ Speaker usernames can be made faster in `config/settings.json` without regenerat
 
 Use `/ask question:<text>` when you intentionally want an AI answer. It uses `gemini-3.1-flash-lite` with minimal thinking and returns one compact public Discord embed, normally 1–3 short sentences. The embed title is `<display name> ask` and contains **Question** and **AI reply** fields. The model itself still cannot request images, embeds, tables, or long article-style output.
 
-After the embed is posted, the same AI reply is also queued through the normal TTS provider chain when the asker is in the active normal voice channel. Only the AI answer is spoken: not the username, title, question, or field labels. `/ttsoptout`, voice-channel ownership, queue limits, and normal Live-first read-aloud safeguards still apply. TTS failure never removes the already-posted answer. Bot-authored `/ask` replies are ignored by the normal MessageCreate TTS handler.
+After the embed is posted, the same answer is queued when the asker is in the active normal voice channel. Only the answer is spoken. Google Malay reads this already-generated text literally: Live's self-transcription cannot independently prove lexical fidelity, so `/ask` does not send the answer to a conversational speech model. TTS failure never removes the posted answer. Bot replies remain excluded from normal MessageCreate speech.
 
-For `/ask` playback, conversational Live is intentionally skipped. Dedicated Gemini 3.1 TTS gets its configured first-audio timeout (4 seconds by default) before Google fallback; normal Live-first chat keeps the shorter exact-TTS fallback window.
-
-`/ask` uses the existing Gemini key round-robin. Under normal conditions it makes one text-generation request per command. If the selected slot fails with a credential-auth error, that slot is disabled and `/ask` retries the next healthy configured key. Quota/rate-limit and model/project permission failures do not rotate to another key inside the same `/ask`; speaking the resulting answer uses the normal TTS provider chain.
+Text generation uses the existing ten-slot Gemini round-robin. Credential-auth failures disable only the bad slot and try the next available key within one request deadline. Quota and model/project permission failures do not rotate keys to retry the same request.
 
 ## Gemini API keys
 
@@ -64,7 +59,7 @@ The bot accepts up to ten configured Gemini API keys in `.env`:
 - `GEMINI_API_KEY_10`
 - `GEMINI_API_KEY_SLOT=1` — optional starting slot for the round-robin sequence
 
-With all ten slots populated, TTS items use keys in this order: **1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 1**. A single TTS item keeps its assigned key for its whole Gemini provider chain, so a 3.1 Live failure that falls through to 2.5 Live or 3.1 TTS does not switch keys mid-message. The next TTS item advances to the next configured slot. Empty slots are skipped.
+With all ten slots populated, Gemini requests use **1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 1**. Each Live speech item selects one key. Empty slots are skipped; duplicate credentials count once. Google speech does not consume a Gemini key selection.
 
 If a key is rejected as invalid/revoked, that slot is removed from the runtime round-robin until `/restarttts`. Quota/rate-limit failures do not trigger an immediate second-key retry inside the same message; the normal provider cooldown and Google fallback still apply.
 
@@ -84,8 +79,12 @@ Useful commands: `/ask`, `/join`, `/leave`, `/speaker`, `/changevoice`, `/name`,
 
 ## Gemini read-aloud prompting
 
-Gemini Live and Gemini TTS intentionally use separate prompt profiles. Live uses a short system instruction plus a nonce-delimited transcript. Gemini TTS uses a TTS-specific system instruction and an AUDIO PROFILE / DIRECTOR'S NOTES / TRANSCRIPT request structure. Both keep the Discord message inside collision-resistant per-request speech boundaries.
+Live uses a strict system instruction and a collision-resistant, nonce-delimited transcript. The working normal-chat protocol and six voices remain: Charon, Orus, Schedar, Gacrux, Vindemiatrix and Despina. The prompt forbids answering, rewriting and additional words; generative speech still cannot provide an absolute lexical guarantee. `/ask` and recovery tails use Google when literal delivery is required.
 
-Square-bracket spans are neutralized for Gemini audio only, for example `[laughs]` becomes `(laughs)` before synthesis. This preserves the lexical text while preventing Gemini's native square-bracket audio-tag syntax from turning user text into a performance direction. Google Malay fallback input is unchanged.
+Square-bracket spans are neutralized for Gemini audio, for example `[laughs]` becomes `(laughs)`. This preserves their words without treating them as performance tags. Google input is unchanged.
 
-The editable defaults live under `geminiLive.profile` and `geminiTts.profile` in `config/settings.json`. Keep fidelity rules in `systemInstruction` and delivery/accent/pacing rules in `stylePrompt`.
+Edit `geminiLive.profile` in `config/settings.json`: fidelity belongs in `systemInstruction`; delivery/accent/pacing belongs in `stylePrompt`. Provider fallback defaults use the same profile definitions as missing-file startup.
+
+Eligible normal speech remains text, resolved mentions and `hantar gambar` for images. Links, non-image files, GIFs, videos, emoji and code-only payloads remain silent. One Discord message remains one logical speech item.
+
+Historical release notes are available on [GitHub Releases](../../releases).

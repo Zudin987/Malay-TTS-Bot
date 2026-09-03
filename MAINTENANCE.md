@@ -4,7 +4,7 @@
 
 GitHub is the source of truth for development. `main` is the latest stable/released source. Use focused `feature/...` or `fix/...` branches and pull requests for non-trivial changes; do not treat the old `develop` branch as an active integration source unless it is explicitly reintroduced and synchronized.
 
-Current stable baseline: **v0.23.26 - Speech Filter Hardening**.
+See `package.json` and GitHub Releases for the stable version.
 
 `main` should be protected in GitHub so pull requests and required CI checks are enforced before merges. Repository-side documentation/workflows are not a substitute for GitHub branch protection.
 
@@ -12,9 +12,10 @@ Current stable baseline: **v0.23.26 - Speech Filter Hardening**.
 
 When trade-offs are required, use this order:
 
-1. **Latency**
-2. **Speech quality / correctness**
-3. **Features**
+1. **Reliability and bounded ownership**
+2. **No added or invented words**
+3. **Low first-audio latency**
+4. **Smooth UX, simple architecture and low resource use**
 
 Never add heavy local AI, local TTS models, or architecture that materially increases first-audio latency/RAM without an explicit decision.
 
@@ -32,16 +33,11 @@ Never add heavy local AI, local TTS models, or architecture that materially incr
 
 ## Provider chain
 
-Keep the normal preference order unless an explicit release changes it:
+Normal chat uses **Gemini 3.1 Flash Live → Google Malay (`google-ms`)**. These are the only two speech providers. Preserve normal fresh one-turn Live setup and first-audio timing.
 
-1. Gemini 3.1 Flash Live
-2. Gemini 2.5 Native Audio Live
-3. Gemini 3.1 Flash TTS
-4. Google Malay TTS fallback
+`/ask` generates text with its existing Gemini text model, then reads the displayed answer literally with Google. Live is not a verified literal reader: its own transcription is not independent evidence of audio fidelity. Recovery tails also use Google or already-generated PCM.
 
-`/ask` is the exception: its already-generated answer skips conversational Live and uses dedicated Gemini 3.1 TTS first, then Google Malay TTS fallback. Provider health may temporarily bypass known-bad/quota-limited providers, but recovery must restore the normal preference order after a successful half-open probe.
-
-A single TTS item keeps one selected Gemini key throughout its Gemini failover chain. The runtime accepts up to ten configured slots and ignores duplicate credentials rather than treating the same key as independent quota/auth capacity.
+The runtime accepts **ten environment key slots** and keeps **round-robin selection**. One Live speech item uses one selected key; duplicate credentials do not create independent quota/auth capacity. Quota failures do not trigger same-request key rotation. Environment key changes require a full process restart.
 
 ## Voice / speaker architecture
 

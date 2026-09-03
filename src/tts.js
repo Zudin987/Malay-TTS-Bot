@@ -2,9 +2,8 @@ import fs from 'node:fs/promises';
 import { performance } from 'node:perf_hooks';
 import { settings, tempDir } from './config.js';
 import { getOrAssignUserTtsVoice } from './store.js';
-import { synthesizeGemini, GEMINI_VOICES } from './providers/gemini.js';
+import { GEMINI_VOICES } from './voices.js';
 import { resetGeminiLiveSessions, synthesizeGeminiLive } from './providers/gemini-live.js';
-import { shouldBypassGeminiLiveForReadAloud } from './live-readaloud-guard.js';
 import { streamGoogleMalay } from './providers/google.js';
 import { cancellationError, deadlineSignal, discardGenerated, raceWithSignal, throwIfAborted } from './cancellation.js';
 import {
@@ -30,12 +29,9 @@ function newProviderState() {
 
 const providerStates = {
   livePrimary: newProviderState(),
-  liveFallback: newProviderState(),
-  exactTts: newProviderState(),
   google: newProviderState()
 };
 let geminiAuthDisabled = false;
-let sharedLiveTransportUntil = 0;
 let geminiBurstUntil = 0;
 let globalHalfOpenProbeKey = null;
 let halfOpenProbeSequence = 0;
@@ -48,9 +44,6 @@ const geminiLimiter = {
   active: 0, queue: [], sequence: 0,
   waitCount: 0, totalWaitMs: 0, maxWaitMs: 0, prefetchDeferredCount: 0
 };
-const FALLBACK_QUOTA_BACKOFF_AFTER = 3;
-const FALLBACK_QUOTA_BACKOFF_SECONDS = 30 * 60;
-const ASK_EXACT_BUFFERED_TIMEOUT_MS = 10_000;
 
 export async function cleanupTempDirectory() {
   await fs.rm(tempDir, { recursive: true, force: true });
@@ -85,27 +78,7 @@ function healthOptions() {
     burstBypassSeconds: Math.max(10, Number(raw.burstBypassSeconds) || 45),
     globalGeminiConcurrency: Math.max(1, Math.min(4, Math.floor(Number(raw.globalGeminiConcurrency) || 2))),
     primaryFirstAudioMs: Math.max(800, Number(raw.primaryFirstAudioMs) || 2500),
-    fallbackFirstAudioMs: Math.max(600, Number(raw.fallbackFirstAudioMs) || 1600),
-    exactFirstAudioMs: Math.max(600, Number(raw.exactFirstAudioMs) || 1600),
-    googleReserveMs: Math.max(500, Number(raw.googleReserveMs) || 1200)
   };
-}
-
-function exactFirstAudioWindowCap(context = {}, health = healthOptions()) {
-  // Explicit skipLive is the dedicated exact-TTS path used by /ask. Normal
-  // Live-first chat keeps the short exact fallback window for latency.
-  return context.skipLive === true
-    ? Math.max(500, Number(settings.geminiTts?.timeoutMs) || 4000)
-    : health.exactFirstAudioMs;
-}
-
-function isBufferedExactContext(context = {}) {
-  return context.skipLive === true && context.liveStreamOutput === false;
-}
-
-function exactAttemptWindowMs(context = {}, health = healthOptions()) {
-  if (isBufferedExactContext(context)) return ASK_EXACT_BUFFERED_TIMEOUT_MS;
-  return exactFirstAudioWindowCap(context, health);
 }
 
 function stepValue(count, first, second, third) {
@@ -115,14 +88,8 @@ function stepValue(count, first, second, third) {
 }
 
 function providerConfigSignature(key) {
-  if (key === 'exactTts') {
-    return JSON.stringify({ model: settings.geminiTts?.model, profile: exactProfile() });
-  }
   if (key === 'livePrimary') {
     return JSON.stringify({ model: settings.geminiLive?.primaryModel, profile: settings.geminiLive?.profile });
-  }
-  if (key === 'liveFallback') {
-    return JSON.stringify({ model: settings.geminiLive?.fallbackModel, profile: settings.geminiLive?.profile });
   }
   return 'google';
 }
@@ -146,7 +113,6 @@ function remainingSeconds(state) {
 
 function stateOptions(key) {
   if (key === 'google') return { quotaCooldownSeconds: 30, authCooldownSeconds: 30, errorCooldownSeconds: 8 };
-  if (key === 'exactTts') return settings.geminiTts ?? {};
   return settings.geminiLive ?? {};
 }
 
@@ -267,15 +233,9 @@ function setProviderFailure(state, error, options = {}, { phase = 'initial', bud
     reason = 'daily quota (until Pacific reset)';
     kind = 'daily quota';
   } else if (error?.quotaLike) {
-    const persistentFallbackQuota = key === 'liveFallback'
-      && state.consecutiveQuotaFailures >= FALLBACK_QUOTA_BACKOFF_AFTER;
-    seconds = persistentFallbackQuota
-      ? FALLBACK_QUOTA_BACKOFF_SECONDS
-      : stepValue(state.consecutiveQuotaFailures, health.quotaFirstSeconds, health.quotaSecondSeconds, health.quotaThirdSeconds);
+    seconds = stepValue(state.consecutiveQuotaFailures, health.quotaFirstSeconds, health.quotaSecondSeconds, health.quotaThirdSeconds);
     state.cooldownUntil = Math.max(state.cooldownUntil, now + seconds * 1000);
-    reason = persistentFallbackQuota
-      ? `quota/rate limit x${state.consecutiveQuotaFailures} (fallback probe in ${seconds}s)`
-      : `quota/rate limit x${state.consecutiveQuotaFailures}`;
+    reason = `quota/rate limit x${state.consecutiveQuotaFailures}`;
     kind = 'quota/rate limit';
   } else if (error?.configLike && key !== 'google') {
     state.disabledUntilConfigChange = true;
@@ -389,13 +349,8 @@ function makeBudgetError(provider, ms) {
   return error;
 }
 
-function googleFallbackWindowMs(context = {}, remainingMs = 0) {
-  const remaining = Math.max(0, Number(remainingMs) || 0);
-  if (context?.skipLive !== true) return remaining;
-  // /ask intentionally uses dedicated exact TTS before Google. Buffering exact
-  // audio can outlive the normal 7s first-audio budget, so a failed exact stream
-  // must not starve the deterministic fallback with a 0ms window.
-  return Math.max(500, Math.min(Number(settings.googleTts?.timeoutMs) || 3500, 15_000));
+function googleFallbackWindowMs(_context = {}, remainingMs = 0) {
+  return Math.min(Math.max(0, Number(remainingMs) || 0), Number(settings.googleTts?.timeoutMs) || 3500);
 }
 
 function attemptSignal(parentSignal, maxMs, providerName) {
@@ -436,7 +391,7 @@ function recordRunawayMidstreamFailure(state, error, key = 'unknown', probeToken
 }
 
 function shouldIsolateLiveMidstreamFailure(error, key) {
-  if (key !== 'livePrimary' && key !== 'liveFallback') return false;
+  if (key !== 'livePrimary') return false;
   // Quota, credentials, access and invalid request/config errors describe a
   // real condition that can affect the next fresh Live turn. Temporary errors
   // after first audio do not: each Discord message opens a new one-turn session.
@@ -506,14 +461,20 @@ async function bufferGenerated(generated, parentSignal = null) {
   const parts = [];
   let bytes = 0;
   let abortListener = null;
-  if (parentSignal) {
-    abortListener = () => { try { generated.cancel?.(parentSignal.reason || new Error('Buffered TTS cancelled.')); } catch {} };
-    if (parentSignal.aborted) abortListener();
-    else parentSignal.addEventListener('abort', abortListener, { once: true });
-  }
+  const lifetime = deadlineSignal(parentSignal, 65_000, makeBudgetError('Buffered speech completion', 65_000));
+  const signal = lifetime.signal;
+  abortListener = () => discardGenerated(generated, signal.reason);
+  if (signal.aborted) abortListener();
+  else signal.addEventListener('abort', abortListener, { once: true });
   try {
-    for await (const chunk of generated.audioStream) {
-      const part = Buffer.from(chunk);
+    throwIfAborted(signal);
+    const iterator = generated.audioStream[Symbol.asyncIterator]();
+    while (true) {
+      const { value, done } = await raceWithSignal(iterator.next(), signal);
+      throwIfAborted(signal);
+      if (done) break;
+      const part = Buffer.from(value);
+      if (bytes + part.length > 8 * 1024 * 1024) throw new Error('Buffered speech exceeded 8 MiB.');
       parts.push(part);
       bytes += part.length;
     }
@@ -528,17 +489,13 @@ async function bufferGenerated(generated, parentSignal = null) {
       completion: generated.completion,
       cancel: generated.cancel
     };
+  } catch (error) {
+    discardGenerated(generated, error);
+    throw error;
   } finally {
-    if (parentSignal && abortListener) parentSignal.removeEventListener?.('abort', abortListener);
+    signal.removeEventListener('abort', abortListener);
+    lifetime.cleanup();
   }
-}
-
-function exactProfile() {
-  const profile = { ...(settings.geminiTts?.profile ?? {}) };
-  // Keep the old top-level overrides working for existing custom installs.
-  if (typeof settings.geminiTts?.systemInstruction === 'string' && settings.geminiTts.systemInstruction.trim()) profile.systemInstruction = settings.geminiTts.systemInstruction.trim();
-  if (typeof settings.geminiTts?.stylePrompt === 'string' && settings.geminiTts.stylePrompt.trim()) profile.stylePrompt = settings.geminiTts.stylePrompt.trim();
-  return profile;
 }
 
 function liveOptions(model, signal, windowMs, apiKey) {
@@ -551,8 +508,6 @@ function liveOptions(model, signal, windowMs, apiKey) {
     streamIdleTimeoutMs: Number(settings.geminiLive?.streamIdleTimeoutMs) || 2800,
     audioEndGraceMs: Number(settings.geminiLive?.audioEndGraceMs) || 650,
     setupTimeoutMs: Math.max(500, Math.min(configuredSetup, Math.max(500, windowMs * 0.55))),
-    retryCount: 0,
-    retryDelayMs: settings.geminiLive?.retryDelayMs,
     profile: settings.geminiLive?.profile,
     maxOutputAudioMs: settings.geminiLive?.maxOutputAudioMs,
     outputAudioTranscription: settings.geminiLive?.outputAudioTranscription !== false,
@@ -561,26 +516,9 @@ function liveOptions(model, signal, windowMs, apiKey) {
   };
 }
 
-function exactOptions(signal, windowMs, apiKey, context = {}) {
-  const buffered = isBufferedExactContext(context);
-  return {
-    apiKey,
-    model: settings.geminiTts?.model,
-    timeoutMs: Math.max(500, Math.min(Number(settings.geminiTts?.timeoutMs) || 4000, windowMs)),
-    bufferedTimeoutMs: buffered ? windowMs : undefined,
-    streaming: !buffered,
-    streamIdleTimeoutMs: Number(settings.geminiTts?.streamIdleTimeoutMs) || 2500,
-    maxOutputAudioMs: Number(settings.geminiTts?.maxOutputAudioMs) || 45_000,
-    retryCount: 0,
-    retryDelayMs: settings.geminiTts?.retryDelayMs,
-    profile: exactProfile(),
-    signal
-  };
-}
-
 function googleOptions(signal, windowMs) {
   const configuredChunk = Number(settings.googleTts?.chunkLength);
-  const maximumLength = !Number.isFinite(configuredChunk) || configuredChunk === 180 ? 200 : configuredChunk;
+  const maximumLength = !Number.isFinite(configuredChunk) ? 200 : configuredChunk;
   return {
     timeoutMs: Math.max(250, Math.min(Number(settings.googleTts?.timeoutMs) || 3500, windowMs)),
     completionTimeoutMs: Number(settings.googleTts?.completionTimeoutMs) || 12_000,
@@ -605,7 +543,7 @@ function maybeDisableGeminiAuth(error, apiKeySlot = null) {
 
   geminiAuthDisabled = true;
   const now = Date.now();
-  for (const state of [providerStates.livePrimary, providerStates.liveFallback, providerStates.exactTts]) {
+  for (const state of [providerStates.livePrimary]) {
     state.cooldownUntil = Number.MAX_SAFE_INTEGER;
     state.cooldownReason = 'API key/access (until restart)';
     state.lastError = sanitizeProviderError(error);
@@ -613,20 +551,6 @@ function maybeDisableGeminiAuth(error, apiKeySlot = null) {
     state.lastFailureAt = now;
   }
   return true;
-}
-
-function shareLiveTransportFailure(error) {
-  // Quota/auth/access failures are model/project-specific until proven otherwise.
-  // Only genuine shared network/setup failures suppress both Live models.
-  if (!error?.setupLike || !error?.transportLike || error?.quotaLike || error?.authLike || error?.permissionLike) return;
-  const seconds = Math.max(5, Number(settings.geminiLive?.errorCooldownSeconds) || 15);
-  sharedLiveTransportUntil = Math.max(sharedLiveTransportUntil, Date.now() + seconds * 1000);
-  const state = providerStates.liveFallback;
-  state.cooldownUntil = Math.max(state.cooldownUntil, sharedLiveTransportUntil);
-  state.cooldownReason = 'shared Live transport/setup';
-  state.lastError = `Skipped after primary Live setup/transport failure: ${sanitizeProviderError(error)}`;
-  state.lastFailureKind = 'transport/setup';
-  state.lastFailureAt = Date.now();
 }
 
 async function runAttempt({
@@ -765,151 +689,81 @@ async function runAttempt({
 }
 
 export async function synthesize(text, context = {}) {
+  throwIfAborted(context.signal);
   const value = String(text ?? '').trim();
   if (!value) throw new Error('TTS received empty text.');
   const googleValue = String(context.googleText ?? value).trim() || value;
   const started = performance.now();
   const voice = chooseVoice(context);
   const attempts = [];
-  const bypassLiveForReadAloud = context.skipLive !== true && shouldBypassGeminiLiveForReadAloud(value);
-  const skipLive = context.skipLive === true || bypassLiveForReadAloud;
-  const geminiKey = nextGeminiApiKey();
-  const requestApiKey = geminiKey?.key ?? null;
-  const requestApiKeySlot = geminiKey?.slot ?? null;
-  let requestGeminiUsable = Boolean(requestApiKey) && !geminiAuthDisabled;
-  const configuredBudget = Math.max(2500, Math.min(Number(settings.geminiLive?.firstAudioBudgetMs) || 7000, 20_000));
+  // Generated answers and recovery tails require literal speech. Live has no
+  // independent lexical guarantee, so these use the deterministic fallback.
+  const skipLive = context.skipLive === true || context.literal === true;
+  const geminiKey = !skipLive && settings.geminiLive?.enabled !== false ? nextGeminiApiKey() : null;
+  const configuredBudget = Number(settings.geminiLive?.firstAudioBudgetMs) || 7000;
   const deadline = started + configuredBudget;
   let deferredLimiterWaitMs = 0;
   const remaining = () => Math.max(0, deadline - performance.now() + deferredLimiterWaitMs);
   const parentSignal = context.signal;
-  const bufferProviders = context.liveStreamOutput === false;
-  const attemptPriority = context.prefetch === true ? 1 : 0;
-  const deferGeminiBudgetForPrefetch = context.prefetch === true;
-  const creditLimiterWait = (ms) => {
-    if (deferGeminiBudgetForPrefetch) deferredLimiterWaitMs += Math.max(0, Number(ms) || 0);
-  };
-  const burstBypass = () => Date.now() < geminiBurstUntil;
-
+  const health = healthOptions();
   const bufferSelected = async (attempt, providerName) => {
-    if (!attempt.result || !bufferProviders) return attempt;
+    if (!attempt.result || context.liveStreamOutput !== false) return attempt;
     try {
       return { ...attempt, result: await bufferGenerated(attempt.result, parentSignal) };
     } catch (error) {
-      if (parentSignal?.aborted) throw (parentSignal.reason instanceof Error ? parentSignal.reason : error);
+      throwIfAborted(parentSignal);
+      discardGenerated(attempt.result, error);
       attempts.push({ provider: providerName, outcome: 'buffer-failure', ms: 0, error: String(error?.name || 'Error') });
       return { ...attempt, result: null, error };
     }
   };
-  const hasGemini = Boolean(requestApiKey) && !geminiAuthDisabled;
-  const health = healthOptions();
-
-  if (bypassLiveForReadAloud) {
-    noteSkipped(providerStates.livePrimary);
-    noteSkipped(providerStates.liveFallback);
-    attempts.push({ provider: 'gemini-3.1-live', outcome: 'literal-readaloud-guard', ms: 0 });
-    attempts.push({ provider: 'gemini-2.5-live', outcome: 'literal-readaloud-guard', ms: 0 });
-  }
-
-  if (requestGeminiUsable && !burstBypass() && settings.geminiLive?.enabled !== false && skipLive !== true && Date.now() >= sharedLiveTransportUntil) {
-    const rem = remaining();
-    const window = Math.min(Number(settings.geminiLive?.firstAudioTimeoutMs) || 3500, health.primaryFirstAudioMs, Math.max(500, rem - (health.fallbackFirstAudioMs + health.exactFirstAudioMs + health.googleReserveMs)));
+  if (geminiKey?.key && !geminiAuthDisabled && Date.now() >= geminiBurstUntil) {
+    // Preserve the working 2500ms Live first window and setup cap. Removing
+    // intermediate providers leaves Google its complete configured window.
+    const window = Math.min(Number(settings.geminiLive?.firstAudioTimeoutMs) || 3500, health.primaryFirstAudioMs,
+      Math.max(0, remaining() - (Number(settings.googleTts?.timeoutMs) || 3500)));
     let primary = await runAttempt({
       key: 'livePrimary', providerName: 'gemini-3.1-live', windowMs: window, parentSignal, attempts,
-      factory: (signal) => synthesizeGeminiLive(value, voice, liveOptions(String(settings.geminiLive?.primaryModel || 'gemini-3.1-flash-live-preview'), signal, window, requestApiKey)),
-      priority: attemptPriority,
-      apiKeySlot: requestApiKeySlot,
-      deferBudgetUntilGeminiSlot: deferGeminiBudgetForPrefetch,
-      onLimiterWait: creditLimiterWait
+      factory: (signal) => synthesizeGeminiLive(value, voice, liveOptions(settings.geminiLive.primaryModel, signal, window, geminiKey.key)),
+      priority: context.prefetch === true ? 1 : 0,
+      apiKeySlot: geminiKey.slot,
+      deferBudgetUntilGeminiSlot: context.prefetch === true,
+      promotionSignal: context.promotionSignal,
+      onLimiterWait: (ms) => { deferredLimiterWaitMs += Math.max(0, Number(ms) || 0); }
     });
+    throwIfAborted(parentSignal);
     primary = await bufferSelected(primary, 'gemini-3.1-live');
     if (primary.result) return generatedResult(primary.result, 'gemini-3.1-live', primary.elapsed, (primary.firstAudioAt ?? performance.now()) - started, attempts);
-    if (primary.error?.authLike) requestGeminiUsable = false;
-    if (primary.error?.setupLike && primary.error?.transportLike) shareLiveTransportFailure(primary.error);
-    if (primary.error?.runawayLike) sharedLiveTransportUntil = Math.max(sharedLiveTransportUntil, Date.now() + 5000);
+  } else if (geminiKey?.key && Date.now() < geminiBurstUntil) {
+    noteSkipped(providerStates.livePrimary);
+    attempts.push({ provider: 'gemini-3.1-live', outcome: 'burst-bypass', ms: 0 });
   }
 
-  if (requestGeminiUsable && !burstBypass() && !geminiAuthDisabled && settings.geminiLive?.enabled !== false && settings.geminiLive?.fallbackEnabled !== false && skipLive !== true && Date.now() >= sharedLiveTransportUntil) {
-    const rem = remaining();
-    const window = Math.min(Number(settings.geminiLive?.firstAudioTimeoutMs) || 3500, health.fallbackFirstAudioMs, Math.max(400, rem - (health.exactFirstAudioMs + health.googleReserveMs)));
-    let fallbackLive = await runAttempt({
-      key: 'liveFallback', providerName: 'gemini-2.5-live', windowMs: window, parentSignal, attempts,
-      factory: (signal) => synthesizeGeminiLive(value, voice, liveOptions(String(settings.geminiLive?.fallbackModel || 'gemini-2.5-flash-native-audio-preview-12-2025'), signal, window, requestApiKey)),
-      priority: attemptPriority,
-      apiKeySlot: requestApiKeySlot,
-      deferBudgetUntilGeminiSlot: deferGeminiBudgetForPrefetch,
-      onLimiterWait: creditLimiterWait
-    });
-    fallbackLive = await bufferSelected(fallbackLive, 'gemini-2.5-live');
-    if (fallbackLive.result) return generatedResult(fallbackLive.result, 'gemini-2.5-live', fallbackLive.elapsed, (fallbackLive.firstAudioAt ?? performance.now()) - started, attempts);
-    if (fallbackLive.error?.authLike) requestGeminiUsable = false;
-  } else if (requestGeminiUsable && !burstBypass() && skipLive !== true && settings.geminiLive?.fallbackEnabled !== false && Date.now() < sharedLiveTransportUntil) {
-    noteSkipped(providerStates.liveFallback);
-    attempts.push({ provider: 'gemini-2.5-live', outcome: 'shared-transport-skip', ms: 0 });
-  }
-
-  if (requestGeminiUsable && !burstBypass() && !geminiAuthDisabled && settings.geminiTts?.enabled !== false) {
-  const rem = remaining();
-  const bufferedExact = isBufferedExactContext(context);
-  const exactWindowCap = exactAttemptWindowMs(context, health);
-  // /ask already requires complete audio before playback. Use a completed
-  // Interactions TTS response instead of streaming SSE into a local buffer.
-  // Normal chat's exact fallback remains streaming and keeps its old window.
-  const window = bufferedExact
-    ? exactWindowCap
-    : Math.min(Number(settings.geminiTts?.timeoutMs) || 4000, exactWindowCap, Math.max(350, rem - health.googleReserveMs));
-  let exact = await runAttempt({
-    key: 'exactTts', providerName: 'gemini-3.1-tts', windowMs: window, parentSignal, attempts,
-    factory: (signal) => synthesizeGemini(value, voice, exactOptions(signal, window, requestApiKey, context)),
-    priority: attemptPriority,
-    apiKeySlot: requestApiKeySlot,
-    deferBudgetUntilGeminiSlot: deferGeminiBudgetForPrefetch,
-    onLimiterWait: creditLimiterWait
-  });
-  exact = await bufferSelected(exact, 'gemini-3.1-tts');
-  if (exact.result) return generatedResult(exact.result, 'gemini-3.1-tts', exact.elapsed, (exact.firstAudioAt ?? performance.now()) - started, attempts);
-}
-
-  if (hasGemini && burstBypass()) {
-    // A burst can become active in the middle of this same message after two
-    // quota failures. Only count providers that were actually bypassed; do not
-    // retroactively mark already-attempted providers as skipped.
-    const alreadySeen = new Set(attempts.map((entry) => entry.provider));
-    for (const [key, providerName] of [['livePrimary', 'gemini-3.1-live'], ['liveFallback', 'gemini-2.5-live'], ['exactTts', 'gemini-3.1-tts']]) {
-      if (alreadySeen.has(providerName)) continue;
-      noteSkipped(providerStates[key]);
-      attempts.push({ provider: providerName, outcome: 'burst-bypass', ms: 0 });
-    }
-  }
-
+  throwIfAborted(parentSignal);
   const googleWindow = googleFallbackWindowMs(context, remaining());
-  if (googleWindow < 250) {
-    noteSkipped(providerStates.google, { budget: true });
-    attempts.push({ provider: 'google-ms-fallback', outcome: 'budget-skip', ms: 0 });
-    const error = makeBudgetError('Google Malay TTS', googleWindow);
-    error.attempts = attempts;
-    throw error;
-  }
   let google = await runAttempt({
-    key: 'google', providerName: 'google-ms-fallback', windowMs: googleWindow, parentSignal, attempts, geminiProvider: false,
+    key: 'google', providerName: 'google-ms', windowMs: googleWindow, parentSignal, attempts, geminiProvider: false,
     factory: (signal) => streamGoogleMalay(googleValue, googleOptions(signal, googleWindow))
   });
-  google = await bufferSelected(google, 'google-ms-fallback');
+  throwIfAborted(parentSignal);
+  google = await bufferSelected(google, 'google-ms');
   if (!google.result) {
     const error = google.error || new Error('All TTS providers failed before first audio.');
     error.attempts = attempts;
     throw error;
   }
-  const result = generatedResult({ ...google.result, voice: 'Google Malay' }, 'google-ms-fallback', google.elapsed, (google.firstAudioAt ?? performance.now()) - started, attempts);
+  const result = generatedResult({ ...google.result, voice: 'Google Malay' }, 'google-ms', google.elapsed, (google.firstAudioAt ?? performance.now()) - started, attempts);
   result.assignedGeminiVoice = voice;
   return result;
 }
 
-function publicProviderState(state) {
+function publicProviderState(state, unavailableReason = null) {
   const seconds = remainingSeconds(state);
   const disabled = Boolean(state.disabledUntilConfigChange);
   const displaySeconds = seconds != null && seconds >= 1e9 ? null : seconds;
   return {
-    ready: !disabled && (seconds ?? 0) <= 0,
+    ready: !unavailableReason && !disabled && !state.halfOpenProbeInFlight && (seconds ?? 0) <= 0,
+    unavailableReason,
     disabled,
     disabledReason: disabled ? state.disabledReason : null,
     cooldownActive: !disabled && (seconds ?? 0) > 0,
@@ -939,7 +793,6 @@ export function restartTtsRuntime() {
   resetGeminiLiveSessions();
   resetGeminiApiKeyRoundRobin();
   geminiAuthDisabled = false;
-  sharedLiveTransportUntil = 0;
   geminiBurstUntil = 0;
   globalHalfOpenProbeKey = null;
   recentGeminiQuotaFailures.length = 0;
@@ -960,15 +813,13 @@ export function getTtsProviderStatus() {
     geminiKeyRoundRobin: geminiKeys,
     geminiAuthDisabled,
     geminiLiveEnabled: settings.geminiLive?.enabled !== false,
-    geminiExactTtsEnabled: settings.geminiTts?.enabled !== false,
-    askExactBufferedTimeoutMs: ASK_EXACT_BUFFERED_TIMEOUT_MS,
     voices: configuredVoices(),
     primaryModel: String(settings.geminiLive?.primaryModel || 'gemini-3.1-flash-live-preview'),
-    fallbackLiveModel: String(settings.geminiLive?.fallbackModel || 'gemini-2.5-flash-native-audio-preview-12-2025'),
-    exactTtsModel: String(settings.geminiTts?.model || 'gemini-3.1-flash-tts-preview'),
-    livePrimary: publicProviderState(providerStates.livePrimary),
-    liveFallback: publicProviderState(providerStates.liveFallback),
-    exactTts: publicProviderState(providerStates.exactTts),
+    livePrimary: publicProviderState(providerStates.livePrimary,
+      settings.geminiLive?.enabled === false ? 'disabled in settings'
+        : !geminiKeys.availableCount ? 'no usable key'
+          : geminiAuthDisabled ? 'authentication disabled'
+            : Date.now() < geminiBurstUntil ? 'quota burst bypass' : null),
     google: publicProviderState(providerStates.google),
     geminiSuccessCount,
     fallbackCount,
@@ -985,4 +836,4 @@ export function getTtsProviderStatus() {
 }
 
 
-export const __test = { makeBudgetError, googleFallbackWindowMs, setProviderFailure, recordRunawayMidstreamFailure, recordIsolatedLiveMidstreamFailure, shouldIsolateLiveMidstreamFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, exactAttemptWindowMs, exactOptions, isBufferedExactContext, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, runAttempt, providerConfigSignature, beginHalfOpenProbe, beginHalfOpenProbeLease, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };
+export const __test = { makeBudgetError, googleFallbackWindowMs, setProviderFailure, recordRunawayMidstreamFailure, recordIsolatedLiveMidstreamFailure, shouldIsolateLiveMidstreamFailure, newProviderState, bufferGenerated, healthOptions, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, runAttempt, providerConfigSignature, beginHalfOpenProbe, beginHalfOpenProbeLease, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };
