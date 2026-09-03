@@ -209,6 +209,115 @@ function cancellationError(reason) {
   return error;
 }
 
+function extractBufferedAudio(interaction) {
+  const direct = interaction?.output_audio ?? interaction?.outputAudio;
+  if (direct?.data) return direct;
+
+  const steps = Array.isArray(interaction?.steps) ? interaction.steps : [];
+  for (let stepIndex = steps.length - 1; stepIndex >= 0; stepIndex -= 1) {
+    const step = steps[stepIndex];
+    if (step?.type !== 'model_output') continue;
+    const content = Array.isArray(step.content) ? step.content : (step?.content ? [step.content] : []);
+    for (let contentIndex = content.length - 1; contentIndex >= 0; contentIndex -= 1) {
+      const item = content[contentIndex];
+      if (item?.type === 'audio' && item?.data) return item;
+    }
+  }
+
+  const outputs = Array.isArray(interaction?.outputs) ? interaction.outputs : [];
+  for (let index = outputs.length - 1; index >= 0; index -= 1) {
+    const item = outputs[index];
+    if (item?.type === 'audio' && item?.data) return item;
+  }
+  return null;
+}
+
+async function startBufferedRequest(fetchImpl, text, voiceName, apiKey, options) {
+  const model = String(options.model || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+  const timeoutMs = Math.max(2_000, Math.min(finiteNumber(options.bufferedTimeoutMs, 10_000), 30_000));
+  const maxOutputAudioMs = Math.max(2_000, Math.min(finiteNumber(options.maxOutputAudioMs, 45_000), 60_000));
+  const maxAudioBytes = Math.max(256_000, Math.min(finiteNumber(options.maxAudioBytes, Math.ceil(24_000 * 2 * maxOutputAudioMs / 1000 * 1.25)), 16 * 1024 * 1024));
+  const linked = linkedController(options.signal, timeoutMs);
+  try {
+    const response = await fetchImpl(ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        'x-goog-api-key': apiKey,
+        'Api-Revision': API_REVISION
+      },
+      body: JSON.stringify({
+        model,
+        input: buildPrompt(text, options.profile),
+        response_format: { type: 'audio' },
+        generation_config: { speech_config: [{ voice: normalizeVoiceName(voiceName) }] },
+        stream: false,
+        store: false
+      }),
+      signal: linked.controller.signal
+    });
+
+    if (!response.ok) {
+      let rawBody = '';
+      try { rawBody = await response.text(); } catch {}
+      let body = null;
+      try { body = rawBody ? JSON.parse(rawBody) : null; } catch {}
+      const apiStatus = body?.error?.status ?? null;
+      const detail = sanitizeHttpErrorDetail(body?.error?.message ?? rawBody, apiKey);
+      throw new GeminiTtsHttpError(response.status, apiStatus, detail);
+    }
+
+    let interaction;
+    try { interaction = await response.json(); }
+    catch (error) {
+      const parseError = new Error(`Gemini TTS buffered response was not valid JSON: ${error?.message || error}`);
+      parseError.name = 'GeminiTtsInvalidResponseError';
+      parseError.retryable = true;
+      parseError.transportLike = true;
+      throw parseError;
+    }
+
+    const status = String(interaction?.status ?? '').trim();
+    if (status && status !== 'completed') {
+      const error = new Error(`Gemini TTS buffered interaction ended with status ${status}.`);
+      error.name = 'GeminiTtsIncompleteError';
+      error.retryable = ['failed', 'incomplete', 'budget_exceeded'].includes(status);
+      error.quotaLike = status === 'budget_exceeded';
+      throw error;
+    }
+
+    const audio = extractBufferedAudio(interaction);
+    if (!audio?.data) throw new Error('Gemini TTS buffered response did not contain inline audio.');
+    const audioBuffer = Buffer.from(String(audio.data), 'base64');
+    if (!audioBuffer.length) throw new Error('Gemini TTS buffered response contained empty audio.');
+    if (audioBuffer.length > maxAudioBytes) {
+      const error = new Error(`Gemini TTS exceeded the ${maxAudioBytes}-byte output safety limit.`);
+      error.name = 'GeminiTtsOutputLimitError';
+      error.runawayLike = true;
+      throw error;
+    }
+
+    const detected = sniffAudioFormat(audioBuffer, audio.mime_type || audio.mimeType || null);
+    return {
+      audioBuffer,
+      audioFormat: detected.format,
+      mimeType: detected.mimeType,
+      sampleRate: Math.max(8_000, Math.min(Math.floor(finiteNumber(audio.sample_rate ?? audio.sampleRate, 24_000)), 96_000)),
+      channels: Math.max(1, Math.min(Math.floor(finiteNumber(audio.channels, 1)), 2)),
+      voice: normalizeVoiceName(voiceName),
+      model,
+      streamed: false,
+      usage: interaction?.usage ?? null
+    };
+  } catch (error) {
+    if (linked.controller.signal.aborted && linked.controller.signal.reason) throw linked.controller.signal.reason;
+    throw classifyNetworkError(error, true);
+  } finally {
+    linked.cleanup();
+  }
+}
+
 async function startStreamingRequest(fetchImpl, text, voiceName, apiKey, options) {
   const model = String(options.model || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
   const timeoutMs = Math.max(500, Math.min(finiteNumber(options.timeoutMs, DEFAULT_TIMEOUT_MS), 60_000));
@@ -445,7 +554,11 @@ export async function synthesizeGemini(text, voiceName, options = {}) {
   const retryCount = Math.floor(Math.max(0, Math.min(finiteNumber(options.retryCount, 0), 2)));
   const retryDelayMs = Math.max(0, Math.min(finiteNumber(options.retryDelayMs, 100), 2_000));
   for (let attempt = 0; ; attempt += 1) {
-    try { return await startStreamingRequest(fetchImpl, text, voiceName, apiKey, options); }
+    try {
+      return options.streaming === false
+        ? await startBufferedRequest(fetchImpl, text, voiceName, apiKey, options)
+        : await startStreamingRequest(fetchImpl, text, voiceName, apiKey, options);
+    }
     catch (error) {
       if (options.signal?.aborted || attempt >= retryCount || !isRetryableNetworkError(error) || error?.quotaLike || error?.authLike) throw error;
       console.warn(`[gemini-3.1-tts] Temporary setup failure (${error.message}); retry ${attempt + 1}/${retryCount}.`);
@@ -454,4 +567,4 @@ export async function synthesizeGemini(text, voiceName, options = {}) {
   }
 }
 
-export const __test = { makeBoundary, buildSpeechTurn, parseSseBlock, sniffAudioFormat, cancellationError, sanitizeHttpErrorDetail };
+export const __test = { makeBoundary, buildSpeechTurn, parseSseBlock, sniffAudioFormat, cancellationError, sanitizeHttpErrorDetail, extractBufferedAudio };

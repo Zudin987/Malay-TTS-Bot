@@ -48,6 +48,7 @@ const geminiLimiter = {
 };
 const FALLBACK_QUOTA_BACKOFF_AFTER = 3;
 const FALLBACK_QUOTA_BACKOFF_SECONDS = 30 * 60;
+const ASK_EXACT_BUFFERED_TIMEOUT_MS = 10_000;
 
 export async function cleanupTempDirectory() {
   await fs.rm(tempDir, { recursive: true, force: true });
@@ -94,6 +95,15 @@ function exactFirstAudioWindowCap(context = {}, health = healthOptions()) {
   return context.skipLive === true
     ? Math.max(500, Number(settings.geminiTts?.timeoutMs) || 4000)
     : health.exactFirstAudioMs;
+}
+
+function isBufferedExactContext(context = {}) {
+  return context.skipLive === true && context.liveStreamOutput === false;
+}
+
+function exactAttemptWindowMs(context = {}, health = healthOptions()) {
+  if (isBufferedExactContext(context)) return ASK_EXACT_BUFFERED_TIMEOUT_MS;
+  return exactFirstAudioWindowCap(context, health);
 }
 
 function stepValue(count, first, second, third) {
@@ -526,11 +536,14 @@ function liveOptions(model, signal, windowMs, apiKey) {
   };
 }
 
-function exactOptions(signal, windowMs, apiKey) {
+function exactOptions(signal, windowMs, apiKey, context = {}) {
+  const buffered = isBufferedExactContext(context);
   return {
     apiKey,
     model: settings.geminiTts?.model,
     timeoutMs: Math.max(500, Math.min(Number(settings.geminiTts?.timeoutMs) || 4000, windowMs)),
+    bufferedTimeoutMs: buffered ? windowMs : undefined,
+    streaming: !buffered,
     streamIdleTimeoutMs: Number(settings.geminiTts?.streamIdleTimeoutMs) || 2500,
     maxOutputAudioMs: Number(settings.geminiTts?.maxOutputAudioMs) || 45_000,
     retryCount: 0,
@@ -769,20 +782,26 @@ export async function synthesize(text, context = {}) {
   }
 
   if (requestGeminiUsable && !burstBypass() && !geminiAuthDisabled && settings.geminiTts?.enabled !== false) {
-    const rem = remaining();
-    const exactWindowCap = exactFirstAudioWindowCap(context, health);
-    const window = Math.min(Number(settings.geminiTts?.timeoutMs) || 4000, exactWindowCap, Math.max(350, rem - health.googleReserveMs));
-    let exact = await runAttempt({
-      key: 'exactTts', providerName: 'gemini-3.1-tts', windowMs: window, parentSignal, attempts,
-      factory: (signal) => synthesizeGemini(value, voice, exactOptions(signal, window, requestApiKey)),
-      priority: attemptPriority,
-      apiKeySlot: requestApiKeySlot,
-      deferBudgetUntilGeminiSlot: deferGeminiBudgetForPrefetch,
-      onLimiterWait: creditLimiterWait
-    });
-    exact = await bufferSelected(exact, 'gemini-3.1-tts');
-    if (exact.result) return generatedResult(exact.result, 'gemini-3.1-tts', exact.elapsed, (exact.firstAudioAt ?? performance.now()) - started, attempts);
-  }
+  const rem = remaining();
+  const bufferedExact = isBufferedExactContext(context);
+  const exactWindowCap = exactAttemptWindowMs(context, health);
+  // /ask already requires complete audio before playback. Use a completed
+  // Interactions TTS response instead of streaming SSE into a local buffer.
+  // Normal chat's exact fallback remains streaming and keeps its old window.
+  const window = bufferedExact
+    ? exactWindowCap
+    : Math.min(Number(settings.geminiTts?.timeoutMs) || 4000, exactWindowCap, Math.max(350, rem - health.googleReserveMs));
+  let exact = await runAttempt({
+    key: 'exactTts', providerName: 'gemini-3.1-tts', windowMs: window, parentSignal, attempts,
+    factory: (signal) => synthesizeGemini(value, voice, exactOptions(signal, window, requestApiKey, context)),
+    priority: attemptPriority,
+    apiKeySlot: requestApiKeySlot,
+    deferBudgetUntilGeminiSlot: deferGeminiBudgetForPrefetch,
+    onLimiterWait: creditLimiterWait
+  });
+  exact = await bufferSelected(exact, 'gemini-3.1-tts');
+  if (exact.result) return generatedResult(exact.result, 'gemini-3.1-tts', exact.elapsed, (exact.firstAudioAt ?? performance.now()) - started, attempts);
+}
 
   if (hasGemini && burstBypass()) {
     // A burst can become active in the middle of this same message after two
@@ -876,6 +895,7 @@ export function getTtsProviderStatus() {
     geminiAuthDisabled,
     geminiLiveEnabled: settings.geminiLive?.enabled !== false,
     geminiExactTtsEnabled: settings.geminiTts?.enabled !== false,
+    askExactBufferedTimeoutMs: ASK_EXACT_BUFFERED_TIMEOUT_MS,
     voices: configuredVoices(),
     primaryModel: String(settings.geminiLive?.primaryModel || 'gemini-3.1-flash-live-preview'),
     fallbackLiveModel: String(settings.geminiLive?.fallbackModel || 'gemini-2.5-flash-native-audio-preview-12-2025'),
@@ -899,4 +919,4 @@ export function getTtsProviderStatus() {
 }
 
 
-export const __test = { makeBudgetError, googleFallbackWindowMs, setProviderFailure, recordRunawayMidstreamFailure, recordIsolatedLiveMidstreamFailure, shouldIsolateLiveMidstreamFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, runAttempt, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };
+export const __test = { makeBudgetError, googleFallbackWindowMs, setProviderFailure, recordRunawayMidstreamFailure, recordIsolatedLiveMidstreamFailure, shouldIsolateLiveMidstreamFailure, newProviderState, bufferGenerated, healthOptions, exactFirstAudioWindowCap, exactAttemptWindowMs, exactOptions, isBufferedExactContext, pacificDailyResetMs, recordGeminiQuotaFailure, providerReady, acquireGeminiSlot, runAttempt, providerConfigSignature, beginHalfOpenProbe, releaseHalfOpenProbe, sanitizeProviderText, sanitizeProviderError };

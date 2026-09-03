@@ -41,6 +41,40 @@ test('Gemini 3.1 TTS uses the documented streaming Interactions request shape', 
   assert.equal(body.store, false);
 });
 
+test('Gemini 3.1 TTS supports completed-audio Interactions for buffered /ask', async () => {
+  const apiKey = 'fixture-unary-key';
+  const pcm = Buffer.from([1, 2, 3, 4, 5, 6]);
+  let captured = null;
+  const fetchImpl = async (url, init) => {
+    captured = { url, init };
+    return new Response(JSON.stringify({
+      id: 'int_fixture',
+      status: 'completed',
+      steps: [{ type: 'model_output', content: [{
+        type: 'audio', data: pcm.toString('base64'), mime_type: 'audio/l16', sample_rate: 24000, channels: 1
+      }] }]
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+
+  const generated = await synthesizeGemini('baca jawapan ini', 'Gacrux', {
+    apiKey, fetchImpl, streaming: false, bufferedTimeoutMs: 2500
+  });
+
+  assert.equal(captured.url, endpoint);
+  assert.equal(captured.init.headers.Accept, 'application/json');
+  const body = JSON.parse(captured.init.body);
+  assert.equal(body.stream, false);
+  assert.equal(body.store, false);
+  assert.deepEqual(body.response_format, { type: 'audio' });
+  assert.deepEqual(generated.audioBuffer, pcm);
+  assert.equal(generated.audioStream, undefined);
+  assert.equal(generated.mimeType, 'audio/l16');
+  assert.equal(generated.audioFormat, 's16le');
+  assert.equal(generated.sampleRate, 24000);
+  assert.equal(generated.channels, 1);
+  assert.equal(generated.streamed, false);
+});
+
 test('Gemini TTS surfaces sanitized plain-text HTTP 400 details', async () => {
   const apiKey = 'another-fixture-secret';
   const fetchImpl = async () => new Response(
