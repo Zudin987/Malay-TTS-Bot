@@ -107,11 +107,16 @@ for (const file of ['config/settings.json', 'config/dictionary.json', 'config/di
 
 if (exists('.env')) {
   const envText = fs.readFileSync(path.join(rootDir, '.env'), 'utf8');
-  for (const key of ['DISCORD_TOKEN', 'DISCORD_CLIENT_ID']) {
-    const match = envText.match(new RegExp(`^\\s*${key}\\s*=\\s*(.+?)\\s*$`, 'm'));
-    if (match?.[1] && !/^(["']?)(?:replace|your|changeme|token|client)[-_ ]/iu.test(match[1])) pass(`${key} is set`);
-    else fail(`${key} is missing/empty in .env`);
-  }
+  const envValue = (key) => envText.match(new RegExp(`^\\s*${key}\\s*=\\s*(.+?)\\s*$`, 'm'))?.[1]?.trim() || '';
+  const usable = (value) => Boolean(value && !/^(["']?)(?:replace|your|changeme|token|client)[-_ ]/iu.test(value));
+
+  const token = envValue('DISCORD_TOKEN');
+  if (usable(token)) pass('DISCORD_TOKEN is set');
+  else fail('DISCORD_TOKEN is missing/empty in .env');
+
+  const clientId = envValue('DISCORD_CLIENT_ID');
+  if (usable(clientId)) pass('DISCORD_CLIENT_ID is set for slash-command deployment');
+  else warn('DISCORD_CLIENT_ID is missing/empty; bot runtime can still run, but deploy-commands.js cannot deploy slash commands');
 
   const gemini = getGeminiApiKeyConfiguration(process.env);
   if (gemini.configuredCount > 0) {
