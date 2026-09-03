@@ -2,7 +2,7 @@
 setlocal
 cd /d C:\Malay-TTS-Bot
 
-echo Malay TTS Bot clean setup v0.23.29
+echo Malay TTS Bot clean setup v0.23.30
 echo.
 
 set "NODE_EXE=C:\Malay-TTS-Bot\runtime\node-v24.19.0-win-x64\node.exe"
