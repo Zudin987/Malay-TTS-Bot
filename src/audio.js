@@ -22,6 +22,7 @@ import {
   waitForSpeakerLabelPcm
 } from './speaker-label.js';
 import { getFfmpegPath } from './ffmpeg.js';
+import { cancellationError, deadlineSignal, raceWithSignal, throwIfAborted } from './cancellation.js';
 
 const states = new Map();
 const DEFAULT_MAX_QUEUED_MESSAGES = 10;
@@ -82,6 +83,8 @@ function createQueueItem(text, metadata = {}) {
     text: String(text),
     generation: null,
     abortController: new AbortController(),
+    foregroundController: new AbortController(),
+    logicalJob: metadata.logicalJob || { terminal: false, cancelled: false, onTerminal: metadata.onTerminal },
     cancelled: false,
     enqueuedAt: performance.now(),
     messageCreatedAt,
@@ -90,6 +93,7 @@ function createQueueItem(text, metadata = {}) {
     voice: metadata.voice ? String(metadata.voice) : null,
     speakerLabel: metadata.speakerLabel ? String(metadata.speakerLabel) : null,
     messageId: metadata.messageId ? String(metadata.messageId) : null,
+    replyMessageId: metadata.replyMessageId ? String(metadata.replyMessageId) : null,
     voiceChannelId: metadata.voiceChannelId ? String(metadata.voiceChannelId) : null,
     speakerResetSeconds: Number(metadata.speakerResetSeconds) || null,
     speakerLabelGeneration: null,
@@ -133,7 +137,7 @@ function getState(guildId) {
     cutoffRecoveryFailures: 0, suspiciousShortOutputs: 0, transcriptCutoffs: 0,
     playbackCutoffs: 0, mirrorReplays: 0, suppressedCutoffReplays: 0,
     completionGraceTimeouts: 0, pipelineFailures: 0, runawayRecoveriesSuppressed: 0, lastSpeakerAnnouncement: null,
-    recoveryEpoch: 0, runSerial: 0
+    recoveryEpoch: 0, runSerial: 0, pendingCompletions: new Set()
   };
   player.on('error', (error) => console.error(`[player:${guildId}]`, error));
   states.set(guildId, state);
@@ -221,8 +225,9 @@ function createPrefetchSpool(generated, signal) {
 }
 
 function startGeneration(guildId, item, { prefetch = false } = {}) {
+  if (!prefetch) item.foregroundController?.abort();
   if (item.generation) return item.generation;
-  if (item.speakerLabel && !item.speakerLabelGeneration) item.speakerLabelGeneration = getSpeakerLabelPcm(item.speakerLabel);
+  if (item.speakerLabel && !item.speakerLabelGeneration) item.speakerLabelGeneration = getSpeakerLabelPcm(item.speakerLabel, { signal: item.abortController.signal });
 
   if (Buffer.isBuffer(item.replayAudioBuffer) && item.replayAudioBuffer.length > 0) {
     item.generationMode = 'buffered-replay';
@@ -246,6 +251,7 @@ function startGeneration(guildId, item, { prefetch = false } = {}) {
     liveStreamOutput: buffered ? false : undefined,
     skipLive: item.skipLive,
     prefetch,
+    promotionSignal: item.foregroundController.signal,
     signal: item.abortController.signal
   });
   item.generation = prefetch && !buffered
@@ -275,8 +281,21 @@ function prefetchNext(guildId, state) {
   }
 }
 
-function cleanupCancelledQueuedItem(item) {
+function finishLogicalJob(item, outcome = 'finished') {
+  const job = item?.logicalJob;
+  if (!job || job.terminal || item.recoveryScheduled) return;
+  job.terminal = true;
+  const callback = job.onTerminal;
+  job.onTerminal = null;
+  try { Promise.resolve(callback?.(outcome)).catch(() => {}); } catch {}
+}
+
+function cleanupCancelledQueuedItem(item, outcome = 'stopped') {
   item.cancelled = true;
+  if (item.logicalJob) item.logicalJob.cancelled = true;
+  // A cancellation also terminalizes an original item with a queued recovery.
+  item.recoveryScheduled = false;
+  finishLogicalJob(item, outcome);
   if (!item.abortController.signal.aborted) item.abortController.abort(cancelledError('Queue item dropped.'));
   if (item.generation) item.generation.then((generated) => cleanupGenerated(generated, { cancel: true })).catch(() => {});
 }
@@ -353,7 +372,7 @@ function mp3DurationMs(buffer) {
   let samples = 0, sampleRate = 0, frames = 0;
   while (offset + 4 <= buffer.length) {
     const h = buffer.readUInt32BE(offset);
-    if ((h & 0xffe00000) !== 0xffe00000) { offset += 1; continue; }
+    if ((h >>> 21) !== 0x7ff) { offset += 1; continue; }
     const versionBits = (h >> 19) & 3;
     const layerBits = (h >> 17) & 3;
     const bitrateIndex = (h >> 12) & 0xf;
@@ -486,12 +505,12 @@ function scheduleRecovery(guildId, state, item, error, { replay = null, fullRetr
   const maximum = getStreamCutoffRecoveryAttempts();
   const recoveryText = String(replacementText || item.text || '').trim();
   const safeResumeFraction = Math.max(0, Math.min(Number(resumeFraction) || 0, 0.98));
-  if (item.cancelled || state.disposed || item.recoveryScheduled || item.recoveryAttempt >= maximum || !recoveryText) return false;
+  if (item.cancelled || item.logicalJob?.cancelled || item.logicalJob?.terminal || state.disposed || item.recoveryScheduled || item.recoveryAttempt >= maximum || !recoveryText) return false;
   if (!fullRetry && !Buffer.isBuffer(replay?.audioBuffer) && !replacementText && safeResumeFraction <= 0) return false;
   const regeneratedTail = Boolean(replacementText || safeResumeFraction > 0);
   const recovery = createQueueItem(recoveryText, {
     messageCreatedAt: item.messageCreatedAt, preprocessMs: item.preprocessMs, userId: item.userId,
-    messageId: item.messageId, voiceChannelId: item.voiceChannelId,
+    messageId: item.messageId, replyMessageId: item.replyMessageId, logicalJob: item.logicalJob, voiceChannelId: item.voiceChannelId,
     voice: item.voice, speakerLabel: item.speakerLabel, speakerResetSeconds: item.speakerResetSeconds,
     googleText: replacementText ? recoveryText : item.googleText,
     verificationText: recoveryText, forceBuffered: true, noPrefetch: item.noPrefetch,
@@ -514,7 +533,7 @@ function scheduleRecovery(guildId, state, item, error, { replay = null, fullRetr
 }
 
 function handleCompletionRecovery(guildId, state, item, generated, playedMs, playbackSpeed, { info = null, error = null, timedOut = false, triggerError = null } = {}) {
-  if (!item || item.cancelled || state.disposed || item.recoveryScheduled) return false;
+  if (!item || item.cancelled || item.logicalJob?.cancelled || item.logicalJob?.terminal || state.disposed || item.recoveryScheduled) return false;
   const staleEpoch = Number(item.recoveryEpoch ?? 0) !== Number(state.recoveryEpoch ?? item.recoveryEpoch ?? 0);
   const staleSerial = Number(item.runSerial || 0) > 0 && Number(state.runSerial || 0) > Number(item.runSerial || 0);
   if (staleEpoch || staleSerial) {
@@ -602,42 +621,45 @@ function handleCompletionRecovery(guildId, state, item, generated, playedMs, pla
     return scheduleRecovery(guildId, state, item, triggerError || error || new Error('Truncated completion transcript.'), { replacementText: textTail });
   }
 
-  const regeneratedTailEvidence = hardPlaybackCutoff
-    || (playbackFailure && severeShort)
-    || (timedOut && (strongShort || Boolean(coverage?.suspicious)))
-    || (completionFailure && strongShort);
-  if (playedMs > replayThresholdMs() && severeShort && regeneratedTailEvidence) {
-    const heardSourceMs = Math.max(0, Number(playedMs) || 0) * Math.max(1, Number(playbackSpeed) || 1);
-    const resumeFraction = Math.max(0.10, Math.min(heardSourceMs / expectedMs, 0.95));
-    return scheduleRecovery(guildId, state, item, triggerError || error || new Error('Severely short streamed output.'), { resumeFraction });
-  }
+  // Without a confirmed PCM tail or literal transcript prefix, an estimated
+  // duration fraction cannot locate the unheard words. Do not regenerate it.
   return false;
 }
 
 function scheduleCompletionGraceCancel(guildId, state, generated, context = {}) {
   const completion = generated?.completion;
-  if (!completion || typeof completion.then !== 'function') return false;
-  let settled = false;
-  let timedOut = false;
+  if (!completion || typeof completion.then !== 'function' || context.item?.completionPending) return false;
+  const item = context.item;
+  if (!item || item.cancelled || item.logicalJob?.terminal) return false;
+  state.pendingCompletions ??= new Set();
+  state.pendingCompletions.add(item);
+  item.completionPending = true;
   const graceMs = getCompletionGraceMs();
-  const timer = setTimeout(() => {
-    if (settled) return;
-    timedOut = true;
-    state.completionGraceTimeouts = (Number(state.completionGraceTimeouts) || 0) + 1;
-    try { generated?.cancel?.(new Error('Completion metadata grace expired after audio playback finished.')); } catch {}
-    console.warn(`[queue:${guildId}] Provider completion exceeded ${graceMs}ms after finished audio; cancelled asynchronously and checked for a recoverable tail.`);
-  }, graceMs);
-  timer.unref?.();
-  Promise.resolve(completion).then((info) => {
-    settled = true;
-    clearTimeout(timer);
-    if (context.item) handleCompletionRecovery(guildId, state, context.item, generated, context.playedMs, context.playbackSpeed, { info, triggerError: context.triggerError || null });
-  }).catch((error) => {
-    settled = true;
-    clearTimeout(timer);
-    if (context.item) handleCompletionRecovery(guildId, state, context.item, generated, context.playedMs, context.playbackSpeed, { error, timedOut, triggerError: context.triggerError || null });
-  });
+  const deadline = deadlineSignal(item.abortController?.signal, graceMs, new Error('Completion metadata grace expired.'));
+  const cancel = () => { try { generated.cancel?.(deadline.signal.reason); } catch {} };
+  deadline.signal.addEventListener('abort', cancel, { once: true });
+  raceWithSignal(completion, deadline.signal).then((info) => {
+    handleCompletionRecovery(guildId, state, item, generated, context.playedMs, context.playbackSpeed, { info, triggerError: context.triggerError || null });
+  }, (error) => {
+    const timedOut = deadline.signal.aborted && !item.abortController?.signal.aborted;
+    if (timedOut) state.completionGraceTimeouts = (Number(state.completionGraceTimeouts) || 0) + 1;
+    if (!deadline.signal.aborted) handleCompletionRecovery(guildId, state, item, generated, context.playedMs, context.playbackSpeed, { error, triggerError: context.triggerError || null });
+  }).finally(() => {
+    deadline.signal.removeEventListener('abort', cancel);
+    deadline.cleanup();
+    state.pendingCompletions.delete(item);
+    item.completionPending = false;
+    if (!item.recoveryScheduled) finishLogicalJob(item, context.triggerError ? 'unavailable' : 'finished');
+  }).catch(() => {});
   return true;
+}
+
+async function waitForPlaying(state, item, timeoutMs, failures = []) {
+  const phase = deadlineSignal(item.abortController.signal, timeoutMs, new Error(`Player did not start within ${timeoutMs}ms.`));
+  try {
+    throwIfAborted(phase.signal);
+    return await raceWithSignal(Promise.race([entersState(state.player, AudioPlayerStatus.Playing, phase.signal), ...failures]), phase.signal);
+  } finally { phase.cancel(cancellationError('Player phase ended.')); phase.cleanup(); }
 }
 
 function expectedPlaybackTimeoutMs(item, generated, speed) {
@@ -654,7 +676,7 @@ function expectedPlaybackTimeoutMs(item, generated, speed) {
   return Math.min(hardMax, Math.max(15_000, Math.round(sourceMs / Math.max(1, speed) + safety)));
 }
 
-function waitForIdleWithActiveTimeout(state, timeoutMs) {
+function waitForIdleWithActiveTimeout(state, timeoutMs, signal = null) {
   const maximumActiveMs = Math.max(1000, Number(timeoutMs) || 1000);
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -665,6 +687,7 @@ function waitForIdleWithActiveTimeout(state, timeoutMs) {
     const cleanup = () => {
       if (timer) clearTimeout(timer);
       state.player.removeListener('stateChange', onStateChange);
+      signal?.removeEventListener('abort', onAbort);
     };
     const finish = (error = null) => {
       if (settled) return;
@@ -672,6 +695,7 @@ function waitForIdleWithActiveTimeout(state, timeoutMs) {
       cleanup();
       if (error) reject(error); else resolve();
     };
+    const onAbort = () => finish(signal.reason || cancelledError('Playback cancelled.'));
     const onStateChange = (_oldState, newState) => {
       if (newState.status === AudioPlayerStatus.Idle) finish();
     };
@@ -693,6 +717,8 @@ function waitForIdleWithActiveTimeout(state, timeoutMs) {
       timer.unref?.();
     };
 
+    if (signal?.aborted) { onAbort(); return; }
+    signal?.addEventListener('abort', onAbort, { once: true });
     state.player.on('stateChange', onStateChange);
     if (state.player.state.status === AudioPlayerStatus.Idle) { finish(); return; }
     timer = setTimeout(tick, 100);
@@ -723,6 +749,14 @@ function createProgressWatchdog(state, resource) {
   return { promise, stop: () => { stopped = true; if (timer) clearTimeout(timer); } };
 }
 
+async function waitForPlayback(state, item, resource, timeoutMs, failures = []) {
+  const phase = new AbortController();
+  const signal = AbortSignal.any([item.abortController.signal, phase.signal]);
+  const watchdog = createProgressWatchdog(state, resource);
+  try { await Promise.race([waitForIdleWithActiveTimeout(state, timeoutMs, signal), ...failures, watchdog.promise]); }
+  finally { phase.abort(cancelledError('Playback wait ended.')); watchdog.stop(); }
+}
+
 function spawnFfmpeg(args) {
   return spawn(getFfmpegPath(), args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
 }
@@ -730,7 +764,7 @@ function spawnFfmpeg(args) {
 async function playSpeakerLabel(guildId, state, item) {
   if (!item.speakerLabelNeeded || !item.speakerLabel || item.cancelled || state.disposed) return { waitMs: 0, playedMs: 0 };
   const waitStarted = performance.now();
-  const pcm = await waitForSpeakerLabelPcm(item.speakerLabelGeneration);
+  const pcm = await raceWithSignal(waitForSpeakerLabelPcm(item.speakerLabelGeneration), item.abortController.signal);
   const waitMs = performance.now() - waitStarted;
   if (!pcm || item.cancelled || state.disposed) return { waitMs, playedMs: 0 };
   const prelude = buildSpeakerPreludePcm(pcm);
@@ -757,7 +791,7 @@ async function playSpeakerLabel(guildId, state, item) {
   state.player.once('error', onError);
   try {
     state.player.play(resource);
-    await Promise.race([entersState(state.player, AudioPlayerStatus.Playing, 5000), failure]);
+    await waitForPlaying(state, item, 5000, [failure]);
     item.firstAudibleAtEpoch ||= Date.now();
     const labelMs = getPcmDurationMs(pcm.length, 24_000, 1) / Math.max(0.8, speed);
     const heardThresholdMs = Math.max(80, labelMs * 0.80);
@@ -769,9 +803,8 @@ async function playSpeakerLabel(guildId, state, item) {
       else { heardTimer = setTimeout(commitWhenHeard, 20); heardTimer.unref?.(); }
     };
     commitWhenHeard();
-    const watchdog = createProgressWatchdog(state, resource);
-    try { await Promise.race([waitForIdleWithActiveTimeout(state, 12_000), failure, watchdog.promise]); }
-    finally { watchdog.stop(); if (heardTimer) clearTimeout(heardTimer); }
+    try { await waitForPlayback(state, item, resource, 12_000, [failure]); }
+    finally { if (heardTimer) clearTimeout(heardTimer); }
     const played = Math.max(0, Number(resource.playbackDuration) || 0);
     if (!item.speakerLabelHeard && played >= heardThresholdMs) markSpeakerAnnounced(state, item);
     return { waitMs, playedMs: played };
@@ -970,7 +1003,7 @@ function canRunQueue(state) {
   return Boolean(state && !state.disposed && !state.running && state.voiceReady && state.queue?.length);
 }
 
-async function runQueue(guildId, state) {
+async function runQueue(guildId, state, makePipeline = createMessagePipeline) {
   if (!canRunQueue(state)) return;
   const item = takeNextItem(state);
   if (!item) return;
@@ -984,6 +1017,7 @@ async function runQueue(guildId, state) {
   let playerErrorListener = null;
   let messageResource = null;
   let messagePlaybackSpeed = 1;
+  let outcome = 'finished';
 
   try {
     item.speakerLabelNeeded = decideSpeakerLabel(state, item, metadataResetSeconds(item));
@@ -1010,14 +1044,14 @@ async function runQueue(guildId, state) {
         if (shortTranscript) state.transcriptCutoffs += 1;
         await cleanupGenerated(generated, { cancel: true });
         item.generation = null; item.skipLive = true;
-        generated = await startGeneration(guildId, item);
+        generated = await waitForGenerationOrCancellation(item, startGeneration(guildId, item));
       }
     }
 
     if (item.resumeFraction > 0) {
       const durationMs = getGeneratedAudioDurationMs(generated);
       const resumeStartMs = getRecoveryResumeStartMs(item, generated);
-      if (durationMs > 0 && durationMs - resumeStartMs < 300) {
+      if (durationMs <= 0 || durationMs - resumeStartMs < 300) {
         state.suppressedCutoffReplays += 1;
         console.warn(`[queue:${guildId}] Regenerated recovery contained no meaningful unheard tail; replay suppressed.`);
         return;
@@ -1026,7 +1060,7 @@ async function runQueue(guildId, state) {
 
     messagePlaybackSpeed = getCatchUpSpeed(state);
     item.playbackSpeed = messagePlaybackSpeed;
-    pipeline = createMessagePipeline(guildId, state, item, generated, messagePlaybackSpeed);
+    pipeline = makePipeline(guildId, state, item, generated, messagePlaybackSpeed);
     messageResource = pipeline.resource;
     const onPlayerError = (error) => { throwIntoPromise(error); };
     let rejectPlayer;
@@ -1035,7 +1069,8 @@ async function runQueue(guildId, state) {
     playerErrorListener = onPlayerError;
     state.player.once('error', onPlayerError);
     state.player.play(messageResource);
-    await Promise.race([entersState(state.player, AudioPlayerStatus.Playing, 10_000), pipeline.failure, playerFailure]);
+    await waitForPlaying(state, item, 10_000, [pipeline.failure, playerFailure]);
+    throwIfAborted(item.abortController.signal);
     item.playbackStartedAt = performance.now();
     const messageAudibleEpoch = Date.now();
     item.firstAudibleAtEpoch ||= messageAudibleEpoch;
@@ -1059,13 +1094,7 @@ async function runQueue(guildId, state) {
       console.warn(`[slow-tts:${guildId}] first-sound=${sample.timeToSpeechMs.toFixed(0)}ms message=${sample.timeToMessageSpeechMs.toFixed(0)}ms provider=${sample.providerMs.toFixed(0)}ms (${sample.provider}) queue=${sample.queueMs.toFixed(0)}ms ffmpeg-first=${sample.ffmpegFirstPacketMs.toFixed(0)}ms discord=${sample.discordBufferMs.toFixed(0)}ms speed=${sample.playbackSpeed.toFixed(2)}x`);
     }
 
-    const watchdog = createProgressWatchdog(state, messageResource);
-    try {
-      await Promise.race([
-        waitForIdleWithActiveTimeout(state, expectedPlaybackTimeoutMs(item, generated, messagePlaybackSpeed)),
-        pipeline.failure, playerFailure, watchdog.promise
-      ]);
-    } finally { watchdog.stop(); }
+    await waitForPlayback(state, item, messageResource, expectedPlaybackTimeoutMs(item, generated, messagePlaybackSpeed), [pipeline.failure, playerFailure]);
     state.player.removeListener('error', onPlayerError); playerErrorListener = null;
     pipeline.stopMonitoring();
 
@@ -1087,6 +1116,7 @@ async function runQueue(guildId, state) {
 
     if (item.isRecovery && !item.cancelled && !state.disposed) state.cutoffRecoverySuccesses += 1;
   } catch (error) {
+    outcome = item.cancelled ? 'stopped' : 'unavailable';
     if (!generated) {
       // Speaker-label/voice/playback setup can fail while the overlapped TTS
       // request is still generating. Abort that unclaimed provider work before
@@ -1118,8 +1148,11 @@ async function runQueue(guildId, state) {
     if (state.ffmpeg && !state.ffmpeg.killed) state.ffmpeg.kill();
     state.ffmpeg = null;
     await cleanupGenerated(generated, { cancel: item.cancelled });
+    if (!item.completionPending && !item.recoveryScheduled) finishLogicalJob(item, outcome);
+    item.generation = null;
+    item.speakerLabelGeneration = null;
     state.currentItem = null; state.running = false;
-    if (!state.disposed) void runQueue(guildId, state);
+    if (!state.disposed) void runQueue(guildId, state, makePipeline);
   }
 }
 
@@ -1145,16 +1178,19 @@ function cancelQueuedItemsForUser(state, userId) {
   return cancelled;
 }
 
-function cancelCurrentItemForUser(state, userId) {
-  const id = String(userId ?? '');
+function cancelCurrentItem(state, outcome = 'stopped') {
   const current = state?.currentItem;
-  if (!id || !current || String(current.userId ?? '') !== id) return false;
-  current.cancelled = true;
-  if (!current.abortController.signal.aborted) current.abortController.abort(cancelledError('User opted out of TTS.'));
-  current.generation?.then((generated) => { try { generated?.cancel?.(cancelledError('User opted out of TTS.')); } catch {} }).catch(() => {});
+  if (!current) return false;
+  cleanupCancelledQueuedItem(current, outcome);
   try { state.player?.stop?.(true); } catch {}
   if (state.ffmpeg && !state.ffmpeg.killed) state.ffmpeg.kill();
   return true;
+}
+
+function cancelCurrentItemForUser(state, userId) {
+  const id = String(userId ?? '');
+  if (!id || String(state?.currentItem?.userId ?? '') !== id) return false;
+  return cancelCurrentItem(state);
 }
 
 export function cancelUserAudio(guildId, userId) {
@@ -1163,6 +1199,9 @@ export function cancelUserAudio(guildId, userId) {
   if (!state || !id) return { cancelledCurrent: false, cancelledQueued: 0 };
   const cancelledQueued = cancelQueuedItemsForUser(state, id);
   const cancelledCurrent = cancelCurrentItemForUser(state, id);
+  for (const item of state.pendingCompletions || []) {
+    if (String(item.userId ?? '') === id) cleanupCancelledQueuedItem(item);
+  }
   if (!state.running && state.voiceReady && state.queue.length) void runQueue(guildId, state);
   return { cancelledCurrent, cancelledQueued };
 }
@@ -1197,13 +1236,7 @@ function cancelCurrentAskIfSuperseded(state, userId, newerSequence) {
   if (Number(current.firstAudibleAtEpoch) > 0) return false;
   const currentSequence = Math.max(0, Number(current.askSequence) || 0);
   if (currentSequence > 0 && currentSequence >= threshold) return false;
-  current.cancelled = true;
-  const reason = cancelledError('Superseded by a newer /ask before first audible speech.');
-  if (!current.abortController.signal.aborted) current.abortController.abort(reason);
-  current.generation?.then((generated) => { try { generated?.cancel?.(reason); } catch {} }).catch(() => {});
-  try { state.player?.stop?.(true); } catch {}
-  if (state.ffmpeg && !state.ffmpeg.killed) state.ffmpeg.kill();
-  return true;
+  return cancelCurrentItem(state, 'superseded');
 }
 
 export function cancelSupersededAskAudioForUser(guildId, userId, newerSequence) {
@@ -1226,20 +1259,19 @@ export function cancelMessageAudio(guildId, messageId) {
   const state = states.get(guildId);
   const id = String(messageId ?? '');
   if (!state || !id) return false;
-  if (state.currentItem && String(state.currentItem.messageId ?? '') === id) {
-    const item = state.currentItem;
-    item.cancelled = true;
-    if (!item.abortController.signal.aborted) item.abortController.abort(cancelledError('Message TTS cancelled.'));
-    item.generation?.then((generated) => { try { generated?.cancel?.(cancelledError('Message TTS cancelled.')); } catch {} }).catch(() => {});
-    try { state.player.stop(true); } catch {}
-    if (state.ffmpeg && !state.ffmpeg.killed) state.ffmpeg.kill();
-    return true;
+  const matches = (item) => item && [item.messageId, item.replyMessageId].some(value => String(value ?? '') === id);
+  let cancelled = false;
+  if (matches(state.currentItem)) { cancelCurrentItem(state); cancelled = true; }
+  state.queue = state.queue.filter((item) => {
+    if (!matches(item)) return true;
+    cleanupCancelledQueuedItem(item);
+    cancelled = true;
+    return false;
+  });
+  for (const item of state.pendingCompletions || []) {
+    if (matches(item)) { cleanupCancelledQueuedItem(item); cancelled = true; }
   }
-  const index = state.queue.findIndex((item) => String(item.messageId ?? '') === id);
-  if (index < 0) return false;
-  const [item] = state.queue.splice(index, 1);
-  cleanupCancelledQueuedItem(item);
-  return true;
+  return cancelled;
 }
 
 export function clearAudio(guildId) {
@@ -1248,11 +1280,8 @@ export function clearAudio(guildId) {
   // Invalidate post-playback completion observers from the pre-clear queue.
   // Otherwise a late metadata callback could resurrect audio after /clear.
   state.recoveryEpoch = (Number(state.recoveryEpoch) || 0) + 1;
-  if (state.currentItem) {
-    state.currentItem.cancelled = true;
-    if (!state.currentItem.abortController.signal.aborted) state.currentItem.abortController.abort(cancelledError('Audio cleared.'));
-    state.currentItem.generation?.then((generated) => { try { generated?.cancel?.(cancelledError('Audio cleared.')); } catch {} }).catch(() => {});
-  }
+  if (state.currentItem) cancelCurrentItem(state);
+  for (const item of state.pendingCompletions || []) cleanupCancelledQueuedItem(item);
   for (const item of state.queue) cleanupCancelledQueuedItem(item);
   state.queue.length = 0;
   state.player.stop(true);
@@ -1282,7 +1311,7 @@ function estimateBacklogMs(state) {
 export function getAudioStatus(guildId) {
   const state = states.get(guildId);
   const empty = {
-    queued: 0, playing: false, voiceReady: false, pausedForVoice: false, maximumQueued: getMaximumQueuedMessages(), estimatedBacklogMs: 0,
+    queued: 0, playing: false, phase: 'idle', voiceReady: false, pausedForVoice: false, maximumQueued: getMaximumQueuedMessages(), estimatedBacklogMs: 0,
     oldestWaitingMs: 0, prefetched: 0, prefetchTarget: 1, catchUpSpeed: 1, queueMode: 'normal',
     droppedMessages: 0, staleSkippedMessages: 0, streamingPrefetches: 0,
     cutoffRecoveries: 0, cutoffRecoverySuccesses: 0, cutoffRecoveryFailures: 0,
@@ -1295,7 +1324,8 @@ export function getAudioStatus(guildId) {
   const oldest = state.queue.length ? Math.max(0, Date.now() - Math.min(...state.queue.map((item) => item.messageCreatedAt))) : 0;
   return {
     ...empty,
-    queued: state.queue.length, playing: Boolean(state.running && state.currentItem), voiceReady: state.voiceReady, pausedForVoice: state.voicePaused,
+    queued: state.queue.length, playing: Boolean(state.currentItem && !state.currentItem.cancelled && state.player.state.status === AudioPlayerStatus.Playing),
+    phase: state.currentItem?.cancelled ? 'cancelling' : state.voicePaused ? 'paused' : state.running ? state.player.state.status === AudioPlayerStatus.Idle ? 'generating' : state.player.state.status : 'idle', voiceReady: state.voiceReady, pausedForVoice: state.voicePaused,
     estimatedBacklogMs: estimateBacklogMs(state), oldestWaitingMs: oldest, prefetched,
     prefetchTarget: getPrefetchAhead(state), catchUpSpeed: speed, queueMode: speed > 1.0001 ? 'catch-up' : 'normal',
     droppedMessages: state.droppedMessages, staleSkippedMessages: state.staleSkippedMessages,
@@ -1308,4 +1338,4 @@ export function getAudioStatus(guildId) {
   };
 }
 
-export const __test = { mp3DurationMs, decideSpeakerLabel, buildPcmTail, buildTranscriptTextTail, handleCompletionRecovery, getGeneratedAudioDurationMs, getRecoveryResumeStartMs, createQueueItem, cancelQueuedItemsForUser, cancelQueuedAskItemsForUser, cancelCurrentAskIfSuperseded, cancelCurrentItemForUser, cancelSupersededAskItemsForUser: (state, userId, newerSequence) => ({ cancelledQueued: cancelQueuedAskItemsForUser(state, userId, newerSequence), cancelledCurrent: cancelCurrentAskIfSuperseded(state, userId, newerSequence) }), dropForQueueOverflow, waitForGenerationOrCancellation, createPrefetchSpool, wireProviderToInput, scheduleRecovery, scheduleCompletionGraceCancel, canRunQueue, takeNextItem, abandonUnclaimedGeneration, hasPrefetchBarrier };
+export const __test = { getState, runQueue, waitForPlaying, waitForIdleWithActiveTimeout, cleanupCancelledQueuedItem, mp3DurationMs, decideSpeakerLabel, buildPcmTail, buildTranscriptTextTail, handleCompletionRecovery, getGeneratedAudioDurationMs, getRecoveryResumeStartMs, createQueueItem, cancelQueuedItemsForUser, cancelQueuedAskItemsForUser, cancelCurrentAskIfSuperseded, cancelCurrentItemForUser, cancelSupersededAskItemsForUser: (state, userId, newerSequence) => ({ cancelledQueued: cancelQueuedAskItemsForUser(state, userId, newerSequence), cancelledCurrent: cancelCurrentAskIfSuperseded(state, userId, newerSequence) }), dropForQueueOverflow, waitForGenerationOrCancellation, createPrefetchSpool, wireProviderToInput, scheduleRecovery, scheduleCompletionGraceCancel, canRunQueue, takeNextItem, abandonUnclaimedGeneration, hasPrefetchBarrier };

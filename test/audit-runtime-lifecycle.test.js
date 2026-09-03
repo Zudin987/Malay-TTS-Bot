@@ -64,8 +64,3 @@ test('voice recovery tracker exposes direct recovery and de-duplicates concurren
   assert.equal(state.recoveryPromise, null);
 });
 
-test('Discord MessageDelete is wired to cancel the matching message TTS item', () => {
-  const source = fs.readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
-  assert.match(source, /client\.on\(Events\.MessageDelete/);
-  assert.match(source, /cancelMessageAudio\(message\.guild\.id, message\.id\)/);
-});

@@ -2,6 +2,7 @@ import { ChannelType, Client, Collection, Events, GatewayIntentBits, MessageFlag
 import { performance } from 'node:perf_hooks';
 import { cancelMessageAudio, enqueue } from './audio.js';
 import { handleAskStopButton } from './ask-response.js';
+import { cancelDeletedMessage, cancelDeletedMessages } from './message-cancellation.js';
 import { commands } from './commands.js';
 import { config } from './config.js';
 import { buildSpeakableMessage } from './message-speech-policy.js';
@@ -120,8 +121,11 @@ client.on(Events.MessageCreate, async (message) => {
 });
 
 client.on(Events.MessageDelete, (message) => {
-  if (shuttingDown || !message.guild || !message.id) return;
-  cancelMessageAudio(message.guild.id, message.id);
+  if (!shuttingDown) cancelDeletedMessage(message, cancelMessageAudio);
+});
+
+client.on(Events.MessageBulkDelete, (messages, channel) => {
+  if (!shuttingDown) cancelDeletedMessages(messages, cancelMessageAudio, channel);
 });
 
 client.on(Events.VoiceStateUpdate, (oldState, newState) => {
