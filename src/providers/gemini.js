@@ -378,6 +378,18 @@ async function startStreamingRequest(fetchImpl, text, voiceName, apiKey, options
   // stream failure from becoming an uncaught EventEmitter error before FFmpeg
   // attaches as the consumer.
   output.on('error', () => {});
+  // STOP must deterministically wake a pending body read instead of relying only
+  // on fetch AbortSignal propagation. This keeps a cancelled /ask stream from
+  // lingering behind the next TTS request.
+  const forceAbortBody = () => {
+    const reason = linked.controller.signal.reason instanceof Error
+      ? linked.controller.signal.reason
+      : cancellationError(linked.controller.signal.reason);
+    try { void reader.cancel(reason).catch(() => {}); } catch {}
+    try { if (!output.destroyed) output.destroy(reason); } catch {}
+  };
+  if (linked.controller.signal.aborted) forceAbortBody();
+  else linked.controller.signal.addEventListener('abort', forceAbortBody, { once: true });
   const mirror = [];
   let totalBytes = 0;
   let mimeType = null;
@@ -511,6 +523,7 @@ async function startStreamingRequest(fetchImpl, text, voiceName, apiKey, options
     } finally {
       if (idleTimer) clearTimeout(idleTimer);
       clearFirstTimer();
+      linked.controller.signal.removeEventListener?.('abort', forceAbortBody);
       linked.cleanup();
     }
   })();

@@ -107,3 +107,43 @@ test('/ask Google fallback receives a fresh first-audio window after exact TTS e
   assert.equal(tts.__test.googleFallbackWindowMs({ skipLive: false }, 0), 0);
   assert.equal(tts.__test.googleFallbackWindowMs({}, 900), 900);
 });
+
+test('explicit cancellation directly cancels the Gemini TTS response body', async () => {
+  let bodyCancelled = false;
+  const fetchImpl = async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(sse({ event_type: 'step.start', index: 0, step: { type: 'model_output' } }));
+      controller.enqueue(sse(audioDelta(0)));
+    },
+    cancel() { bodyCancelled = true; }
+  }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+
+  const generated = await synthesizeGemini('berhenti sekarang', 'Charon', {
+    apiKey: 'fixture-key', fetchImpl, timeoutMs: 1000, streamIdleTimeoutMs: 5000, maxOutputAudioMs: 5000
+  });
+  const reason = new Error('STOP TTS');
+  reason.cancelled = true;
+  generated.cancel(reason);
+  await assert.rejects(generated.completion, /STOP TTS/i);
+  assert.equal(bodyCancelled, true);
+});
+
+test('parent cancellation releases Gemini limiter ownership before remote completion settles', async () => {
+  tts.restartTtsRuntime();
+  const parent = new AbortController();
+  const never = new Promise(() => {});
+  const attempts = [];
+  const attempt = await tts.__test.runAttempt({
+    key: 'exactTts', providerName: 'fixture-gemini-tts', windowMs: 1000,
+    parentSignal: parent.signal, attempts,
+    factory: async () => ({ completion: never }), options: {}, geminiProvider: true
+  });
+  assert.ok(attempt.result);
+  assert.equal(tts.getTtsProviderStatus().geminiLimiter.active, 1);
+  const reason = new Error('STOP TTS');
+  reason.cancelled = true;
+  parent.abort(reason);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(tts.getTtsProviderStatus().geminiLimiter.active, 0);
+  tts.restartTtsRuntime();
+});
