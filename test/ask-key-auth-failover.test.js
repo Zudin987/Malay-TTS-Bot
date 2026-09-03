@@ -43,6 +43,18 @@ function response({ ok, status, body }) {
   };
 }
 
+test('/ask disables the final invalid credential instead of leaving it selectable', async () => {
+  for (const count of [1, 2]) {
+    const keys = makeKeyManager(Array.from({ length: count }, (_, index) => ({ slot: index + 1, key: `invalid-${index}` })));
+    await assert.rejects(askGemini('Question?', {
+      options, keyManager: keys,
+      fetchImpl: async () => response({ ok: false, status: 401, body: { error: { status: 'UNAUTHENTICATED' } } })
+    }), { code: 'auth' });
+    assert.equal(keys.status().availableCount, 0);
+    assert.equal(keys.disabled.length, count);
+  }
+});
+
 test('/ask disables a credential-bad key and immediately retries the next healthy configured key', async () => {
   const keys = makeKeyManager([
     { slot: 1, key: 'bad-test-key' },

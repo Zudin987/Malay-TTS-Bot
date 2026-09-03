@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { executeAskRequest } from '../src/ask-command.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ButtonStyle, ChannelType, MessageFlags } from 'discord.js';
@@ -306,16 +307,23 @@ test('/ask queue overflow is rejected without displacing existing audio', async 
   assert.equal(touched, false);
 });
 
-test('/ask command posts the embed before detached TTS and normal MessageCreate ignores bot output', () => {
-  const commandsSource = fs.readFileSync(new URL('../src/commands.js', import.meta.url), 'utf8').replace(/\r\n?/gu, '\n');
-  const indexSource = fs.readFileSync(new URL('../src/index.js', import.meta.url), 'utf8').replace(/\r\n?/gu, '\n');
-  const embedReply = commandsSource.indexOf("await interaction.editReply({\n        content: null,\n        embeds: [embed]");
-  const detachedTts = commandsSource.indexOf('void queueAskAnswerTts(interaction, answer, askTtsDependencies, { requestSequence: askTtsSequence })');
-  assert.ok(embedReply >= 0 && detachedTts > embedReply);
-  assert.match(commandsSource, /allowedMentions: ASK_ALLOWED_MENTIONS/u);
-  assert.match(indexSource, /message\.author\.bot \|\| message\.webhookId/u);
+test('/ask posts the final embed before TTS and binds speech to the real reply', async () => {
+  const calls = [];
+  const interaction = {
+    id: 'command-identity', guildId: 'command-guild', user: { id: 'command-user' },
+    options: { getString: () => 'Question?' },
+    deferReply: async () => calls.push('defer'),
+    editReply: async (payload) => { calls.push('embed'); assert.deepEqual(payload.allowedMentions, ASK_ALLOWED_MENTIONS); return { id: 'real-reply-123' }; }
+  };
+  await executeAskRequest(interaction, {
+    ttsDependencies: { cancelSupersededAsk: () => calls.push('supersede') },
+    ask: async (_question, { onAccepted }) => { calls.push('admit'); onAccepted(); return { answer: 'Answer.' }; },
+    queueTts: async (_interaction, answer, _deps, metadata) => {
+      calls.push('queue'); assert.equal(answer, 'Answer.'); assert.equal(metadata.replyMessageId, 'real-reply-123');
+    }
+  });
+  assert.deepEqual(calls, ['defer', 'admit', 'supersede', 'embed', 'queue']);
 });
-
 
 test('/ask limits align with Discord embed field limits and include ellipsis inside the cap', () => {
   const limited = getAskOptions({ maxQuestionCharacters: 1800, maxAnswerCharacters: 1500 });
