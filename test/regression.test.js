@@ -64,7 +64,7 @@ test('settings clamp speaker reset/cache/runtime watchdog values', () => {
   assert.equal(normalized.speakerLabel.maxWaitMs, 3000);
   assert.equal(normalized.speakerLabel.gain, 2);
   assert.equal(normalized.speakerLabel.maxPcmDurationMs, 500);
-  assert.equal(normalized.audioPipeline.playbackHardMaxMs, 90000);
+  assert.equal(normalized.audioPipeline.playbackHardMaxMs, 60000);
   assert.equal(normalized.audioPipeline.progressWatchdogMs, 3000);
   assert.equal(normalized.audioPipeline.replayOnlyBeforeMs, 1000);
 });
