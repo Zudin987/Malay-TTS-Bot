@@ -2,9 +2,11 @@
 
 ## Source of truth
 
-GitHub is the source of truth for development. `main` is stable/released code and `develop` is the active integration branch. Use focused feature/fix branches and pull requests for non-trivial changes.
+GitHub is the source of truth for development. `main` is the latest stable/released source. Use focused `feature/...` or `fix/...` branches and pull requests for non-trivial changes; do not treat the old `develop` branch as an active integration source unless it is explicitly reintroduced and synchronized.
 
-Current stable baseline: **v0.23.23 - 10-Key Round-Robin + /ask TTS Fix**.
+Current stable baseline: **v0.23.26 - Speech Filter Hardening**.
+
+`main` should be protected in GitHub so pull requests and required CI checks are enforced before merges. Repository-side documentation/workflows are not a substitute for GitHub branch protection.
 
 ## Priorities
 
@@ -25,6 +27,8 @@ Never add heavy local AI, local TTS models, or architecture that materially incr
 - Message combining/merging stays removed.
 - Gemini Live sessions are fresh, one-turn sessions; do not restore multi-turn reuse.
 - Do not convert the bot to an EXE for performance.
+- `/restarttts` resets process-global TTS/provider state, so it must only run when all guild queues and Gemini provider work are idle.
+- Editing Gemini key values or `GEMINI_API_KEY_SLOT` in `.env` requires a full bot process restart. `/restarttts` does not reconstruct the runtime key ring from a changed `.env`.
 
 ## Provider chain
 
@@ -36,6 +40,8 @@ Keep the normal preference order unless an explicit release changes it:
 4. Google Malay TTS fallback
 
 `/ask` is the exception: its already-generated answer skips conversational Live and uses dedicated Gemini 3.1 TTS first, then Google Malay TTS fallback. Provider health may temporarily bypass known-bad/quota-limited providers, but recovery must restore the normal preference order after a successful half-open probe.
+
+A single TTS item keeps one selected Gemini key throughout its Gemini failover chain. The runtime accepts up to ten configured slots and ignores duplicate credentials rather than treating the same key as independent quota/auth capacity.
 
 ## Voice / speaker architecture
 
@@ -50,27 +56,48 @@ Gemini voice pool:
 
 Speaker username must **not** be included in Gemini message text. The speaker label is generated separately with Google Malay TTS, cached locally, played first, then the configured short gap, then the user's Gemini message.
 
+Speaker-label work is privacy-sensitive provider work too. It must be lazy/cancellable, must stop on privacy opt-out, and must not write a new cache entry after cancellation.
+
+## Discord speech eligibility
+
+Normal `MessageCreate` TTS is deliberately limited to human speech-like content:
+
+- ordinary chat text -> speak
+- Discord user/role/channel mention -> resolve/read the name where possible
+- image attachment/embed -> `hantar gambar`
+- normal text plus an image -> speak the text plus `hantar gambar`
+- `/ask` -> handled by its separate interaction/TTS path
+
+The following are intentionally silent when they are the only payload, and are stripped when mixed with ordinary chat:
+
+- raw/autolink/masked links
+- non-image files
+- GIFs
+- videos
+- Unicode/custom/text emoji and kaomoji
+- fenced or inline code-only payloads
+- Discord/web preview embeds that are not actual image posts
+
+Do **not** restore `hantar link`, `hantar fail`, `hantar GIF`, `hantar video`, or `hantar code` narration to normal chat TTS without an explicit product decision.
+
 ## Text / profile rules
 
-Gemini preprocessing stays light and deterministic:
+Gemini preprocessing stays light and deterministic after the Discord speech-eligibility gate:
 
-- URL -> `hantar link`
-- image -> `hantar gambar`
-- GIF -> `hantar GIF`
-- video -> `hantar video`
-- code block -> `hantar code`
+- preserve the approved ordinary chat text
 - resolve Discord mentions where possible
 - lightly remove Discord formatting/control characters
+- keep image narration as `hantar gambar`
 
 Do **not**:
 
 - restore the 620-word dictionary to Gemini
 - grammar-rewrite or translate Gemini input
 - guess or complete unfinished sentences
-- aggressively remove keyboard smash/noise
+- aggressively remove meaningful chat wording
 - add semantic rewriting
 
-The system/profile must prioritize no invented/extra words. It may expand an existing unambiguous shorthand token for pronunciation (for example `nk` -> `nak`, `idk` -> `I don't know`) but must never add surrounding particles, subjects, objects, answers, or sentence endings (for example `nak` must not become `nak ka`).
+The system/profile must prioritize no invented/extra words. It may naturally pronounce an existing unambiguous shorthand token, but must never add surrounding particles, subjects, objects, answers, filler, laughter, or sentence endings that were not present.
 
 Desired delivery: natural Malaysian Malay/Malaysian English, smooth code-switching, about 0.95x normal pace, calm/plain/restrained, short natural pauses, controlled pitch, no excited/high final word, and preserved voice identity.
 
@@ -101,6 +128,8 @@ Before calling a release final:
 - run the full regression suite repeatedly (at least 5 consecutive clean passes for timing-sensitive releases)
 - test the FFmpeg PCM -> filters/limiter -> libopus/Ogg -> decode path
 - review provider cancellation, failover, queue, speaker-label and disconnect/recovery behavior
+- verify privacy opt-out cancels queued/current message TTS and active speaker-label provider work
+- verify the doctor reports all configured Gemini slots and duplicate-slot warnings without exposing key contents
 - build only a CLEAN package
 - re-extract the final ZIP and validate it
 - verify `.env`, `data/guilds.json`, `node_modules`, `.git`, cache PCM, logs and temp/runtime lock files are absent
@@ -110,8 +139,8 @@ Before calling a release final:
 ## Git workflow
 
 - `main`: latest stable/released source.
-- `develop`: integration branch for active work.
-- Use `feature/...` or `fix/...` branches for substantial changes.
-- Run CI before merging.
-- Prefer small, reviewable PRs with a clear latency/correctness reason.
+- Use focused `feature/...` or `fix/...` branches for substantial changes.
+- Open a pull request to `main` and wait for Ubuntu + Windows CI before merging.
+- Prefer small, reviewable PRs with a clear latency/correctness/privacy reason.
 - Keep release notes for user-visible behavior and operational changes.
+- Do not publish a release from an unreviewed direct push.
