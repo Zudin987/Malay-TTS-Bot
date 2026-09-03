@@ -45,7 +45,11 @@ try {
     Start-ScheduledTask -TaskName $TaskName
     $Deadline = [DateTime]::UtcNow.AddSeconds(45)
     while (!(Test-Path -LiteralPath $ResultPath) -and [DateTime]::UtcNow -lt $Deadline) { Start-Sleep -Milliseconds 200 }
-    if (!(Test-Path -LiteralPath $ResultPath)) { throw ('SYSTEM smoke did not finish. Task result: ' + (Get-ScheduledTaskInfo -TaskName $TaskName).LastTaskResult) }
+    if (!(Test-Path -LiteralPath $ResultPath)) {
+      $Diagnostic = Join-Path $PackagePath 'data\ci-system-error.txt'
+      if (Test-Path -LiteralPath $Diagnostic) { Get-Content -LiteralPath $Diagnostic | Write-Host }
+      throw ('SYSTEM smoke did not finish. Task result: ' + (Get-ScheduledTaskInfo -TaskName $TaskName).LastTaskResult)
+    }
     $Result = Get-Content -Raw -LiteralPath $ResultPath | ConvertFrom-Json
     if ($Result.accountSid -ne 'S-1-5-18' -or !$Result.doctorPassed -or !$Result.opusRoundTripPassed) { throw 'SYSTEM runtime/codec proof failed' }
     $Nonces += $Result.nonce
@@ -68,6 +72,7 @@ try {
   & $Node -e 'process.exit(-1)'
   $NegativeExit = $LASTEXITCODE
   if ($NegativeExit -eq 0) { throw 'Negative process exit code was lost' }
+  $global:LASTEXITCODE = 0 # The intentional failing probe must not fail the successful CI step.
   $Proof = @{ node = '24.19.0'; npm = "$NpmVersion"; ffmpeg = '9.0.1'; accountSid = 'S-1-5-18'; systemStarts = 2; cleanStops = 2; tenKeyRoundRobin = $true; opusRoundTrip = $true; privateStateAcl = $true; negativeExitCode = $NegativeExit; sourceCommit = $env:GITHUB_SHA }
   $Proof | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Repo 'dist\verification.json')
   Write-Host 'Packaged SYSTEM starts/stops, ten-key rotation, Node/npm, codec path and inherited state ACLs passed.'

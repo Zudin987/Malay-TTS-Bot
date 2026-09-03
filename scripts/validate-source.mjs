@@ -32,7 +32,7 @@ await Promise.all(Array.from({ length: 4 }, async () => {
     catch (error) { throw new Error(`Syntax check failed for ${name}: ${error.stderr || error.message}`); }
   }
 }));
-for (const relative of ['.env', 'data/guilds.json', 'data/guilds.json.bak', 'data/bot.lock', 'data/stop.request', 'data/speaker-label-cache', 'bot.log', 'bot-old.log', 'temp']) {
+for (const relative of ['.env', 'data/guilds.json', 'data/guilds.json.bak', 'data/bot.lock', 'data/stop.request', 'data/speaker-label-cache', 'bot.log', 'bot-old.log', 'temp', ...(!includeRuntime ? ['runtime'] : [])]) {
   try { await fs.access(path.join(root, relative)); } catch { continue; }
   throw new Error(`Private/generated content in clean source: ${relative}`);
 }
