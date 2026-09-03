@@ -63,13 +63,19 @@ function attachHandlers(guild, channelId, connection, state, epoch) {
   });
 }
 
-function scheduleRecovery(guild, channelId, failedConnection, epoch, reason) {
-  const state = stateFor(guild.id);
+function trackRecovery(state, factory) {
   if (state.recoveryPromise) return state.recoveryPromise;
-  const job = withGuildLock(guild.id, () => recoverLocked(guild, channelId, failedConnection, epoch, reason))
+  let job;
+  job = Promise.resolve()
+    .then(factory)
     .finally(() => { if (state.recoveryPromise === job) state.recoveryPromise = null; });
   state.recoveryPromise = job;
   return job;
+}
+
+function scheduleRecovery(guild, channelId, failedConnection, epoch, reason) {
+  const state = stateFor(guild.id);
+  return trackRecovery(state, () => withGuildLock(guild.id, () => recoverLocked(guild, channelId, failedConnection, epoch, reason)));
 }
 
 async function recoverLocked(guild, channelId, failedConnection, epoch, reason) {
@@ -149,7 +155,7 @@ export async function connectToVoiceChannel(guild, channel, { allowMove = false 
         return { connection: current, status: 'already-connected' };
       }
       const epoch = state.epoch;
-      const recovered = await recoverLocked(guild, channel.id, current, epoch, 'not-ready');
+      const recovered = await trackRecovery(state, () => recoverLocked(guild, channel.id, current, epoch, 'not-ready'));
       if (recovered && state.connection) return { connection: state.connection, status: 'recovered' };
     }
 
@@ -235,3 +241,5 @@ function cancelAutoLeave(guildId) {
   if (timer) clearTimeout(timer);
   leaveTimers.delete(guildId);
 }
+
+export const __test = { trackRecovery };
