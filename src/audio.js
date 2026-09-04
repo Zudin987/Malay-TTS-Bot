@@ -34,6 +34,11 @@ function clampNumber(value, fallback, min, max) {
   return Math.max(min, Math.min(parsed, max));
 }
 function clampInteger(value, fallback, min, max) { return Math.floor(clampNumber(value, fallback, min, max)); }
+function isAskQueueItem(item) { return String(item?.messageId ?? '').startsWith('ask:'); }
+function getPlayerStartTimeoutMs(item) {
+  if (!isAskQueueItem(item)) return 10_000;
+  return clampInteger(settings.audioPipeline?.askAudibilityTimeoutMs, 3500, 500, 6000);
+}
 
 function getAdaptiveQueueOptions() {
   const configured = settings.adaptiveQueue && typeof settings.adaptiveQueue === 'object' ? settings.adaptiveQueue : {};
@@ -194,11 +199,6 @@ function waitForGenerationOrCancellation(item, generation) {
 
 function createPrefetchSpool(generated, signal) {
   if (!generated?.audioStream || typeof generated.audioStream.pipe !== 'function') return generated;
-  // The provider's own output is latency-oriented and may use a small
-  // highWaterMark. Drain it immediately into a bounded memory spool so an
-  // immediate-successor prefetch can finish generating while the current
-  // message is still playing. Provider output is already hard-capped; 3 MiB is
-  // enough for the configured 45 s mono PCM ceiling with margin.
   const spool = new PassThrough({ highWaterMark: 3 * 1024 * 1024 });
   spool.on('error', () => {});
   const source = generated.audioStream;
@@ -298,7 +298,6 @@ function finishLogicalJob(item, outcome = 'finished') {
 function cleanupCancelledQueuedItem(item, outcome = 'stopped') {
   item.cancelled = true;
   if (item.logicalJob) item.logicalJob.cancelled = true;
-  // A cancellation also terminalizes an original item with a queued recovery.
   item.recoveryScheduled = false;
   finishLogicalJob(item, outcome);
   if (!item.abortController.signal.aborted) item.abortController.abort(cancelledError('Queue item dropped.'));
@@ -413,9 +412,6 @@ function isSuspiciouslyShortPcm(item, generated, audioBytes) {
   const characters = [...reference].length;
   if (words < 5 || characters < 20) return false;
   const actual = getPcmDurationMs(audioBytes, generated?.sampleRate, generated?.channels);
-  // Recovery must not inherit punctuation pause inflation from the queue ETA.
-  // A message full of ellipses can be spoken completely much faster than the
-  // display-oriented estimate without being truncated.
   const expected = estimateRecoveryDurationMs(item.verificationText || item.text);
   return actual >= 250 && actual < expected * 0.35 && expected - actual >= 900;
 }
@@ -498,7 +494,7 @@ function buildTranscriptTextTail(item, transcript) {
   return tail || null;
 }
 
-function scheduleRecovery(guildId, state, item, error, { replay = null, fullRetry = false, replacementText = null } = {}) {
+function scheduleRecovery(guildId, state, item, error, { replay = null, fullRetry = false, replacementText = null, forceSkipLive = null } = {}) {
   const maximum = getStreamCutoffRecoveryAttempts();
   const recoveryText = String(replacementText || item.text || '').trim();
   if (item.cancelled || item.logicalJob?.cancelled || item.logicalJob?.terminal || state.disposed || item.recoveryScheduled || item.recoveryAttempt >= maximum || !recoveryText) return false;
@@ -513,7 +509,9 @@ function scheduleRecovery(guildId, state, item, error, { replay = null, fullRetr
     protectFromOverflow: item.protectFromOverflow, askSequence: item.askSequence,
     recoveryAttempt: item.recoveryAttempt + 1, isRecovery: true,
     recoveryEpoch: item.recoveryEpoch,
-    skipLive: regeneratedTail ? true : fullRetry ? Boolean(item.skipLive || String(error?.provider || '').includes('live')) : true,
+    skipLive: regeneratedTail ? true : fullRetry
+      ? (forceSkipLive == null ? Boolean(item.skipLive || String(error?.provider || '').includes('live')) : Boolean(forceSkipLive))
+      : true,
     replayAudioBuffer: replay?.audioBuffer || null, replayAudioFormat: replay?.audioFormat || null,
     replayMimeType: replay?.mimeType || null, replaySampleRate: replay?.sampleRate || 24_000,
     replayChannels: replay?.channels || 1
@@ -538,8 +536,6 @@ function handleCompletionRecovery(guildId, state, item, generated, playedMs, pla
   }
   const runawayFailure = Boolean(error?.runawayLike || triggerError?.runawayLike);
   if (runawayFailure) {
-    // The guard intentionally stopped unwanted generated speech. Recovering a
-    // PCM/text tail here would continue the hallucinated answer and block FIFO.
     if (!item.runawayRecoverySuppressed) {
       item.runawayRecoverySuppressed = true;
       state.runawayRecoveriesSuppressed = (Number(state.runawayRecoveriesSuppressed) || 0) + 1;
@@ -559,9 +555,6 @@ function handleCompletionRecovery(guildId, state, item, generated, playedMs, pla
   const transcript = String(info?.transcript ?? error?.transcript ?? generated?.transcript ?? '').trim();
   const suspiciousDuration = String(metadata.audioFormat || '').toLowerCase() === 's16le' && audioBytes > 0 && isSuspiciouslyShortPcm(item, metadata, audioBytes);
   const suspiciousTranscript = isSuspiciousTranscript(item, transcript);
-  // Coverage is useful for both successful completion metadata and provider
-  // errors carrying a mirrored partialAudioBuffer. Do not discard that objective
-  // playback signal merely because the completion promise rejected.
   const coverage = audioBytes > 0
     ? getPlaybackCoverage(metadata, { ...(info || {}), audioBytes }, { playbackDuration: playedMs }, playbackSpeed)
     : null;
@@ -569,14 +562,31 @@ function handleCompletionRecovery(guildId, state, item, generated, playedMs, pla
   if (suspiciousTranscript) state.transcriptCutoffs = (Number(state.transcriptCutoffs) || 0) + 1;
   if (coverage?.suspicious) state.playbackCutoffs = (Number(state.playbackCutoffs) || 0) + 1;
 
-  // Keep local playback failures distinct from provider-completion failures.
-  // A completion promise can reject after the audio stream already ended cleanly;
-  // that metadata-only failure is not, by itself, proof that speech was cut off.
   const playbackFailure = Boolean(triggerError);
   const completionFailure = Boolean(error && !error.cancelled);
   const hardPlaybackCutoff = isHardPlaybackCutoff(coverage);
   if (playedMs <= replayThresholdMs() && playbackFailure) {
-    return scheduleRecovery(guildId, state, item, triggerError, { fullRetry: true });
+    if (isAskQueueItem(item)) {
+      if (playedMs > 0) {
+        // Once any /ask audio has actually progressed, never restart the full
+        // answer from the beginning. Only conservative tail recovery below is
+        // allowed, preventing duplicate speech after a late/local failure.
+      } else if (String(generated?.provider || '').startsWith('gemini') && item.recoveryAttempt === 0) {
+        const recovered = scheduleRecovery(guildId, state, item, triggerError, { fullRetry: true, forceSkipLive: true });
+        if (recovered) {
+          const reason = cancelledError('/ask Gemini audio never became audible; switching once to Google MS.');
+          try { Promise.resolve(generated?.cancel?.(reason)).catch(() => {}); } catch {}
+        }
+        return recovered;
+      } else {
+        // Google already owns this /ask attempt (either direct fallback or the
+        // one audibility retry). Do not loop. Let finally retire the failed item
+        // so following normal-chat TTS can run.
+        return false;
+      }
+    } else {
+      return scheduleRecovery(guildId, state, item, triggerError, { fullRetry: true });
+    }
   }
 
   const textTail = buildTranscriptTextTail(item, transcript);
@@ -585,11 +595,6 @@ function handleCompletionRecovery(guildId, state, item, generated, playedMs, pla
     : 0;
   const expectedMs = Math.max(1, estimateRecoveryDurationMs(item.verificationText || item.text));
   const severeShort = actualMs >= 250 && actualMs < expectedMs * 0.75 && expectedMs - actualMs >= 650;
-  // Strong-short is deliberately much stricter than severeShort. It is never
-  // sufficient on its own for generic recovery; it only corroborates another
-  // independent signal such as a partial transcript or provider failure. The
-  // 58% boundary preserves confirmed ~1.3s/1.1s cutoffs while rejecting normal
-  // fast complete speech that merely beats the duration estimator.
   const strongShort = actualMs >= 250 && actualMs < expectedMs * 0.58 && expectedMs - actualMs >= 800;
 
   const tail = buildPcmTail(audioBuffer, metadata, playedMs, playbackSpeed);
@@ -617,8 +622,6 @@ function handleCompletionRecovery(guildId, state, item, generated, playedMs, pla
     return scheduleRecovery(guildId, state, item, triggerError || error || new Error('Truncated completion transcript.'), { replacementText: textTail });
   }
 
-  // Without a confirmed PCM tail or literal transcript prefix, an estimated
-  // duration fraction cannot locate the unheard words. Do not regenerate it.
   return false;
 }
 
@@ -658,6 +661,24 @@ async function waitForPlaying(state, item, timeoutMs, failures = []) {
     throwIfAborted(phase.signal);
     return await raceWithSignal(Promise.race([entersState(state.player, AudioPlayerStatus.Playing, phase.signal), ...failures]), phase.signal);
   } finally { phase.cancel(cancellationError('Player phase ended.')); phase.cleanup(); }
+}
+
+async function waitForAudiblePlaybackProgress(state, item, resource, timeoutMs, failures = []) {
+  if (!isAskQueueItem(item) || Math.max(0, Number(resource?.playbackDuration) || 0) > 0) return;
+  const maximum = Math.max(1, Number(timeoutMs) || 1);
+  const phase = deadlineSignal(item.abortController.signal, maximum, new Error(`/ask playback made no audible progress within ${Math.round(maximum)}ms.`));
+  try {
+    while (Math.max(0, Number(resource?.playbackDuration) || 0) <= 0) {
+      throwIfAborted(phase.signal);
+      let timer;
+      const tick = new Promise((resolve) => {
+        timer = setTimeout(resolve, 20);
+        timer.unref?.();
+      });
+      try { await raceWithSignal(Promise.race([tick, ...failures]), phase.signal); }
+      finally { if (timer) clearTimeout(timer); }
+    }
+  } finally { phase.cancel(cancellationError('/ask audibility check ended.')); phase.cleanup(); }
 }
 
 function expectedPlaybackTimeoutMs(item, generated, speed) {
@@ -831,10 +852,6 @@ function wireProviderToInput(generated, input, onFailure) {
   }
   if (generated?.completion && typeof generated.completion.then === 'function') {
     generated.completion.catch((error) => {
-      // A rejected completion while audio is still open is a true midstream
-      // provider failure and must stop FFmpeg immediately. If the audio stream
-      // already ended cleanly, the failure is metadata-only (for example a
-      // missing/late turnComplete) and must not truncate already-received audio.
       if (!audioEnded && !source?.readableEnded) fail(error);
     });
   }
@@ -966,9 +983,6 @@ export function enqueue(guildId, text, metadata = {}) {
   const incoming = createQueueItem(text, metadata);
   incoming.logicalJob.guildId = guildId;
   incoming.recoveryEpoch = Number(state.recoveryEpoch) || 0;
-  // During a cold voice handshake the first queued channel owns the pending
-  // startup. Reject cross-channel arrivals before provider work begins so the
-  // new voice/TTS overlap cannot waste quota on audio that can never play.
   if (!state.voiceReady && incoming.voiceChannelId) {
     const channelId = String(incoming.voiceChannelId);
     if (!state.pendingVoiceChannelId) state.pendingVoiceChannelId = channelId;
@@ -977,9 +991,6 @@ export function enqueue(guildId, text, metadata = {}) {
       return 'rejected-other-channel';
     }
   }
-  // One Discord message is always one queue/TTS item. While a cold Discord
-  // voice connection is still handshaking, start FIFO TTS prefetch immediately
-  // but defer actual playback until subscribePlayer marks voiceReady.
   if (state.queue.length >= maximum) {
     if (metadata.rejectOnOverflow === true) {
       cleanupCancelledQueuedItem(incoming);
@@ -1033,8 +1044,6 @@ async function runQueue(guildId, state, makePipeline = createMessagePipeline) {
     generated = await waitForGenerationOrCancellation(item, generation);
     if (item.cancelled || state.disposed) return;
 
-    // Buffered raw outputs can be checked before playback; a clearly truncated
-    // Live result is failed over before the listener hears it.
     if (item.generationMode === 'buffered' && Buffer.isBuffer(generated?.audioBuffer) && String(generated?.audioFormat || '').toLowerCase() === 's16le') {
       const completionCheck = await brieflyResolveCompletion(generated, 0);
       const shortDuration = isSuspiciouslyShortPcm(item, generated, generated.audioBuffer.length);
@@ -1059,7 +1068,13 @@ async function runQueue(guildId, state, makePipeline = createMessagePipeline) {
     playerErrorListener = onPlayerError;
     state.player.once('error', onPlayerError);
     state.player.play(messageResource);
-    await waitForPlaying(state, item, 10_000, [pipeline.failure, playerFailure]);
+    const playerStartTimeoutMs = getPlayerStartTimeoutMs(item);
+    const askAudibilityDeadline = isAskQueueItem(item) ? performance.now() + playerStartTimeoutMs : 0;
+    await waitForPlaying(state, item, playerStartTimeoutMs, [pipeline.failure, playerFailure]);
+    if (isAskQueueItem(item)) {
+      const remainingAudibilityMs = Math.max(1, askAudibilityDeadline - performance.now());
+      await waitForAudiblePlaybackProgress(state, item, messageResource, remainingAudibilityMs, [pipeline.failure, playerFailure]);
+    }
     throwIfAborted(item.abortController.signal);
     item.playbackStartedAt = performance.now();
     const messageAudibleEpoch = Date.now();
@@ -1089,10 +1104,6 @@ async function runQueue(guildId, state, makePipeline = createMessagePipeline) {
     pipeline.stopMonitoring();
 
     const playedMs = Math.max(0, Number(messageResource.playbackDuration) || 0);
-    // Audio completion controls queue progression. Completion metadata is useful
-    // for diagnostics/health, but must never add hundreds of milliseconds of
-    // dead air after the listener already heard the whole message. Check only
-    // what is already settled; otherwise observe/cancel it in the background.
     const completionResult = await brieflyResolveCompletion(generated, 1);
     if ((completionResult.error || completionResult.info) && !item.cancelled && !state.disposed) {
       const recovered = handleCompletionRecovery(guildId, state, item, generated, playedMs, messagePlaybackSpeed, completionResult);
@@ -1109,10 +1120,6 @@ async function runQueue(guildId, state, makePipeline = createMessagePipeline) {
   } catch (error) {
     outcome = item.cancelled ? 'stopped' : 'unavailable';
     if (!generated) {
-      // Speaker-label/voice/playback setup can fail while the overlapped TTS
-      // request is still generating. Abort that unclaimed provider work before
-      // scheduling recovery so one failed prelude cannot leave duplicate API
-      // work running in the background.
       abandonUnclaimedGeneration(item, 'Playback failed before provider handoff.');
     }
     if (!item.cancelled && !state.disposed) {
@@ -1150,7 +1157,6 @@ async function runQueue(guildId, state, makePipeline = createMessagePipeline) {
 function metadataResetSeconds(item) {
   return Number(item?.speakerResetSeconds ?? settings.speakerResetSeconds ?? 30);
 }
-
 
 function cancelQueuedItemsForUser(state, userId) {
   const id = String(userId ?? '');
@@ -1223,7 +1229,6 @@ function cancelCurrentAskIfSuperseded(state, userId, newerSequence) {
   const current = state?.currentItem;
   if (!id || !Number.isFinite(threshold) || threshold <= 0 || !current) return false;
   if (!String(current?.messageId ?? '').startsWith('ask:') || String(current?.userId ?? '') !== id) return false;
-  // Once the listener has heard any of the old answer, do not interrupt it.
   if (Number(current.firstAudibleAtEpoch) > 0) return false;
   const currentSequence = Math.max(0, Number(current.askSequence) || 0);
   if (currentSequence > 0 && currentSequence >= threshold) return false;
@@ -1268,8 +1273,6 @@ export function cancelMessageAudio(guildId, messageId) {
 export function clearAudio(guildId) {
   const state = states.get(guildId);
   if (!state) return;
-  // Invalidate post-playback completion observers from the pre-clear queue.
-  // Otherwise a late metadata callback could resurrect audio after /clear.
   state.recoveryEpoch = (Number(state.recoveryEpoch) || 0) + 1;
   if (state.currentItem) cancelCurrentItem(state);
   for (const item of state.pendingCompletions || []) cleanupCancelledQueuedItem(item);
@@ -1330,4 +1333,4 @@ export function getAudioStatus(guildId) {
   };
 }
 
-export const __test = { getState, runQueue, waitForPlaying, waitForIdleWithActiveTimeout, cleanupCancelledQueuedItem, mp3DurationMs, decideSpeakerLabel, buildPcmTail, buildTranscriptTextTail, handleCompletionRecovery, getGeneratedAudioDurationMs, createQueueItem, cancelQueuedItemsForUser, cancelQueuedAskItemsForUser, cancelCurrentAskIfSuperseded, cancelCurrentItemForUser, cancelSupersededAskItemsForUser: (state, userId, newerSequence) => ({ cancelledQueued: cancelQueuedAskItemsForUser(state, userId, newerSequence), cancelledCurrent: cancelCurrentAskIfSuperseded(state, userId, newerSequence) }), dropForQueueOverflow, waitForGenerationOrCancellation, createPrefetchSpool, wireProviderToInput, scheduleRecovery, scheduleCompletionGraceCancel, canRunQueue, takeNextItem, abandonUnclaimedGeneration, hasPrefetchBarrier };
+export const __test = { getState, runQueue, waitForPlaying, waitForAudiblePlaybackProgress, getPlayerStartTimeoutMs, isAskQueueItem, waitForIdleWithActiveTimeout, cleanupCancelledQueuedItem, mp3DurationMs, decideSpeakerLabel, buildPcmTail, buildTranscriptTextTail, handleCompletionRecovery, getGeneratedAudioDurationMs, createQueueItem, cancelQueuedItemsForUser, cancelQueuedAskItemsForUser, cancelCurrentAskIfSuperseded, cancelCurrentItemForUser, cancelSupersededAskItemsForUser: (state, userId, newerSequence) => ({ cancelledQueued: cancelQueuedAskItemsForUser(state, userId, newerSequence), cancelledCurrent: cancelCurrentAskIfSuperseded(state, userId, newerSequence) }), dropForQueueOverflow, waitForGenerationOrCancellation, createPrefetchSpool, wireProviderToInput, scheduleRecovery, scheduleCompletionGraceCancel, canRunQueue, takeNextItem, abandonUnclaimedGeneration, hasPrefetchBarrier };
