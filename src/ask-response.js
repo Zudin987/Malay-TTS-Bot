@@ -279,9 +279,10 @@ export function buildAskTtsItem(interaction, answer, voiceChannel, voice, reques
       voice,
       speakerLabel: null,
       rejectOnOverflow: true,
-      // The displayed answer is already final. Google reads it literally;
-      // Live's self-transcription cannot independently verify lexical fidelity.
-      skipLive: true,
+      // The displayed answer is already final. Route that exact text through
+      // the strict read-aloud Gemini Live turn; Google keeps the same text as
+      // the deterministic fallback. No rewriting stage is introduced here.
+      skipLive: false,
       forceBuffered: false,
       // Do not synthesize queued /ask answers speculatively. Repeated /ask calls
       // should not occupy Gemini slots for audio that cannot play yet.
