@@ -149,7 +149,7 @@ const ttsPrivacyCommand = {
       content: [
         'Normal TTS: eligible messages typed in the active voice-channel chat may be sent to Gemini Live, then the unofficial Google Malay endpoint on fallback.',
         `Speaker names: your display name or TTS alias is sent separately to Google Malay when an announcement is needed. Its PCM is cached locally per user for at most ${Number(settings.speakerLabel?.maxCacheAgeDays) || 90} days.`,
-        '/ask: the question you explicitly submit is sent to the configured Gemini text model; its displayed answer is then read literally by Google Malay.',
+        '/ask: the question you explicitly submit is sent to the configured Gemini text model; its displayed answer is sent as exact read-aloud text to Gemini 3.1 Live first, then Google Malay only on fallback.',
         'Enabling /ttsoptout cancels your current/queued normal TTS and label work and purges your per-user label cache. It cannot retract data already sent to a provider; /ask remains a separate explicit action.',
         `Your TTS opt-out is currently **${optedOut ? 'enabled' : 'disabled'}**. Use \`/ttsoptout\` to change it.`
       ].join('\n'),
@@ -300,7 +300,7 @@ const nameCommand = {
         .setName('remove')
         .setDescription('Remove a member\'s custom TTS name')
         .addUserOption((option) =>
-          option.setName('user').setDescription('Member whose TTS name should be removed').setRequired(true)
+          option.setName('user').setDescription('Member whose TTS name to remove').setRequired(true)
         )
     ),
 
@@ -559,7 +559,7 @@ const statusCommand = {
             `Voice: ${personalVoice ?? 'balanced on first TTS'} • pool ${voiceAllocation.totalVoices} • occupied ${voiceAllocation.occupiedVoices} by ${voiceAllocation.assignedUsers} saved users`,
             `Thinking ${String(settings.geminiLive?.profile?.thinkingLevel || 'MINIMAL').toUpperCase()} • fresh one-turn Live sessions only`,
             `Effective first-audio budget ${provider.timing.budgetMs}ms • Live ≤${provider.timing.liveMs}ms (setup ≤${provider.timing.setupMs}ms) • Google ≤${provider.timing.googleMs}ms`,
-            `Markerless Live audio-end grace adapts ${provider.timing.graceMinMs}–${provider.timing.graceMaxMs}ms • /ask uses literal Google speech`,
+            `Markerless Live audio-end grace adapts ${provider.timing.graceMinMs}–${provider.timing.graceMaxMs}ms • /ask: 3.1 Live primary → Google ms fallback`,
             `Preprocess: light-clean • max ${settings.maximumCharacters} graphemes • no Gemini dictionary/grammar rewrite • no merge`
           ].join('\n')
         },

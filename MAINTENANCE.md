@@ -34,9 +34,9 @@ Never add heavy local AI, local TTS models, or architecture that materially incr
 
 ## Provider chain
 
-Normal chat uses **Gemini 3.1 Flash Live → Google Malay (`google-ms`)**. These are the only two speech providers. Preserve normal fresh one-turn Live setup and first-audio timing.
+Normal chat and `/ask` speech use **Gemini 3.1 Flash Live → Google Malay (`google-ms`)**. These are the only two speech providers. Preserve normal fresh one-turn Live setup and first-audio timing.
 
-`/ask` generates text with its existing Gemini text model, then reads the displayed answer literally with Google. Live is not a verified literal reader: its own transcription is not independent evidence of audio fidelity. Recovery tails also use Google or already-generated PCM.
+`/ask` generates its displayed answer with the existing Gemini text model, then sends that exact finalized answer into the same strict read-aloud Live path. The collision-resistant transcript boundaries and system instruction prohibit answering, translating, completing, paraphrasing, rewriting or adding words. Google receives the same exact answer only when Live is unavailable or fails. There is no second text-generation or rewriting stage. Recovery tails may still use Google or already-generated PCM when deterministic recovery requires bypassing Live.
 
 The runtime accepts **ten environment key slots** and keeps **round-robin selection**. One Live speech item uses one selected key; duplicate credentials do not create independent quota/auth capacity. Quota failures do not trigger same-request key rotation. Environment key changes require a full process restart.
 
