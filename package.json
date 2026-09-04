@@ -1,6 +1,6 @@
 {
   "name": "malay-tts-bot",
-  "version": "0.24.2",
+  "version": "0.24.3",
   "private": true,
   "description": "Private Discord Malay TTS with bounded Gemini 3.1 Live and Google fallback, ten-key round-robin, six voices, and clean Windows SYSTEM deployment.",
   "type": "module",
