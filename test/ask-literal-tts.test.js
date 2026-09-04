@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildAskTtsItem } from '../src/ask-response.js';
 
-test('/ask TTS skips conversational Gemini Live and preserves the displayed answer', () => {
+test('/ask TTS keeps the displayed answer exact while allowing Gemini Live primary routing', () => {
   const interaction = {
     id: 'interaction-literal',
     createdTimestamp: 1234,
@@ -16,7 +16,7 @@ test('/ask TTS skips conversational Gemini Live and preserves the displayed answ
   assert.equal(item.text, answer);
   assert.equal(item.metadata.googleText, answer);
   assert.equal(item.metadata.verificationText, answer);
-  assert.equal(item.metadata.skipLive, true);
+  assert.equal(item.metadata.skipLive, false);
   assert.equal(item.metadata.forceBuffered, false);
   assert.equal(item.metadata.noPrefetch, true);
   assert.equal(item.metadata.messageId, 'ask:interaction-literal');
