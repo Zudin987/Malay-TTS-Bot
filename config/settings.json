@@ -47,8 +47,7 @@
     "playbackSafetyMs": 10000,
     "playbackHardMaxMs": 60000,
     "progressWatchdogMs": 12000,
-    "askAudibilityStartTimeoutMs": 3000,
-    "askAudibilityProgressTimeoutMs": 1500,
+    "askAudibilityTimeoutMs": 3500,
     "peakLimiter": {
       "enabled": true,
       "ceilingDb": -5,
