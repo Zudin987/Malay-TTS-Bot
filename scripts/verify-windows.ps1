@@ -99,9 +99,15 @@ try {
   }
   $LogProbe = Join-Path $PackagePath 'data\bot.log'
   [IO.File]::WriteAllText($LogProbe, 'acl probe')
-  $WriteMask = [Security.AccessControl.FileSystemRights]::Write -bor
-    [Security.AccessControl.FileSystemRights]::Modify -bor
-    [Security.AccessControl.FileSystemRights]::FullControl -bor
+  # Do not use composite Modify/FullControl masks here: Modify also contains
+  # read/execute bits, which would falsely classify a legitimate RX ACE as
+  # writable. Atomic mutation rights still match Write, Modify and FullControl.
+  $WriteMask = [Security.AccessControl.FileSystemRights]::WriteData -bor
+    [Security.AccessControl.FileSystemRights]::AppendData -bor
+    [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+    [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+    [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+    [Security.AccessControl.FileSystemRights]::Delete -bor
     [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
     [Security.AccessControl.FileSystemRights]::TakeOwnership
   foreach ($Relative in @('.', 'src\bootstrap.js', 'config\settings.json', 'runtime\node-v24.19.0-win-x64\node.exe', 'node_modules\discord.js\package.json', 'data\bot.log')) {

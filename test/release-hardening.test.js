@@ -60,6 +60,9 @@ test('Windows installer seals the full application tree before SYSTEM registrati
   assert.match(verifier, /standardUserWriteDenied = \$true/u);
   assert.match(verifier, /New-LocalUser/u);
   assert.match(verifier, /FileAccess\]::Write/u);
+  assert.match(verifier, /FileSystemRights\]::WriteData/u);
+  assert.match(verifier, /FileSystemRights\]::DeleteSubdirectoriesAndFiles/u);
+  assert.doesNotMatch(verifier, /FileSystemRights\]::Modify/u);
   assert.match(verifier, /packagedHashes = \$true/u);
   assert.match(verifier, /protectedDataLogs = \$true/u);
   assert.match(verifier, /storeFlush = \$true/u);
