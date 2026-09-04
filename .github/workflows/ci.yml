@@ -38,7 +38,7 @@ jobs:
         run: python scripts/test-clean-package.py
       - name: Dependency audit
         if: runner.os == 'Linux'
-        run: npm audit --audit-level=high --fetch-timeout=60000 --fetch-retries=2 --fetch-retry-mintimeout=5000 --fetch-retry-maxtimeout=30000
+        run: node scripts/audit-dependencies.mjs
       - name: Install Linux FFmpeg
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ffmpeg

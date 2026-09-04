@@ -139,6 +139,7 @@ Before calling a release final:
 - add the portable Node 24 runtime only to the release package, not the repository
 - on Windows, reject reparse-point install trees, seal the whole application DACL before SYSTEM task registration, verify packaged hashes, and prove a real standard account cannot write source, config, runtime, dependencies or logs
 - pin every `uses:` action to a verified full commit SHA; update pins through reviewed Dependabot pull requests
+- keep the live npm advisory audit mandatory; during a network-only outage, `audit-dependencies.mjs` may accept only an unexpired (maximum 48-hour), zero-vulnerability baseline bound to the exact unchanged package and lockfile hashes
 
 ## Git workflow
 
