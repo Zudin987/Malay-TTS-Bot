@@ -8,8 +8,12 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const maximumBaselineAgeMs = 48 * 60 * 60 * 1000;
 const maximumClockSkewMs = 5 * 60 * 1000;
 
+export function digestDependencyText(value) {
+  return createHash('sha256').update(String(value).replace(/\r\n?/gu, '\n')).digest('hex');
+}
+
 function digestFile(filePath) {
-  return createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+  return digestDependencyText(fs.readFileSync(filePath, 'utf8'));
 }
 
 export function isAuthoritativeAuditReport(value) {
@@ -32,7 +36,7 @@ export function validateAuditBaseline(baseline, { root = repoRoot, now = Date.no
   }
   const packageJsonHash = digestFile(path.join(root, 'package.json'));
   const packageLockHash = digestFile(path.join(root, 'package-lock.json'));
-  if (packageJsonHash !== baseline.packageJsonSha256 || packageLockHash !== baseline.packageLockSha256) {
+  if (packageJsonHash !== baseline.packageJsonLfSha256 || packageLockHash !== baseline.packageLockLfSha256) {
     throw new Error('Dependency files changed after the clean audit baseline.');
   }
   return baseline;

@@ -1,9 +1,8 @@
 import fs from 'node:fs';
-import { createHash } from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { isAuthoritativeAuditReport, validateAuditBaseline } from '../scripts/audit-dependencies.mjs';
+import { digestDependencyText, isAuthoritativeAuditReport, validateAuditBaseline } from '../scripts/audit-dependencies.mjs';
 
 test('every GitHub Action dependency is pinned to an immutable commit', () => {
   const workflow = fs.readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
@@ -31,12 +30,13 @@ test('CI performs one explicit bounded dependency audit without duplicate instal
 test('dependency-audit outage evidence is clean, exact-file bound and short lived', () => {
   const root = fileURLToPath(new URL('..', import.meta.url));
   const baseline = JSON.parse(fs.readFileSync(new URL('../scripts/audit-baseline.json', import.meta.url), 'utf8'));
-  const hash = (name) => createHash('sha256').update(fs.readFileSync(new URL(`../${name}`, import.meta.url))).digest('hex');
-  assert.equal(baseline.packageJsonSha256, hash('package.json'));
-  assert.equal(baseline.packageLockSha256, hash('package-lock.json'));
+  const hash = (name) => digestDependencyText(fs.readFileSync(new URL(`../${name}`, import.meta.url), 'utf8'));
+  assert.equal(baseline.packageJsonLfSha256, hash('package.json'));
+  assert.equal(baseline.packageLockLfSha256, hash('package-lock.json'));
+  assert.equal(digestDependencyText('same\r\ncontent\r\n'), digestDependencyText('same\ncontent\n'));
   assert.doesNotThrow(() => validateAuditBaseline(baseline, { root, now: Date.parse('2026-09-04T10:30:00Z') }));
   assert.throws(() => validateAuditBaseline(baseline, { root, now: Date.parse(baseline.expiresAt) }), /expired/u);
-  assert.throws(() => validateAuditBaseline({ ...baseline, packageLockSha256: '0'.repeat(64) }, { root, now: Date.parse('2026-09-04T10:30:00Z') }), /changed/u);
+  assert.throws(() => validateAuditBaseline({ ...baseline, packageLockLfSha256: '0'.repeat(64) }, { root, now: Date.parse('2026-09-04T10:30:00Z') }), /changed/u);
   assert.equal(isAuthoritativeAuditReport({ auditReportVersion: 2, metadata: { vulnerabilities: { high: 1 } } }), true);
   assert.equal(isAuthoritativeAuditReport({ error: { code: 'ETIMEDOUT' } }), false);
 });
