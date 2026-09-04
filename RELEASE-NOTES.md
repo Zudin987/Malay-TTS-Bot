@@ -1,21 +1,40 @@
-## v0.24.2
+## v0.24.3
 
-Patch release correcting `/ask` speech routing while preserving the v0.24.1 reliability, privacy, ownership and Windows deployment hardening.
+Patch release hardening `/ask` speech after v0.24.2 correctly restored Gemini 3.1 Live as the primary speech provider.
 
-- Root cause fixed: v0.24.1 intentionally set `/ask` queue items to `skipLive: true`, so a ready Gemini 3.1 Live provider was never attempted for `/ask`; Google MS was the hard-coded primary, not a runtime fallback or configuration failure.
-- `/ask` now sends the exact already-generated/displayed answer through the normal **Gemini 3.1 Flash Live → Google Malay (`google-ms`)** speech chain. Google receives the same exact answer only when Live is unavailable or fails.
-- Literal-response behavior is preserved without a second Gemini rewriting step. The existing fresh Live turn uses collision-resistant speech boundaries and the strict read-aloud system instruction that forbids answering, translating, completing, paraphrasing, rewriting or adding words.
-- Status and `/ttsprivacy` now describe the real `/ask` speech provider chain instead of saying `/ask` always uses Google.
-- All ten `.env` Gemini key slots remain supported: `GEMINI_API_KEY` through `GEMINI_API_KEY_10`. Deterministic round-robin selection, bad-key isolation, quota behavior and `/restarttts` reset behavior remain intact.
-- `/ask` ownership, queue admission, no-prefetch behavior, STOP control, supersession rules and one-logical-item playback behavior remain unchanged. Recovery-only `skipLive` behavior remains available for deterministic recovery paths.
-- Added `/ask` routing regressions for Live-primary selection, exact-text Google fallback, all-ten-key rotation, provider metrics, Live failure handling and single-item/no-duplicate queue ownership.
-- The v0.24.1 privacy/cache/shutdown protections, clean-package allowlist, checksum-pinned runtimes, SYSTEM task lifecycle, full-tree ACL sealing, standard-user write-denial proof and release provenance gates remain unchanged.
+### `/ask` audibility fallback
+
+- Root cause addressed: provider **first audio** and Discord **audible playback** are separate milestones. A Live turn could return PCM successfully, be selected as the provider, and then leave the audio pipeline waiting up to the old 10-second player-start limit before the listener heard anything.
+- `/ask` now has one bounded **3500 ms post-provider audibility window**. The window covers both entering Discord `Playing` and obtaining real `playbackDuration` progress; entering `Playing` alone is not treated as audible success.
+- If Gemini 3.1 Live is selected but the `/ask` item reaches **0 ms playback progress** within that audibility window, the stale Live turn is cancelled and the exact displayed answer is retried **once** with Google Malay (`google-ms`). That retry sets `skipLive: true`, so it cannot loop back into Live.
+- If Google already owns the `/ask` attempt and still reaches 0 ms playback progress, no second retry is created. The failed `/ask` item retires and FIFO continues to later normal-chat TTS.
+- Once any `/ask` audio has made real playback progress, the bot never restarts the full answer from the beginning. Existing conservative verified-tail recovery may still operate, preventing a late local/provider completion from creating a duplicate full answer.
+- Normal chat keeps its existing 10-second Discord player-start behavior; this shorter audibility policy is scoped only to `/ask`.
+
+### Regression coverage
+
+Added explicit tests for:
+
+- bounded `/ask` audibility timing while normal chat retains its previous timeout;
+- Gemini first-audio success followed by zero playback progress -> exactly one Google-only retry;
+- cancellation of stale Gemini work during that retry;
+- no full-answer replay after any actual playback progress;
+- Google zero-progress failure -> no retry loop;
+- `Playing` without `playbackDuration` progress not counting as `/ask` audibility;
+- provider failure on `/ask` clearing queue ownership so a following normal-chat item still runs.
+
+The v0.24.2 provider-routing regressions remain in place: exact displayed answer -> Gemini 3.1 Live first, exact-text Google fallback, deterministic ten-key rotation, provider metrics and one logical `/ask` queue item.
+
+### Release hygiene and preserved protections
+
+- `package.json` and the root `package-lock.json` metadata are both aligned to **0.24.3**, correcting the non-runtime version-metadata mismatch noted after v0.24.2.
+- The existing ten Gemini key slots, deterministic round robin, bad-key isolation, quota/cooldown behavior, `/ask` ownership and STOP/supersession rules, no-prefetch protection, privacy opt-out/cache ownership, graceful shutdown, clean-package exclusions, checksum-pinned portable runtimes, Windows SYSTEM lifecycle, full-tree ACL sealing, standard-user write-denial proof and release-provenance gates remain preserved.
 
 ### CLEAN installation or upgrade
 
 1. Stop the existing bot using `stop-bot.vbs`.
 2. Back up only `.env` and `data\guilds.json`.
-3. Extract `Malay-TTS-Bot-v0.24.2-CLEAN.zip` into an empty `C:\Malay-TTS-Bot` installation. Restore only those two user files; keep the new `config\settings.json`.
+3. Extract `Malay-TTS-Bot-v0.24.3-CLEAN.zip` into an empty `C:\Malay-TTS-Bot` installation. Restore only those two user files; keep the new `config\settings.json`.
 4. Run `setup-clean.cmd` as administrator, then start the **Malay TTS Bot** SYSTEM task or use `restart-bot.vbs`.
 
 The ZIP includes portable **Node 24.19.0 with npm** and **FFmpeg 9.0.1**, a per-file checksum manifest and fresh defaults. It contains no user `.env`, guild state, application `node_modules`, logs, caches or lock files.
