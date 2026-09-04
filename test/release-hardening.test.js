@@ -49,6 +49,9 @@ test('Windows installer seals the full application tree before SYSTEM registrati
   const registerAt = installer.indexOf('Register-ScheduledTask');
   assert.ok(installer.indexOf("'/reset', '/T', '/C'") < registerAt);
   assert.ok(installer.indexOf("'/inheritance:r', '/grant:r'") < registerAt);
+  assert.match(installer, /function Reset-DescendantAcls/u);
+  assert.match(installer, /Reset-DescendantAcls -Directory \$InstallPath/u);
+  assert.match(installer, /Reset-DescendantAcls -Directory \$DataPath/u);
   assert.match(installer, /\*S-1-5-11:\(OI\)\(CI\)RX/u);
   assert.match(installer, /\*S-1-5-32-545:\(OI\)\(CI\)RX/u);
   assert.match(installer, /'\/remove:g', '\*S-1-1-0', '\*S-1-5-11', '\*S-1-5-32-545'/u);
