@@ -41,7 +41,7 @@ Speaker-label PCM cache entries are owner-scoped by guild and user. Enabling `/t
 
 Use `/ask question:<text>` when you intentionally want an AI answer. It uses `gemini-3.1-flash-lite` with minimal thinking and returns one compact public Discord embed, normally 1–3 short sentences. The embed title is `<display name> ask` and contains **Question** and **AI reply** fields. The model itself still cannot request images, embeds, tables, or long article-style output.
 
-After the embed is posted, the same answer is queued when the asker is in the active normal voice channel. Only the answer is spoken. Google Malay reads this already-generated text literally: Live's self-transcription cannot independently prove lexical fidelity, so `/ask` does not send the answer to a conversational speech model. TTS failure never removes the posted answer. Bot replies remain excluded from normal MessageCreate speech.
+After the embed is posted, the same displayed answer is queued when the asker is in the active normal voice channel. Only the answer is spoken. Its exact text is sent to the strict read-aloud Gemini 3.1 Live turn first; the randomized transcript boundaries and read-aloud system instruction forbid answering, paraphrasing, translating, completing, or adding words. Google Malay receives the same exact answer only if Live is unavailable or fails. There is no extra Gemini rewriting stage. TTS failure never removes the posted answer. Bot replies remain excluded from normal MessageCreate speech.
 
 A newer `/ask` reserves ordering after admission but does not cancel a valid older answer. It supersedes older pre-audible speech only after the new answer is visible, its voice connection is confirmed, and its own queue item is accepted. Already audible speech is not interrupted.
 
@@ -74,7 +74,7 @@ The round-robin is intended for multiple keys from the same Google Cloud project
 - Keep `.env` private.
 - Do not restore an old `config/settings.json` during a clean upgrade.
 - Changes to `config/settings.json` are staged on disk until an idle `/restarttts` or a full process restart; there is no automatic settings hot reload.
-- Normal message text may go to Gemini Live and then Google Malay on fallback. Display names/aliases are separately sent to Google for speaker announcements. `/ask` sends its explicit question to the configured Gemini text model and reads the displayed answer through Google.
+- Normal message text may go to Gemini Live and then Google Malay on fallback. Display names/aliases are separately sent to Google for speaker announcements. `/ask` sends its explicit question to the configured Gemini text model, then sends the displayed answer to Gemini 3.1 Live for strict read-aloud with Google Malay fallback.
 - `/ttsoptout` cancels normal message/label work and purges that user's label cache. It cannot retract data already sent, and `/ask` remains a separate explicit action.
 
 Useful commands: `/ask`, `/join`, `/leave`, `/speaker`, `/changevoice`, `/name`, `/dictionary`, `/restarttts`, `/status`, `/ttsprivacy`, `/ttsoptout`.
@@ -84,7 +84,7 @@ Useful commands: `/ask`, `/join`, `/leave`, `/speaker`, `/changevoice`, `/name`,
 
 ## Gemini read-aloud prompting
 
-Live uses a strict system instruction and a collision-resistant, nonce-delimited transcript. The working normal-chat protocol and six voices remain: Charon, Orus, Schedar, Gacrux, Vindemiatrix and Despina. The prompt forbids answering, rewriting and additional words; generative speech still cannot provide an absolute lexical guarantee. `/ask` and recovery tails use Google when literal delivery is required.
+Live uses a strict system instruction and a collision-resistant, nonce-delimited transcript. The working normal-chat protocol and six voices remain: Charon, Orus, Schedar, Gacrux, Vindemiatrix and Despina. The prompt forbids answering, rewriting and additional words; generative speech still cannot provide an absolute lexical guarantee. `/ask` now uses this same strict Live read-aloud path as its primary speech provider, while recovery tails may still use Google or already-generated PCM when deterministic recovery is required.
 
 Square-bracket spans are neutralized for Gemini audio, for example `[laughs]` becomes `(laughs)`. This preserves their words without treating them as performance tags. Google input is unchanged.
 
@@ -102,7 +102,7 @@ A small control socket bound only to `127.0.0.1` provides OS-owned exclusivity a
 
 ## Release validation
 
-v0.24.1 ships portable Node 24.19.0 including npm, and FFmpeg 9.0.1. Source commits contain no binaries. `scripts/build-clean.py` downloads checksum-pinned runtimes and builds from tracked source using an explicit allowlist and fixed archive ordering/timestamps. `release-manifest.json` records the source commit and per-file checksums.
+v0.24.2 ships portable Node 24.19.0 including npm, and FFmpeg 9.0.1. Source commits contain no binaries. `scripts/build-clean.py` downloads checksum-pinned runtimes and builds from tracked source using an explicit allowlist and fixed archive ordering/timestamps. `release-manifest.json` records the source commit and per-file checksums.
 
 CI requires five consecutive full test passes on both Linux and Windows. It re-extracts the real CLEAN ZIP, checks every shipped JavaScript and JSON file (including portable npm), installs application dependencies with bundled npm and no system Node on PATH, and verifies two SYSTEM starts/stops, ten-key rotation, deferred-store flushing, the PCM/filter/Opus/decode path, packaged source/runtime hashes, full-tree/private-state ACLs, protected data logs, and real write denial from a disposable standard Windows account. The mandatory npm advisory check has bounded network retries; only a network-only outage may use a zero-vulnerability baseline that is no more than 48 hours old and matches the exact dependency-file hashes. Every workflow action is pinned to a reviewed full commit SHA and Dependabot maintains those pins. Publishing from main depends on every gate passing and never overwrites an existing release/tag.
 
