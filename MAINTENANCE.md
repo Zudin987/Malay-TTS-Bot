@@ -29,6 +29,7 @@ Never add heavy local AI, local TTS models, or architecture that materially incr
 - Gemini Live sessions are fresh, one-turn sessions; do not restore multi-turn reuse.
 - Do not convert the bot to an EXE for performance.
 - `/restarttts` resets process-global TTS/provider state, so it must only run when all guild queues and Gemini provider work are idle.
+- `config/settings.json` is loaded at startup and by the guarded `/restarttts` command only. Do not restore automatic file watching that can mutate settings during active work.
 - Editing Gemini key values or `GEMINI_API_KEY_SLOT` in `.env` requires a full bot process restart. `/restarttts` does not reconstruct the runtime key ring from a changed `.env`.
 
 ## Provider chain
@@ -52,7 +53,9 @@ Gemini voice pool:
 
 Speaker username must **not** be included in Gemini message text. The speaker label is generated separately with Google Malay TTS, cached locally, played first, then the configured short gap, then the user's Gemini message.
 
-Speaker-label work is privacy-sensitive provider work too. It must be lazy/cancellable, must stop on privacy opt-out, and must not write a new cache entry after cancellation.
+Speaker-label work is privacy-sensitive provider work too. It must be lazy/cancellable, owner-scoped by guild/user, must stop only the opting-out user's consumers, and must not write a new cache entry after cancellation. Per-user opt-out purges that owner's memory/disk entries; never return to an unowned cache key that prevents targeted deletion.
+
+Voice-log delivery must re-fetch the configured recipient from the event guild and re-check Manage Guild on every event. Authorization lookup failure or lost permission disables and clears the subscription. Removing the bot from a guild deletes that guild's persisted record.
 
 ## Discord speech eligibility
 
@@ -110,7 +113,7 @@ Also exclude runtime/generated data such as:
 
 - `node_modules/`
 - `data/speaker-label-cache/`
-- `bot.log`, `bot-old.log`
+- `data/bot.log`, `data/bot-old.log` (and legacy root logs)
 - `data/bot.lock`
 - `data/stop.request`
 - backups/temp files
@@ -125,12 +128,18 @@ Before calling a release final:
 - test the FFmpeg PCM -> filters/limiter -> libopus/Ogg -> decode path
 - review provider cancellation, failover, queue, speaker-label and disconnect/recovery behavior
 - verify privacy opt-out cancels queued/current message TTS and active speaker-label provider work
+- verify opt-out/cache purge is owner-scoped and leaves another guild/user's work intact
+- verify voice-log recipients are current authorized guild members before every DM
+- verify graceful shutdown flushes deferred guild-store writes
 - verify the doctor reports all configured Gemini slots and duplicate-slot warnings without exposing key contents
 - build only a CLEAN package
 - re-extract the final ZIP and validate it
 - verify `.env`, `data/guilds.json`, `node_modules`, `.git`, cache PCM, logs and temp/runtime lock files are absent
 - include the newest default `config/settings.json`
 - add the portable Node 24 runtime only to the release package, not the repository
+- on Windows, reject reparse-point install trees, seal the whole application DACL before SYSTEM task registration, verify packaged hashes, and prove a real standard account cannot write source, config, runtime, dependencies or logs
+- pin every `uses:` action to a verified full commit SHA; update pins through reviewed Dependabot pull requests
+- keep the live npm advisory audit mandatory; during a network-only outage, `audit-dependencies.mjs` may accept only an unexpired (maximum 48-hour), zero-vulnerability baseline bound to the exact unchanged package and lockfile hashes
 
 ## Git workflow
 

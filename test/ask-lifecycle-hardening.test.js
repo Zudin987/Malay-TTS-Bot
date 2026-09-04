@@ -46,7 +46,9 @@ test('slower older /ask cannot replace a newer request that was invoked later', 
   const older = askResponse.beginAskTtsRequest(guildId, userId);
   const newer = askResponse.beginAskTtsRequest(guildId, userId);
   assert.equal(askResponse.isLatestAskTtsRequest(guildId, userId, older), false);
-  assert.equal(askResponse.isLatestAskTtsRequest(guildId, userId, newer), true);
+  assert.equal(askResponse.isLatestAskTtsRequest(guildId, userId, newer), false);
+  assert.equal(askResponse.canCommitAskTtsRequest(guildId, userId, older), false);
+  assert.equal(askResponse.canCommitAskTtsRequest(guildId, userId, newer), true);
 
   let enqueueCalls = 0;
   const staleResult = await askResponse.queueAskAnswerTts(
@@ -57,6 +59,7 @@ test('slower older /ask cannot replace a newer request that was invoked later', 
   );
   assert.equal(staleResult, 'superseded');
   assert.equal(enqueueCalls, 0);
+  askResponse.finishAskTtsRequest(guildId, userId, newer);
 });
 
 test('accepted latest /ask carries overflow protection and supersedes only older speech', async () => {
@@ -86,6 +89,38 @@ test('accepted latest /ask carries overflow protection and supersedes only older
   assert.equal(queuedMetadata.protectFromOverflow, true);
   assert.equal(queuedMetadata.noPrefetch, true);
   assert.equal(queuedMetadata.askSequence, sequence);
+});
+
+test('superseded-audio cleanup failure cannot invalidate an accepted /ask item', async () => {
+  const guildId = `g-cleanup-${Date.now()}-${Math.random()}`;
+  const userId = `u-cleanup-${Date.now()}-${Math.random()}`;
+  const sequence = askResponse.beginAskTtsRequest(guildId, userId);
+  const voiceChannel = { id: 'voice-cleanup', type: ChannelType.GuildVoice };
+  const interaction = {
+    id: 'interaction-cleanup', guildId, guild: {}, createdTimestamp: Date.now(),
+    user: { id: userId }, member: { voice: { channel: voiceChannel } }
+  };
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args);
+  try {
+    const result = await askResponse.queueAskAnswerTts(interaction, 'accepted answer', {
+      isOptedOut: () => false,
+      getRuntimeVoiceChannelId: () => null,
+      getAudioStatus: () => ({ queued: 0, maximumQueued: 10 }),
+      getVoice: () => 'Charon',
+      connect: async () => ({ connection: {} }),
+      enqueue: () => 'started',
+      cancel: () => false,
+      cancelSupersededAsk: () => { throw new Error('cleanup failed'); }
+    }, { requestSequence: sequence });
+    assert.equal(result, 'started');
+    assert.equal(askResponse.isLatestAskTtsRequest(guildId, userId, sequence), true);
+    assert.match(warnings[0]?.join(' ') || '', /cleanup failed/u);
+  } finally {
+    console.warn = originalWarn;
+    askResponse.finishAskTtsRequest(guildId, userId, sequence);
+  }
 });
 
 test('overflow drops normal waiting speech before an accepted protected /ask', () => {

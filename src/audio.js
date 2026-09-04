@@ -226,7 +226,12 @@ function createPrefetchSpool(generated, signal) {
 function startGeneration(guildId, item, { prefetch = false } = {}) {
   if (!prefetch) item.foregroundController?.abort();
   if (item.generation) return item.generation;
-  if (item.speakerLabel && !item.speakerLabelGeneration) item.speakerLabelGeneration = getSpeakerLabelPcm(item.speakerLabel, { signal: item.abortController.signal });
+  if (item.speakerLabel && !item.speakerLabelGeneration) {
+    item.speakerLabelGeneration = getSpeakerLabelPcm(item.speakerLabel, {
+      signal: item.abortController.signal,
+      owner: { guildId, userId: item.userId }
+    });
+  }
 
   if (Buffer.isBuffer(item.replayAudioBuffer) && item.replayAudioBuffer.length > 0) {
     item.generationMode = 'buffered-replay';

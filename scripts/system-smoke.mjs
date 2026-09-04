@@ -9,6 +9,7 @@ import { readInstanceRecord } from '../src/single-instance.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 assert.equal(process.cwd().toLowerCase(), root.toLowerCase());
+const gracefulMode = fs.existsSync(path.join(root, 'data', 'ci-graceful-mode'));
 await startBot({ directory: root, loadApp: async () => {
   const account = execFileSync('whoami.exe', ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true });
   assert.match(account, /S-1-5-18/u);
@@ -23,10 +24,28 @@ await startBot({ directory: root, loadApp: async () => {
   const doctor = execFileSync(process.execPath, [path.join(root, 'src', 'doctor.js')], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
   assert.match(doctor, /Doctor result: 0 failure/u);
   assert.match(doctor, /Real audio pipeline: PCM/u);
-  fs.writeFileSync(path.join(root, 'data', 'ci-system-result.json'), JSON.stringify({
+  const result = {
     accountSid: 'S-1-5-18', node: process.versions.node, cwd: process.cwd(), slots,
-    nonce: readInstanceRecord(root).nonce, doctorPassed: true, opusRoundTripPassed: true
-  }));
+    nonce: readInstanceRecord(root).nonce, doctorPassed: true, opusRoundTripPassed: true,
+    preAppStop: !gracefulMode
+  };
+  if (gracefulMode) {
+    const deferredGuild = `${Date.now()}${process.pid}`;
+    const deferredUser = '444444444444444444';
+    Object.assign(result, { storeFlushScheduled: true, deferredGuild, deferredUser });
+    fs.writeFileSync(path.join(root, 'data', 'ci-system-result.json'), JSON.stringify(result));
+    return {
+      gracefulShutdown() {
+        try {
+          assert.equal(store.getOrAssignUserTtsVoice(deferredGuild, deferredUser, ['Charon']), 'Charon');
+          process.exit(store.flushStore() ? 0 : 1);
+        } catch {
+          process.exit(1);
+        }
+      }
+    };
+  }
+  fs.writeFileSync(path.join(root, 'data', 'ci-system-result.json'), JSON.stringify(result));
   // Exercise stop control while bootstrap is still waiting for remote login.
   return new Promise(() => {});
 } }).catch((error) => {

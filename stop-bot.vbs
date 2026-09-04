@@ -12,5 +12,5 @@ If exitCode = 0 Then
 ElseIf exitCode = 2 Then
   shell.Popup "TTS bot is not running.", 2, "Malay TTS Bot", 64
 Else
-  shell.Popup "Could not stop the bot cleanly. Check bot.log. Task Manager is still available as a fallback.", 5, "Malay TTS Bot", 48
+  shell.Popup "Could not stop the bot cleanly. Check data\bot.log. Task Manager is still available as a fallback.", 5, "Malay TTS Bot", 48
 End If

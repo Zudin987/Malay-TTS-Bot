@@ -8,13 +8,14 @@ import { synthesizeGoogleMalay } from './providers/google.js';
 import { getFfmpegPath } from './ffmpeg.js';
 import { cancellationError, deadlineSignal, raceWithSignal, throwIfAborted } from './cancellation.js';
 
-const CACHE_VERSION = 'v2-ms-24k-mono-s16le';
+const CACHE_VERSION = 'v3-owner-ms-24k-mono-s16le';
 const CACHE_DIR = path.join(dataDir, 'speaker-label-cache');
 const PCM_BYTES_PER_MS = (24_000 * 1 * 2) / 1000;
 const inflight = new Map();
 const memoryCache = new Map();
 let lastPruneAt = 0;
 let privacyEpoch = 0;
+const ownerPrivacyEpochs = new Map();
 const MAX_LABEL_JOBS = 4;
 
 const stats = { memoryHits: 0, diskHits: 0, misses: 0, generated: 0, failures: 0, waitTimeouts: 0, invalidCacheFiles: 0, prunedFiles: 0, cancellations: 0 };
@@ -42,9 +43,21 @@ export function normalizeSpeakerLabelText(value) {
   }
   return Array.from(cleaned).slice(0, 80).join('');
 }
-export function speakerLabelCacheKey(value) {
+function speakerLabelOwnerKey(owner) {
+  const guildId = String(owner?.guildId ?? '').trim();
+  const userId = String(owner?.userId ?? '').trim();
+  return guildId && userId ? `${guildId}:${userId}` : null;
+}
+
+function ownerCachePrefix(ownerKey) {
+  return ownerKey ? `${createHash('sha256').update(`${CACHE_VERSION}\n${ownerKey}`, 'utf8').digest('hex')}-` : '';
+}
+
+export function speakerLabelCacheKey(value, owner = null) {
   const label = normalizeSpeakerLabelText(value);
-  return createHash('sha256').update(`${CACHE_VERSION}\n${label}`, 'utf8').digest('hex');
+  const ownerKey = speakerLabelOwnerKey(owner);
+  const labelKey = createHash('sha256').update(`${CACHE_VERSION}\n${label}`, 'utf8').digest('hex');
+  return `${ownerCachePrefix(ownerKey)}${labelKey}`;
 }
 function speakerLabelSpeakText(value) {
   const label = normalizeSpeakerLabelText(value);
@@ -154,7 +167,14 @@ export async function pruneSpeakerLabelCache({ force = false } = {}) {
   return removed;
 }
 
-async function generateAndCache(label, key, signal, { synthesizeImpl = synthesizeGoogleMalay, decodeImpl = decodeAudioToSpeakerPcm, mkdirImpl = fs.mkdir } = {}) {
+async function generateAndCache(label, key, signal, {
+  synthesizeImpl = synthesizeGoogleMalay,
+  decodeImpl = decodeAudioToSpeakerPcm,
+  mkdirImpl = fs.mkdir,
+  writeFileImpl = fs.writeFile,
+  renameImpl = fs.rename,
+  rmImpl = fs.rm
+} = {}) {
   const speakText = speakerLabelSpeakText(label);
   if (!speakText) return null;
   throwIfAborted(signal);
@@ -169,13 +189,13 @@ async function generateAndCache(label, key, signal, { synthesizeImpl = synthesiz
     throwIfAborted(signal);
     const pcm = await raceWithSignal(decodeImpl(mp3, { signal }), signal);
     throwIfAborted(signal);
-    await fs.writeFile(temp, pcm);
+    await writeFileImpl(temp, pcm);
     throwIfAborted(signal);
     try {
-      await fs.rename(temp, target);
+      await renameImpl(temp, target);
       installedTarget = true;
     } catch (error) {
-      await fs.rm(temp, { force: true }).catch(() => {});
+      await rmImpl(temp, { force: true }).catch(() => {});
       if (error?.code !== 'EEXIST') throw error;
     }
     throwIfAborted(signal);
@@ -183,8 +203,8 @@ async function generateAndCache(label, key, signal, { synthesizeImpl = synthesiz
     remember(key, pcm);
     return pcm;
   } catch (error) {
-    await fs.rm(temp, { force: true }).catch(() => {});
-    if (installedTarget && signal?.aborted) await fs.rm(target, { force: true }).catch(() => {});
+    await rmImpl(temp, { force: true }).catch(() => {});
+    if (installedTarget && signal?.aborted) await rmImpl(target, { force: true }).catch(() => {});
     throw error;
   }
 }
@@ -193,7 +213,8 @@ async function getSpeakerLabelPcmNow(value, options = {}) {
   const { enabled } = getSpeakerLabelOptions();
   const label = normalizeSpeakerLabelText(value);
   if (!enabled || !label || options.signal?.aborted) return null;
-  const key = speakerLabelCacheKey(label);
+  const ownerKey = speakerLabelOwnerKey(options.owner);
+  const key = speakerLabelCacheKey(label, options.owner);
   const memory = memoryCache.get(key);
   if (memory && validPcm(memory)) { stats.memoryHits += 1; remember(key, memory); return memory; }
   let entry = inflight.get(key);
@@ -201,7 +222,7 @@ async function getSpeakerLabelPcmNow(value, options = {}) {
   if (!entry) {
     if (inflight.size >= MAX_LABEL_JOBS) return null;
     const deadline = deadlineSignal(null, 12_000, new Error('Speaker-label job deadline exceeded.'));
-    entry = { controller: { signal: deadline.signal, abort: deadline.cancel }, deadline, consumers: new Set(), promise: null };
+    entry = { controller: { signal: deadline.signal, abort: deadline.cancel }, deadline, consumers: new Map(), promise: null };
     // Register ownership synchronously, BEFORE the first filesystem await.
     inflight.set(key, entry);
     const owned = entry;
@@ -233,10 +254,15 @@ async function getSpeakerLabelPcmNow(value, options = {}) {
     });
   }
   const consumer = Symbol('label-consumer');
-  entry.consumers.add(consumer);
-  try { return await raceWithSignal(entry.promise, options.signal); }
-  catch (error) { if (options.signal?.aborted) return null; throw error; }
+  const consumerController = new AbortController();
+  const abortConsumer = () => consumerController.abort(cancellationError(options.signal?.reason || 'Speaker-label consumer cancelled.'));
+  if (options.signal?.aborted) abortConsumer();
+  else options.signal?.addEventListener?.('abort', abortConsumer, { once: true });
+  entry.consumers.set(consumer, { ownerKey, controller: consumerController });
+  try { return await raceWithSignal(entry.promise, consumerController.signal); }
+  catch (error) { if (consumerController.signal.aborted) return null; throw error; }
   finally {
+    options.signal?.removeEventListener?.('abort', abortConsumer);
     entry.consumers.delete(consumer);
     if (!entry.consumers.size && inflight.get(key) === entry) entry.deadline.cancel(cancellationError('No speech item owns this label.'));
   }
@@ -245,8 +271,11 @@ async function getSpeakerLabelPcmNow(value, options = {}) {
 function lazySpeakerLabel(value, options) {
   let started = null;
   const epoch = privacyEpoch;
+  const ownerKey = speakerLabelOwnerKey(options.owner);
+  const ownerEpoch = ownerKey ? ownerPrivacyEpochs.get(ownerKey) || 0 : 0;
   const start = () => {
-    started ||= epoch === privacyEpoch ? getSpeakerLabelPcmNow(value, options) : Promise.resolve(null);
+    const ownerStillAuthorized = !ownerKey || ownerEpoch === (ownerPrivacyEpochs.get(ownerKey) || 0);
+    started ||= epoch === privacyEpoch && ownerStillAuthorized ? getSpeakerLabelPcmNow(value, options) : Promise.resolve(null);
     return started;
   };
   return {
@@ -271,6 +300,58 @@ export function cancelAllSpeakerLabelGeneration(reason = new Error('Speaker-labe
     }
   }
   return cancelled;
+}
+
+export function cancelSpeakerLabelGenerationForOwner(guildId, userId, reason = new Error('Speaker-label generation cancelled by user privacy change.')) {
+  const ownerKey = speakerLabelOwnerKey({ guildId, userId });
+  if (!ownerKey) return 0;
+  ownerPrivacyEpochs.set(ownerKey, (ownerPrivacyEpochs.get(ownerKey) || 0) + 1);
+  let cancelled = 0;
+  for (const entry of inflight.values()) {
+    for (const consumer of entry.consumers.values()) {
+      if (consumer.ownerKey !== ownerKey || consumer.controller.signal.aborted) continue;
+      cancelled += 1;
+      consumer.controller.abort(cancellationError(reason));
+    }
+  }
+  return cancelled;
+}
+
+export async function purgeSpeakerLabelCacheForOwner(guildId, userId) {
+  const ownerKey = speakerLabelOwnerKey({ guildId, userId });
+  if (!ownerKey) return 0;
+  cancelSpeakerLabelGenerationForOwner(guildId, userId, new Error('Speaker-label cache purge requested.'));
+  const prefix = ownerCachePrefix(ownerKey);
+  let removed = 0;
+  for (const key of [...memoryCache.keys()]) {
+    if (!key.startsWith(prefix)) continue;
+    memoryCache.delete(key);
+    removed += 1;
+  }
+  let entries = [];
+  try { entries = await fs.readdir(CACHE_DIR, { withFileTypes: true }); }
+  catch (error) { if (error?.code !== 'ENOENT') throw error; }
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.startsWith(prefix) || !entry.name.endsWith('.pcm')) continue;
+    try { await fs.rm(path.join(CACHE_DIR, entry.name), { force: true }); removed += 1; } catch {}
+  }
+  return removed;
+}
+
+// v0.24.0 cached labels without owner identity, so a per-user deletion could
+// not safely distinguish two people with the same spoken name. Remove those
+// legacy files once during startup; all new files are owner-prefixed.
+export async function purgeLegacySpeakerLabelCache() {
+  let entries = [];
+  try { entries = await fs.readdir(CACHE_DIR, { withFileTypes: true }); }
+  catch (error) { if (error?.code !== 'ENOENT') throw error; }
+  let removed = 0;
+  for (const entry of entries) {
+    if (!entry.isFile() || !/^[a-f\d]{64}\.pcm$/u.test(entry.name)) continue;
+    try { await fs.rm(path.join(CACHE_DIR, entry.name), { force: true }); removed += 1; } catch {}
+  }
+  stats.prunedFiles += removed;
+  return removed;
 }
 
 export async function waitForSpeakerLabelPcm(promise) {
@@ -298,4 +379,4 @@ export function getSpeakerLabelStatus() {
   return { ...getSpeakerLabelOptions(), provider: 'Google Malay', cache: 'disk + tiny memory LRU', memoryEntries: memoryCache.size, inflight: inflight.size, ...stats };
 }
 
-export const __test = { validPcm, getSpeakerLabelPcmNow };
+export const __test = { validPcm, getSpeakerLabelPcmNow, speakerLabelOwnerKey, ownerCachePrefix, ownerPrivacyEpochs };

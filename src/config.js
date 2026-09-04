@@ -10,9 +10,6 @@ export const tempDir = path.join(rootDir, 'temp');
 export const dataDir = path.join(rootDir, 'data');
 export const settingsPath = path.join(rootDir, 'config', 'settings.json');
 
-const WATCH_INTERVAL_MS = 300;
-const RELOAD_DEBOUNCE_MS = 200;
-let settingsReloadTimer;
 let lastSettingsText = null;
 let lastSettingsError = null;
 let settingsFilePresent = false;
@@ -377,16 +374,6 @@ export function getLastSettingsError() {
   return lastSettingsError;
 }
 
-function scheduleSettingsReload() {
-  clearTimeout(settingsReloadTimer);
-  settingsReloadTimer = setTimeout(() => loadSettings(), RELOAD_DEBOUNCE_MS);
-  settingsReloadTimer.unref?.();
-}
-
 loadSettings();
-fs.watchFile(settingsPath, { interval: WATCH_INTERVAL_MS, persistent: false }, (current, previous) => {
-  if (current.mtimeMs === previous.mtimeMs && current.size === previous.size) return;
-  scheduleSettingsReload();
-});
 
 export const __test = { normalizeSettings };

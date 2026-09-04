@@ -5,11 +5,15 @@ import assert from 'node:assert/strict';
 import { ButtonStyle, ChannelType, MessageFlags } from 'discord.js';
 import {
   ASK_ALLOWED_MENTIONS,
+  beginAskTtsRequest,
   buildAskEmbed,
   buildAskStopButtonId,
   buildAskStopComponents,
   buildAskTtsItem,
   handleAskStopButton,
+  commitAskTtsRequest,
+  finishAskTtsRequest,
+  isLatestAskTtsRequest,
   parseAskStopButtonId,
   queueAskAnswerTts
 } from '../src/ask-response.js';
@@ -217,13 +221,13 @@ test('/ask TTS queues only the answer in the asker voice channel', async () => {
     cancel: () => { throw new Error('cancel should not be called'); }
   });
   assert.equal(status, 'started');
-  assert.equal(calls[0][0], 'enqueue');
-  assert.equal(calls[0][2], 'AI answer only.');
-  assert.equal(calls[0][3].voiceChannelId, 'voice-1');
-  assert.equal(calls[0][3].googleText, 'AI answer only.');
-  assert.equal(calls[0][3].verificationText, 'AI answer only.');
-  assert.equal(calls[1][0], 'connect');
-  assert.deepEqual(calls[1][2], { allowMove: false });
+  assert.equal(calls[0][0], 'connect');
+  assert.deepEqual(calls[0][2], { allowMove: false });
+  assert.equal(calls[1][0], 'enqueue');
+  assert.equal(calls[1][2], 'AI answer only.');
+  assert.equal(calls[1][3].voiceChannelId, 'voice-1');
+  assert.equal(calls[1][3].googleText, 'AI answer only.');
+  assert.equal(calls[1][3].verificationText, 'AI answer only.');
 });
 
 test('/ask TTS publishes STOP TTS button only after the item is accepted', async () => {
@@ -271,6 +275,7 @@ test('/ask TTS never moves to another active voice channel', async () => {
 
 test('/ask text response remains independent when voice connection fails', async () => {
   const cancelled = [];
+  let enqueued = false;
   const voiceChannel = { id: 'voice-1', type: ChannelType.GuildVoice };
   const interaction = {
     id: 'interaction-9', guildId: 'guild-1', guild: {}, user: { id: 'user-1' },
@@ -281,12 +286,13 @@ test('/ask text response remains independent when voice connection fails', async
     getRuntimeVoiceChannelId: () => null,
     getAudioStatus: () => ({ queued: 0, maximumQueued: 10 }),
     getVoice: () => 'Charon',
-    enqueue: () => 'prefetching-for-voice',
+    enqueue: () => { enqueued = true; return 'prefetching-for-voice'; },
     connect: async () => ({ connection: null, status: 'voice-unavailable' }),
     cancel: (guildId, messageId) => cancelled.push([guildId, messageId])
   });
   assert.equal(status, 'voice-unavailable');
-  assert.deepEqual(cancelled, [['guild-1', 'ask:interaction-9']]);
+  assert.equal(enqueued, false);
+  assert.deepEqual(cancelled, []);
 });
 
 test('/ask queue overflow is rejected without displacing existing audio', async () => {
@@ -322,7 +328,58 @@ test('/ask posts the final embed before TTS and binds speech to the real reply',
       calls.push('queue'); assert.equal(answer, 'Answer.'); assert.equal(metadata.replyMessageId, 'real-reply-123');
     }
   });
-  assert.deepEqual(calls, ['defer', 'admit', 'supersede', 'embed', 'queue']);
+  assert.deepEqual(calls, ['defer', 'admit', 'embed', 'queue']);
+});
+
+test('an admitted replacement API failure preserves older committed speech', async () => {
+  const guildId = `api-failure-${Date.now()}-${Math.random()}`;
+  const userId = 'ask-owner';
+  const older = beginAskTtsRequest(guildId, userId);
+  assert.equal(commitAskTtsRequest(guildId, userId, older), true);
+  let queued = false;
+  const interaction = {
+    id: 'replacement-failure', guildId, user: { id: userId },
+    options: { getString: () => 'Replacement?' },
+    deferReply: async () => {},
+    editReply: async () => ({ id: 'error-reply' })
+  };
+  await executeAskRequest(interaction, {
+    ttsDependencies: { cancelSupersededAsk: () => assert.fail('Older audio must remain') },
+    ask: async (_question, { onAccepted }) => {
+      onAccepted();
+      throw new AskError('timeout', 'replacement failed');
+    },
+    queueTts: async () => { queued = true; }
+  });
+  assert.equal(queued, false);
+  assert.equal(isLatestAskTtsRequest(guildId, userId, older), true);
+  finishAskTtsRequest(guildId, userId, older);
+});
+
+test('a Discord answer-edit failure preserves older committed speech', async () => {
+  const guildId = `edit-failure-${Date.now()}-${Math.random()}`;
+  const userId = 'ask-owner';
+  const older = beginAskTtsRequest(guildId, userId);
+  assert.equal(commitAskTtsRequest(guildId, userId, older), true);
+  let edits = 0;
+  const interaction = {
+    id: 'edit-failure', guildId, user: { id: userId },
+    options: { getString: () => 'Replacement?' },
+    deferReply: async () => {},
+    editReply: async () => {
+      edits += 1;
+      if (edits === 1) throw new Error('Discord rejected the final embed');
+      return { id: 'fallback-error-reply' };
+    }
+  };
+  await executeAskRequest(interaction, {
+    ttsDependencies: { cancelSupersededAsk: () => assert.fail('Older audio must remain') },
+    ask: async (_question, { onAccepted }) => { onAccepted(); return { answer: 'New answer.' }; },
+    queueTts: async () => assert.fail('Failed visible answer must not queue')
+  });
+  assert.equal(edits, 2);
+  assert.equal(isLatestAskTtsRequest(guildId, userId, older), true);
+  finishAskTtsRequest(guildId, userId, older);
 });
 
 test('/ask limits align with Discord embed field limits and include ellipsis inside the cap', () => {
