@@ -7,7 +7,8 @@ import { cancelDeletedMessage, cancelDeletedMessages } from '../src/message-canc
 process.env.DISCORD_TOKEN ||= 'test-token';
 const audio = await import('../src/audio.js');
 const tts = await import('../src/tts.js');
-const { settings } = await import('../src/config.js');
+const configModule = await import('../src/config.js');
+const { settings } = configModule;
 
 test('STOP interrupts Buffering and label Playing waits and removes their listeners', async () => {
   for (const timeout of [5000, 10000]) {
@@ -19,7 +20,6 @@ test('STOP interrupts Buffering and label Playing waits and removes their listen
     await assert.rejects(waiting, /STOP/);
     assert.equal(player.listenerCount('playing'), 0);
     assert.equal(player.listenerCount('error'), 0);
-    // The next item's independent wait still succeeds.
     const next = audio.__test.waitForPlaying({ player }, audio.__test.createQueueItem('next'), timeout);
     player.state = { status: 'playing' };
     player.emit('playing');
@@ -153,11 +153,17 @@ test('promotion moves an existing queued Gemini request ahead of speculative wor
 });
 
 test('valid MP3 frames have a positive duration for playback and recovery guards', () => {
-  // MPEG-1 Layer III, 128 kbit/s, 44100 Hz: 417 bytes and 1152 samples/frame.
   const frame = Buffer.alloc(417);
   Buffer.from([0xff, 0xfb, 0x90, 0x64]).copy(frame);
   const milliseconds = audio.__test.mp3DurationMs(Buffer.concat(Array.from({ length: 50 }, () => frame)));
   assert.ok(Math.abs(milliseconds - 50 * 1152 / 44100 * 1000) < 1);
+});
+
+test('/ask audibility timeout is preserved by settings normalization and clamped safely', () => {
+  assert.equal(configModule.__test.normalizeSettings({}).audioPipeline.askAudibilityTimeoutMs, 3500);
+  assert.equal(configModule.__test.normalizeSettings({ audioPipeline: { askAudibilityTimeoutMs: 100 } }).audioPipeline.askAudibilityTimeoutMs, 500);
+  assert.equal(configModule.__test.normalizeSettings({ audioPipeline: { askAudibilityTimeoutMs: 1234 } }).audioPipeline.askAudibilityTimeoutMs, 1234);
+  assert.equal(configModule.__test.normalizeSettings({ audioPipeline: { askAudibilityTimeoutMs: 99_000 } }).audioPipeline.askAudibilityTimeoutMs, 6000);
 });
 
 test('/ask has a bounded post-provider audibility window while normal chat keeps the existing start timeout', () => {
