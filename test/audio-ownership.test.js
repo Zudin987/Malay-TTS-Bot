@@ -159,3 +159,124 @@ test('valid MP3 frames have a positive duration for playback and recovery guards
   const milliseconds = audio.__test.mp3DurationMs(Buffer.concat(Array.from({ length: 50 }, () => frame)));
   assert.ok(Math.abs(milliseconds - 50 * 1152 / 44100 * 1000) < 1);
 });
+
+test('/ask has a bounded post-provider audibility window while normal chat keeps the existing start timeout', () => {
+  const prior = settings.audioPipeline.askAudibilityTimeoutMs;
+  settings.audioPipeline.askAudibilityTimeoutMs = 1234;
+  try {
+    const ask = audio.__test.createQueueItem('answer', { messageId: 'ask:bounded' });
+    const normal = audio.__test.createQueueItem('chat', { messageId: 'chat:normal' });
+    assert.equal(audio.__test.isAskQueueItem(ask), true);
+    assert.equal(audio.__test.getPlayerStartTimeoutMs(ask), 1234);
+    assert.equal(audio.__test.getPlayerStartTimeoutMs(normal), 10_000);
+  } finally { settings.audioPipeline.askAudibilityTimeoutMs = prior; }
+});
+
+test('/ask Gemini with zero playback progress cancels stale Live and schedules exactly one Google-only retry', () => {
+  const guildId = 'ask-audibility-gemini';
+  const state = audio.__test.getState(guildId);
+  const item = audio.__test.createQueueItem('Jawapan tepat ini.', {
+    messageId: 'ask:gemini-zero', googleText: 'Jawapan tepat ini.', verificationText: 'Jawapan tepat ini.'
+  });
+  let cancelledWith = null;
+  const generated = {
+    provider: 'gemini-3.1-live',
+    audioFormat: 's16le', sampleRate: 24_000, channels: 1,
+    cancel: (reason) => { cancelledWith = reason; }
+  };
+  try {
+    const recovered = audio.__test.handleCompletionRecovery(
+      guildId, state, item, generated, 0, 1,
+      { triggerError: new Error('player never became audible') }
+    );
+    assert.equal(recovered, true);
+    assert.equal(item.recoveryScheduled, true);
+    assert.equal(state.queue.length, 1);
+    assert.equal(state.queue[0].text, item.text);
+    assert.equal(state.queue[0].googleText, item.googleText);
+    assert.equal(state.queue[0].skipLive, true);
+    assert.equal(state.queue[0].recoveryAttempt, 1);
+    assert.match(String(cancelledWith?.message || ''), /never became audible/i);
+  } finally { audio.releaseAudio(guildId); }
+});
+
+test('/ask never restarts the full answer after any playback progress', () => {
+  const guildId = 'ask-no-duplicate-after-progress';
+  const state = audio.__test.getState(guildId);
+  const item = audio.__test.createQueueItem('Do not repeat this answer.', { messageId: 'ask:heard' });
+  let cancelCalls = 0;
+  try {
+    const recovered = audio.__test.handleCompletionRecovery(
+      guildId, state, item,
+      { provider: 'gemini-3.1-live', cancel: () => { cancelCalls += 1; } },
+      20, 1,
+      { triggerError: new Error('local playback stopped after progress') }
+    );
+    assert.equal(recovered, false);
+    assert.equal(state.queue.length, 0);
+    assert.equal(cancelCalls, 0);
+  } finally { audio.releaseAudio(guildId); }
+});
+
+test('/ask Google audibility failure does not loop and leaves the following normal chat at the front of the queue', () => {
+  const guildId = 'ask-google-no-loop';
+  const state = audio.__test.getState(guildId);
+  const normal = audio.__test.createQueueItem('normal chat', { messageId: 'normal-after-ask' });
+  state.queue = [normal];
+  const ask = audio.__test.createQueueItem('fallback answer', { messageId: 'ask:google-zero', skipLive: true, recoveryAttempt: 1 });
+  try {
+    const recovered = audio.__test.handleCompletionRecovery(
+      guildId, state, ask, { provider: 'google-ms' }, 0, 1,
+      { triggerError: new Error('Google player never became audible') }
+    );
+    assert.equal(recovered, false);
+    assert.deepEqual(state.queue, [normal]);
+  } finally { state.queue = []; audio.releaseAudio(guildId); }
+});
+
+test('/ask audibility requires real playbackDuration progress, not only Playing state', async () => {
+  const item = audio.__test.createQueueItem('audibility check', { messageId: 'ask:progress' });
+  const resource = { playbackDuration: 0 };
+  const state = { player: { state: { status: 'playing' } } };
+  const progress = audio.__test.waitForAudiblePlaybackProgress(state, item, resource, 200);
+  setTimeout(() => { resource.playbackDuration = 20; }, 30).unref?.();
+  await progress;
+
+  const stalled = audio.__test.createQueueItem('stalled', { messageId: 'ask:stalled' });
+  await assert.rejects(
+    audio.__test.waitForAudiblePlaybackProgress(state, stalled, { playbackDuration: 0 }, 60),
+    /no audible progress/i
+  );
+});
+
+test('provider failure on /ask cannot leave running=true or block a following normal chat item', { timeout: 2000 }, async () => {
+  const guildId = 'ask-provider-failure-next-chat';
+  const state = audio.__test.getState(guildId);
+  const player = new EventEmitter();
+  player.state = { status: 'idle' };
+  const transition = status => { const old = player.state; player.state = { status }; player.emit('stateChange', old, player.state); player.emit(status); };
+  player.play = resource => {
+    transition('playing');
+    setImmediate(() => { resource.playbackDuration = 1000; transition('idle'); });
+  };
+  player.stop = () => { transition('idle'); return true; };
+  state.player = player;
+  state.voiceReady = true;
+
+  const ask = audio.__test.createQueueItem('failed ask', { messageId: 'ask:all-failed' });
+  ask.generation = Promise.reject(new Error('All TTS providers failed before first audio.'));
+  let normalFinished;
+  const normalDone = new Promise(resolve => { normalFinished = resolve; });
+  const normal = audio.__test.createQueueItem('normal chat still works', { messageId: 'normal-next', onTerminal: normalFinished });
+  normal.generation = Promise.resolve({ audioBuffer: Buffer.alloc(48_000), audioFormat: 's16le', sampleRate: 24_000, channels: 1, provider: 'fixture' });
+  state.queue = [ask, normal];
+  const pipeline = () => ({ resource: { playbackDuration: 0 }, failure: new Promise(() => {}), stopMonitoring() {}, ffmpegStartedAt: performance.now(), getFirstEncodedAt: () => 0 });
+  try {
+    await audio.__test.runQueue(guildId, state, pipeline);
+    await normalDone;
+    assert.equal(normal.cancelled, false);
+    assert.equal(state.currentItem, null);
+    assert.equal(state.running, false);
+    assert.equal(state.queue.length, 0);
+  } finally { audio.releaseAudio(guildId); }
+});
