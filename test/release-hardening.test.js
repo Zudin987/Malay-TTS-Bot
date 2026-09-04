@@ -19,6 +19,12 @@ test('Dependabot is configured to maintain GitHub Actions pins', () => {
   assert.match(dependabot, /directory:\s*"\/"/u);
 });
 
+test('CI performs one explicit bounded dependency audit without duplicate install audits', () => {
+  const workflow = fs.readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /npm ci --no-audit --no-fund --prefer-offline/u);
+  assert.match(workflow, /name: Dependency audit\s+if: runner\.os == 'Linux'\s+run: npm audit --audit-level=high --fetch-timeout=60000 --fetch-retries=2/u);
+});
+
 test('Windows installer seals the full application tree before SYSTEM registration', () => {
   const installer = fs.readFileSync(new URL('../install-task.ps1', import.meta.url), 'utf8');
   const verifier = fs.readFileSync(new URL('../scripts/verify-windows.ps1', import.meta.url), 'utf8');

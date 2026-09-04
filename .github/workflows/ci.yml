@@ -29,7 +29,7 @@ jobs:
           node-version: '24.19.0'
           cache: npm
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --no-audit --no-fund --prefer-offline
       - name: Five consecutive full regression passes
         run: node scripts/repeat-tests.mjs
       - name: Validate all source JavaScript, JSON and private-file exclusions
@@ -37,7 +37,8 @@ jobs:
       - name: Exercise real ZIP integrity and exclusion checks
         run: python scripts/test-clean-package.py
       - name: Dependency audit
-        run: npm audit --audit-level=high
+        if: runner.os == 'Linux'
+        run: npm audit --audit-level=high --fetch-timeout=60000 --fetch-retries=2 --fetch-retry-mintimeout=5000 --fetch-retry-maxtimeout=30000
       - name: Install Linux FFmpeg
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
