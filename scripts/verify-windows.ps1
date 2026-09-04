@@ -40,6 +40,8 @@ try {
   Copy-Item (Join-Path $PSScriptRoot 'system-smoke.mjs') (Join-Path $ToolsPath 'system-smoke.mjs')
   $ProbeAction = New-ScheduledTaskAction -Execute $Node -Argument ('"' + (Join-Path $ToolsPath 'system-smoke.mjs') + '"') -WorkingDirectory $PackagePath
   Set-ScheduledTask -TaskName $TaskName -Action $ProbeAction | Out-Null
+  $Task = Get-ScheduledTask -TaskName $TaskName
+  if ($Task.Principal.UserId -notin @('SYSTEM', 'NT AUTHORITY\SYSTEM', 'S-1-5-18')) { throw 'Updating the CI action changed the SYSTEM task principal' }
   $ResultPath = Join-Path $PackagePath 'data\ci-system-result.json'
   $GracefulModePath = Join-Path $PackagePath 'data\ci-graceful-mode'
   $Nonces = @()
@@ -53,6 +55,11 @@ try {
     if (!(Test-Path -LiteralPath $ResultPath)) {
       $Diagnostic = Join-Path $PackagePath 'data\ci-system-error.txt'
       if (Test-Path -LiteralPath $Diagnostic) { Get-Content -LiteralPath $Diagnostic | Write-Host }
+      Write-Host ('SYSTEM task principal: ' + (Get-ScheduledTask -TaskName $TaskName).Principal.UserId)
+      foreach ($AclPath in @($PackagePath, $Node, (Join-Path $ToolsPath 'system-smoke.mjs'), (Join-Path $PackagePath '.env'), (Join-Path $PackagePath 'data'))) {
+        Write-Host "ACL diagnostic: $AclPath"
+        & icacls.exe $AclPath | ForEach-Object { Write-Host $_ }
+      }
       throw ('SYSTEM smoke did not finish. Task result: ' + (Get-ScheduledTaskInfo -TaskName $TaskName).LastTaskResult)
     }
     $Result = Get-Content -Raw -LiteralPath $ResultPath | ConvertFrom-Json

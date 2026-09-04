@@ -29,12 +29,15 @@ function Invoke-CheckedIcacls([string[]]$Arguments, [string]$Failure) {
 $OwnerSid = $Identity.User.Value
 # npm ci runs before this script. Seal every executable/config/runtime/dependency
 # path before SYSTEM registration. Reset first so pre-existing explicit entries
-# cannot survive beneath the root, then make future children inherit only the
-# three deliberate maintenance identities.
+# cannot survive beneath the root. Application code/runtime remains readable
+# and executable to authenticated local users, but only the three deliberate
+# maintenance identities receive write access. Private state is narrowed again
+# below after this complete-tree pass.
 Invoke-CheckedIcacls -Arguments @($InstallPath, '/reset', '/T', '/C') -Failure 'Failed to reset the application-tree ACL.'
 Invoke-CheckedIcacls -Arguments @(
   $InstallPath, '/inheritance:r', '/grant:r',
   "*${OwnerSid}:(OI)(CI)F", '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F',
+  '*S-1-5-11:(OI)(CI)RX', '*S-1-5-32-545:(OI)(CI)RX',
   '/T', '/C'
 ) -Failure 'Failed to seal the application-tree ACL.'
 
@@ -42,12 +45,18 @@ $DataPath = Join-Path $InstallPath 'data'
 New-Item -ItemType Directory -Path $DataPath -Force | Out-Null
 # Inheritance protects future atomic replacements, backups, caches and locks.
 Invoke-CheckedIcacls -Arguments @(
+  $DataPath, '/remove:g', '*S-1-1-0', '*S-1-5-11', '*S-1-5-32-545', '/T', '/C'
+) -Failure 'Failed to remove broad access from the state directory.'
+Invoke-CheckedIcacls -Arguments @(
   $DataPath, '/inheritance:r', '/grant:r',
   "*${OwnerSid}:(OI)(CI)F", '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F',
   '/T', '/C'
 ) -Failure 'Failed to protect the state directory.'
 $EnvPath = Join-Path $InstallPath '.env'
 if (Test-Path -LiteralPath $EnvPath) {
+  Invoke-CheckedIcacls -Arguments @(
+    $EnvPath, '/remove:g', '*S-1-1-0', '*S-1-5-11', '*S-1-5-32-545'
+  ) -Failure 'Failed to remove broad access from .env.'
   Invoke-CheckedIcacls -Arguments @(
     $EnvPath, '/inheritance:r', '/grant:r',
     "*${OwnerSid}:F", '*S-1-5-18:R', '*S-1-5-32-544:F'
