@@ -2,7 +2,7 @@
 setlocal
 cd /d C:\Malay-TTS-Bot
 
-echo Malay TTS Bot clean setup v0.24.0
+echo Malay TTS Bot clean setup v0.24.1
 echo.
 
 set "NODE_EXE=C:\Malay-TTS-Bot\runtime\node-v24.19.0-win-x64\node.exe"
@@ -35,7 +35,7 @@ if not "%NPM_EXIT%"=="0" (
 echo.
 echo Dependencies installed.
 echo.
-echo Installing the SYSTEM task and protecting private state...
+echo Sealing the application tree and installing the SYSTEM task...
 "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\Malay-TTS-Bot\install-task.ps1"
 set "TASK_EXIT=%ERRORLEVEL%"
 if not "%TASK_EXIT%"=="0" (

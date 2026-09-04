@@ -23,8 +23,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '24.19.0'
           cache: npm
@@ -47,7 +47,7 @@ jobs:
         run: |
           ffmpeg -hide_banner -loglevel error -f lavfi -i 'sine=frequency=440:duration=0.20' -af 'volume=0.600,alimiter=limit=0.562341:attack=1.0:release=60.0:level=false' -c:a libopus -f ogg -y /tmp/malay-tts-probe.ogg
           ffmpeg -hide_banner -loglevel error -i /tmp/malay-tts-probe.ogg -f null -
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: tests-${{ runner.os }}-${{ github.sha }}
@@ -60,7 +60,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Build from tracked source and checksum-pinned runtimes
         shell: pwsh
         run: python scripts/build-clean.py --archives "$env:RUNNER_TEMP/runtime-archives" --output dist --commit "$env:GITHUB_SHA"
@@ -70,10 +70,10 @@ jobs:
           $Zip = (Get-ChildItem dist -Filter '*-CLEAN.zip').FullName
           python scripts/verify-clean.py $Zip --expected-commit "$env:GITHUB_SHA" --extract 'C:/'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Test packaged Node/npm/FFmpeg, SYSTEM start/stop and inherited ACLs
+      - name: Test packaged runtime, SYSTEM lifecycle and full-tree ACLs
         shell: pwsh
         run: ./scripts/verify-windows.ps1 -PackagePath 'C:\Malay-TTS-Bot'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: clean-windows-${{ github.sha }}
           path: dist/*
@@ -93,11 +93,11 @@ jobs:
       contents: write
       actions: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '24.19.0'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: clean-windows-${{ github.sha }}
           path: dist

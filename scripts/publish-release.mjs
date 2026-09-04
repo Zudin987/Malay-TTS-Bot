@@ -30,7 +30,7 @@ if (api('git/ref/heads/main').object.sha !== commit) {
     assert.equal(actual, fs.readFileSync(path.join(directory, `${archive}.sha256`), 'utf8').split(/\s/u)[0]);
     const proof = JSON.parse(fs.readFileSync(path.join(directory, 'verification.json'), 'utf8').replace(/^\uFEFF/u, ''));
     assert.equal(proof.sourceCommit, commit);
-    for (const field of ['tenKeyRoundRobin', 'opusRoundTrip', 'privateStateAcl']) assert.equal(proof[field], true);
+    for (const field of ['tenKeyRoundRobin', 'opusRoundTrip', 'storeFlush', 'privateStateAcl', 'applicationTreeAcl', 'standardUserWriteDenied', 'packagedHashes', 'protectedDataLogs']) assert.equal(proof[field], true);
     assert.equal(proof.accountSid, 'S-1-5-18'); assert.equal(proof.cleanStops, 2);
     gh(['release', 'create', tag, path.join(directory, archive), path.join(directory, `${archive}.sha256`), path.join(directory, 'verification.json'),
       '--repo', repository, '--target', commit, '--title', `${tag} — Reliability and clean Windows release`, '--notes-file', 'RELEASE-NOTES.md', '--latest']);

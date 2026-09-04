@@ -35,7 +35,7 @@ class CleanPackageTest(unittest.TestCase):
                 verify_module.verify(archive, COMMIT, target)
 
     def test_rejects_private_data_even_with_a_matching_manifest(self):
-        for name in ['.env', 'data/guilds.json', 'node_modules/pkg/index.js', 'bot.log', 'data/speaker-label-cache/example.pcm']:
+        for name in ['.env', 'data/guilds.json', 'node_modules/pkg/index.js', 'bot.log', 'data/bot.log', 'data/speaker-label-cache/example.pcm']:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as folder:
                 root = pathlib.Path(folder)
                 with self.assertRaisesRegex(ValueError, 'Private/generated'):

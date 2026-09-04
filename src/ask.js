@@ -176,8 +176,9 @@ export async function askGemini(question, {
   activeAskRequests += 1;
   const deadline = deadlineSignal(signal, options.timeoutMs, new AskError('timeout', `Gemini /ask timed out after ${options.timeoutMs}ms.`));
   try {
-    // Admission and latest-wins are one synchronous operation. Rejected work
-    // never invalidates an already accepted request.
+    // Reserve request ordering only after concurrency admission. The caller
+    // commits speech supersession later, after a valid answer is visible and a
+    // replacement audio item can be queued.
     onAccepted?.();
     let credentialAttempts = 0;
     while (selectedKey?.key) {

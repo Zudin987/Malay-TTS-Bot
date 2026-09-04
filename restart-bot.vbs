@@ -24,5 +24,5 @@ If stopCode = 0 Or stopCode = 2 Then
     shell.Popup "Bot stopped, but Task Scheduler could not start 'Malay TTS Bot'. Run this file as administrator or start the existing task manually.", 7, "Malay TTS Bot", 48
   End If
 Else
-  shell.Popup "Could not stop the bot cleanly, so restart was cancelled. Check bot.log.", 5, "Malay TTS Bot", 48
+  shell.Popup "Could not stop the bot cleanly, so restart was cancelled. Check data\bot.log.", 5, "Malay TTS Bot", 48
 End If

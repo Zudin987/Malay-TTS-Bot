@@ -3,6 +3,8 @@ node_modules/
 temp/
 bot.log
 bot-old.log
+data/bot.log
+data/bot-old.log
 data/bot.lock
 data/*.bak
 config/*.bak

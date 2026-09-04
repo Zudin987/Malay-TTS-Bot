@@ -18,7 +18,7 @@ export async function stopBot({ directory = defaultInstanceDirectory, timeoutMs 
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  return { code: 1, message: 'Timed out waiting for this bot instance to stop. Check bot.log.' };
+  return { code: 1, message: 'Timed out waiting for this bot instance to stop. Check data/bot.log.' };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

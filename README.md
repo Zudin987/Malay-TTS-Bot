@@ -9,7 +9,7 @@ Lightweight design: Gemini first, Google Malay fallback, no local AI model, and 
 1. Stop the previous bot with `stop-bot.vbs`, then install/use the bot at `C:\Malay-TTS-Bot`.
 2. On upgrade, preserve only `.env` and `data\guilds.json`.
 3. Extract the new CLEAN build into an empty installation and restore only those two user files.
-4. Run `setup-clean.cmd` **as administrator**. It installs dependencies, protects the state directory and registers the SYSTEM task.
+4. Run `setup-clean.cmd` **as administrator**. It installs dependencies, rejects reparse-point paths, seals the complete application tree, and only then registers the SYSTEM task.
 5. Run `doctor.cmd` if you want to verify dependencies/audio.
 6. Start the **Malay TTS Bot** Task Scheduler task, or use `restart-bot.vbs`.
 
@@ -35,11 +35,15 @@ Speaker usernames can be made faster in `config/settings.json` without regenerat
 
 `speakerLabel.speed` accepts **0.8x through 1.5x**. The default is **1.15x**. `gapMs` is the silence between the spoken username and the message; the default is **75 ms**.
 
+Speaker-label PCM cache entries are owner-scoped by guild and user. Enabling `/ttsoptout` cancels only that user's label work and removes that user's memory/disk entries; another user's identical spoken label remains intact. Unowned cache entries from releases before v0.24.1 are removed at startup. The configured cache age is shown by `/ttsprivacy` and defaults to 90 days.
+
 ## /ask short chat answers
 
 Use `/ask question:<text>` when you intentionally want an AI answer. It uses `gemini-3.1-flash-lite` with minimal thinking and returns one compact public Discord embed, normally 1–3 short sentences. The embed title is `<display name> ask` and contains **Question** and **AI reply** fields. The model itself still cannot request images, embeds, tables, or long article-style output.
 
 After the embed is posted, the same answer is queued when the asker is in the active normal voice channel. Only the answer is spoken. Google Malay reads this already-generated text literally: Live's self-transcription cannot independently prove lexical fidelity, so `/ask` does not send the answer to a conversational speech model. TTS failure never removes the posted answer. Bot replies remain excluded from normal MessageCreate speech.
+
+A newer `/ask` reserves ordering after admission but does not cancel a valid older answer. It supersedes older pre-audible speech only after the new answer is visible, its voice connection is confirmed, and its own queue item is accepted. Already audible speech is not interrupted.
 
 Text generation uses the existing ten-slot Gemini round-robin. Credential-auth failures disable only the bad slot and try the next available key within one request deadline. Quota and model/project permission failures do not rotate keys to retry the same request.
 
@@ -69,8 +73,9 @@ The round-robin is intended for multiple keys from the same Google Cloud project
 
 - Keep `.env` private.
 - Do not restore an old `config/settings.json` during a clean upgrade.
-- Messages sent to Gemini/Google are processed by those providers under their applicable terms.
-- `/ttsoptout` is available for users who do not want eligible messages sent to TTS providers.
+- Changes to `config/settings.json` are staged on disk until an idle `/restarttts` or a full process restart; there is no automatic settings hot reload.
+- Normal message text may go to Gemini Live and then Google Malay on fallback. Display names/aliases are separately sent to Google for speaker announcements. `/ask` sends its explicit question to the configured Gemini text model and reads the displayed answer through Google.
+- `/ttsoptout` cancels normal message/label work and purges that user's label cache. It cannot retract data already sent, and `/ask` remains a separate explicit action.
 
 Useful commands: `/ask`, `/join`, `/leave`, `/speaker`, `/changevoice`, `/name`, `/dictionary`, `/restarttts`, `/status`, `/ttsprivacy`, `/ttsoptout`.
 
@@ -91,14 +96,14 @@ Historical release notes are available on [GitHub Releases](../../releases).
 
 ## Windows process control
 
-The checked-in `install-task.ps1` registers the portable Node executable, absolute bootstrap path and `C:\Malay-TTS-Bot` working directory under SYSTEM. It uses one instance, a startup trigger and three restarts after failure. The `data` directory grants inherited access to SYSTEM, Administrators and the installing user, so new atomic state files and backups keep the same protection.
+The checked-in `install-task.ps1` rejects UNC, drive-root and reparse-point application trees. After `npm ci`, it resets and seals the complete tree so only SYSTEM, Administrators and the installing maintenance identity can write it, then registers the portable Node executable, absolute bootstrap path and `C:\Malay-TTS-Bot` working directory under SYSTEM. It uses one instance, a startup trigger and three restarts after failure. `data` inherits the same private policy, `.env` gives SYSTEM read-only access, and `bot.log`/`bot-old.log` are created under `data`.
 
 A small control socket bound only to `127.0.0.1` provides OS-owned exclusivity and nonce/PID-bound graceful stopping. The port is derived from the installation path (23000–38999). `data/bot.lock` records identity; stale, empty or corrupt records are replaced only after the OS grants ownership. A port collision fails closed. Stop control starts before Discord login, startup is limited to 45 seconds and shutdown to five seconds. The bot does not kill an arbitrary PID or poll a stop-request file.
 
 ## Release validation
 
-v0.24.0 ships portable Node 24.19.0 including npm, and FFmpeg 9.0.1. Source commits contain no binaries. `scripts/build-clean.py` downloads checksum-pinned runtimes and builds from tracked source using an explicit allowlist and fixed archive ordering/timestamps. `release-manifest.json` records the source commit and per-file checksums.
+v0.24.1 ships portable Node 24.19.0 including npm, and FFmpeg 9.0.1. Source commits contain no binaries. `scripts/build-clean.py` downloads checksum-pinned runtimes and builds from tracked source using an explicit allowlist and fixed archive ordering/timestamps. `release-manifest.json` records the source commit and per-file checksums.
 
-CI requires five consecutive full test passes on both Linux and Windows. It re-extracts the real CLEAN ZIP, checks every shipped JavaScript and JSON file (including portable npm), installs application dependencies with bundled npm and no system Node on PATH, and verifies two SYSTEM starts/stops, ten-key rotation, the PCM/filter/Opus/decode path and inherited private-state ACLs. Publishing from main depends on every gate passing and never overwrites an existing release/tag.
+CI requires five consecutive full test passes on both Linux and Windows. It re-extracts the real CLEAN ZIP, checks every shipped JavaScript and JSON file (including portable npm), installs application dependencies with bundled npm and no system Node on PATH, and verifies two SYSTEM starts/stops, ten-key rotation, deferred-store flushing, the PCM/filter/Opus/decode path, packaged source/runtime hashes, full-tree/private-state ACLs, protected data logs, and real write denial from a disposable standard Windows account. Every workflow action is pinned to a reviewed full commit SHA and Dependabot maintains those pins. Publishing from main depends on every gate passing and never overwrites an existing release/tag.
 
 Repository administrators should separately require `validate`, `windows-validate` and `clean-windows-package` in branch protection. Workflow publishing gates do not configure GitHub's merge permissions.

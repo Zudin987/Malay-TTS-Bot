@@ -24,8 +24,7 @@ export async function executeAskRequest(interaction, {
     ({ answer } = await ask(question, {
       options, signal: controller.signal,
       onAccepted() {
-        sequence = beginAskTtsRequest(interaction.guildId, interaction.user.id, { controller });
-        ttsDependencies.cancelSupersededAsk?.(interaction.guildId, interaction.user.id, sequence);
+        sequence = beginAskTtsRequest(interaction.guildId, interaction.user.id);
       }
     }));
     reply = await editAnswer(interaction, {

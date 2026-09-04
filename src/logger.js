@@ -60,6 +60,7 @@ export function createLogger({ directory = rootDir, env = process.env, consoleIm
     if (writer) return writer;
     clearTimer();
     writer = Promise.resolve().then(async () => {
+      await fsImpl.mkdir?.(directory, { recursive: true });
       while (pending.length) {
         const batch = [];
         inFlightBytes = 0;
@@ -117,6 +118,7 @@ export function createLogger({ directory = rootDir, env = process.env, consoleIm
       const text = pending.map((entry) => entry.line).join('') + makeLine('FATAL', args);
       pending = []; pendingBytes = 0;
       try {
+        fs.mkdirSync(directory, { recursive: true });
         if (currentBytes + Buffer.byteLength(text) > MAX_LOG_BYTES) {
           fs.rmSync(oldLogPath, { force: true });
           try { fs.renameSync(logPath, oldLogPath); } catch (error) { if (error?.code !== 'ENOENT') throw error; }
@@ -130,7 +132,7 @@ export function createLogger({ directory = rootDir, env = process.env, consoleIm
   };
 }
 
-const logger = createLogger();
+const logger = createLogger({ directory: path.join(rootDir, 'data') });
 export const installLogger = () => logger.install();
 export const flushLogs = (options) => logger.flush(options);
 export const fatalLogSync = (...args) => logger.fatal(...args);

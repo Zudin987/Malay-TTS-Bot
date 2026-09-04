@@ -41,7 +41,7 @@ import { getGameDictionarySize } from './game-dictionary.js';
 import { getTtsMetrics } from './tts-metrics.js';
 import { getOrAssignTtsVoice, getTtsProviderStatus, restartTtsRuntime } from './tts.js';
 import { GEMINI_VOICES, GEMINI_VOICE_OPTIONS } from './voices.js';
-import { getSpeakerLabelStatus } from './speaker-label.js';
+import { getSpeakerLabelStatus, purgeSpeakerLabelCacheForOwner } from './speaker-label.js';
 import { getFfmpegPath } from './ffmpeg.js';
 import { getAskOptions, getAskRuntimeStatus } from './ask.js';
 import { executeAskRequest } from './ask-command.js';
@@ -123,9 +123,15 @@ const ttsOptOutCommand = {
     const enabled = interaction.options.getBoolean('enabled', true);
     const cancelled = enabled ? cancelUserAudio(interaction.guildId, interaction.user.id) : null;
     setUserTtsOptOut(interaction.guildId, interaction.user.id, enabled);
+    const purged = enabled
+      ? await purgeSpeakerLabelCacheForOwner(interaction.guildId, interaction.user.id).catch((error) => {
+        console.warn(`[ttsoptout:${interaction.guildId}] Could not purge speaker-label cache: ${error.message}`);
+        return null;
+      })
+      : 0;
     await interaction.reply({
       content: enabled
-        ? `TTS opt-out **enabled**. Your eligible voice-channel messages will not be sent to Gemini or Google TTS.${cancelled && (cancelled.cancelledCurrent || cancelled.cancelledQueued) ? ' Your current/queued TTS items were cancelled.' : ''}`
+        ? `TTS opt-out **enabled**. Your eligible voice-channel messages will not be sent to Gemini or Google TTS.${cancelled && (cancelled.cancelledCurrent || cancelled.cancelledQueued) ? ' Your current/queued TTS items were cancelled.' : ''}${purged === null ? ' Your private cache purge could not be confirmed; ask the bot owner to check data/bot.log.' : ` Your per-user speaker-label cache was purged${purged ? ` (${purged} entr${purged === 1 ? 'y' : 'ies'})` : ''}.`}`
         : 'TTS opt-out **disabled**. Eligible voice-channel messages may be sent to Gemini/Google TTS for speech generation.',
       flags: ephemeral
     });
@@ -141,8 +147,10 @@ const ttsPrivacyCommand = {
     const optedOut = isUserTtsOptedOut(interaction.guildId, interaction.user.id);
     await interaction.reply({
       content: [
-        'Eligible messages typed in the active Discord voice-channel chat are sent to the selected TTS provider to generate speech.',
-        'Gemini Live and the unofficial Google Malay endpoint process submitted speech text under their applicable terms.',
+        'Normal TTS: eligible messages typed in the active voice-channel chat may be sent to Gemini Live, then the unofficial Google Malay endpoint on fallback.',
+        `Speaker names: your display name or TTS alias is sent separately to Google Malay when an announcement is needed. Its PCM is cached locally per user for at most ${Number(settings.speakerLabel?.maxCacheAgeDays) || 90} days.`,
+        '/ask: the question you explicitly submit is sent to the configured Gemini text model; its displayed answer is then read literally by Google Malay.',
+        'Enabling /ttsoptout cancels your current/queued normal TTS and label work and purges your per-user label cache. It cannot retract data already sent to a provider; /ask remains a separate explicit action.',
         `Your TTS opt-out is currently **${optedOut ? 'enabled' : 'disabled'}**. Use \`/ttsoptout\` to change it.`
       ].join('\n'),
       flags: ephemeral
@@ -156,7 +164,10 @@ const joinCommand = {
     .setDescription('Manually join or move to your current voice channel')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
-  async execute(interaction) {
+  async execute(interaction, {
+    connect = connectToVoiceChannel,
+    getChannelId = getRuntimeVoiceChannelId
+  } = {}) {
     const channel = interaction.member?.voice?.channel;
     if (!channel || channel.type !== ChannelType.GuildVoice) {
       await interaction.reply({ content: 'Join a normal voice channel first. Stage channels are not supported for TTS playback.', flags: ephemeral });
@@ -164,8 +175,19 @@ const joinCommand = {
     }
 
     await interaction.deferReply({ flags: ephemeral });
-    await connectToVoiceChannel(interaction.guild, channel, { allowMove: true });
-    await interaction.editReply(`Joined **${channel.name}**.`);
+    const result = await connect(interaction.guild, channel, { allowMove: true });
+    const actualChannelId = getChannelId(interaction.guildId);
+    if (!result?.connection || String(actualChannelId ?? '') !== String(channel.id)) {
+      const current = actualChannelId ? interaction.guild.channels?.cache?.get?.(actualChannelId) : null;
+      const detail = result?.status === 'busy-other-channel'
+        ? `The bot is still connecting to ${current ? `**${current.name}**` : 'another voice channel'}. Try /join again after it finishes.`
+        : 'The bot could not confirm that voice connection. Try /join again.';
+      await interaction.editReply(detail);
+      return;
+    }
+    await interaction.editReply(result.status === 'already-connected'
+      ? `Already in **${channel.name}**.`
+      : `Joined **${channel.name}**.`);
   }
 };
 
@@ -585,3 +607,5 @@ export const commands = [
   restartTtsCommand,
   statusCommand
 ];
+
+export const __test = { joinCommand, ttsOptOutCommand, ttsPrivacyCommand };

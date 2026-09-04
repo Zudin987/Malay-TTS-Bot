@@ -7,14 +7,15 @@ import { commands } from './commands.js';
 import { config } from './config.js';
 import { buildSpeakableMessage } from './message-speech-policy.js';
 import { prepareSpeechVariants } from './preprocess.js';
-import { getGuildSettings, isUserTtsOptedOut } from './store.js';
+import { deleteGuildSettings, flushStore, getGuildSettings, isUserTtsOptedOut } from './store.js';
 import { cleanupTempDirectory, getOrAssignTtsVoice } from './tts.js';
-import { sendVoiceStateLog } from './voice-log.js';
+import { clearVoiceLogForDeletedChannel, sendVoiceStateLog } from './voice-log.js';
 import { fatalLogSync, flushLogs } from './logger.js';
 import { connectToVoiceChannel, disconnectAllGuilds, disconnectGuild, evaluateAutoLeave, getRuntimeVoiceChannelId } from './voice.js';
 import { clearTtsMetrics } from './tts-metrics.js';
 import { invalidateGuildDictionaryCache } from './dictionary.js';
 import { terminateAllChildren } from './child-processes.js';
+import { purgeLegacySpeakerLabelCache } from './speaker-label.js';
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
 client.commands = new Collection(commands.map((command) => [command.data.name, command]));
@@ -50,7 +51,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   try { await command.execute(interaction); }
   catch (error) {
     console.error(`[/${interaction.commandName}]`, error);
-    const reply = { content: 'Command failed. Check bot.log.', flags: MessageFlags.Ephemeral };
+    const reply = { content: 'Command failed. Check data/bot.log.', flags: MessageFlags.Ephemeral };
     if (interaction.deferred || interaction.replied) await interaction.followUp(reply).catch(() => {});
     else await interaction.reply(reply).catch(() => {});
   }
@@ -135,14 +136,24 @@ client.on(Events.VoiceStateUpdate, (oldState, newState) => {
   evaluateAutoLeave(newState.guild ?? oldState.guild);
   void sendVoiceStateLog(client, oldState, newState).catch((error) => console.warn('[voice-log]', error));
 });
+client.on(Events.ChannelDelete, (channel) => {
+  try { clearVoiceLogForDeletedChannel(channel); }
+  catch (error) { console.warn('[voice-log] Could not clear a deleted channel subscription:', error); }
+});
 client.on(Events.Error, (error) => console.error('[discord-client]', error));
-client.on(Events.GuildDelete, (guild) => { disconnectGuild(guild.id); clearTtsMetrics(guild.id); invalidateGuildDictionaryCache(guild.id); });
+client.on(Events.GuildDelete, (guild) => {
+  disconnectGuild(guild.id);
+  clearTtsMetrics(guild.id);
+  invalidateGuildDictionaryCache(guild.id);
+  deleteGuildSettings(guild.id);
+});
 
 function fatalExit(kind, error) {
   if (fatalExiting) return;
   fatalExiting = true;
   try { disconnectAllGuilds(); } catch {}
   try { client.destroy(); } catch {}
+  try { flushStore(); } catch {}
   fatalLogSync(`[${kind}]`, error instanceof Error ? error : new Error(String(error)));
   process.exit(1);
 }
@@ -158,6 +169,7 @@ export async function gracefulShutdown(signal) {
   try {
     disconnectAllGuilds();
     client.destroy();
+    flushStore();
     await terminateAllChildren();
     await cleanupTempDirectory();
     await flushLogs();
@@ -173,4 +185,5 @@ export async function gracefulShutdown(signal) {
 process.once('SIGINT', () => void gracefulShutdown('SIGINT'));
 process.once('SIGTERM', () => void gracefulShutdown('SIGTERM'));
 await cleanupTempDirectory();
+await purgeLegacySpeakerLabelCache().catch((error) => console.warn('[speaker-label] Could not purge legacy unowned cache:', error.message));
 await client.login(config.token);

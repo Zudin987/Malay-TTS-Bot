@@ -3,7 +3,7 @@ import { randomInt } from 'node:crypto';
 import path from 'node:path';
 import { dataDir, settings } from './config.js';
 import { readJsonWithBackup, writeBackupText, writeJsonAtomicWithBackup } from './safe-json.js';
-import { cancelAllSpeakerLabelGeneration } from './speaker-label.js';
+import { cancelSpeakerLabelGenerationForOwner } from './speaker-label.js';
 
 const filePath = path.join(dataDir, 'guilds.json');
 let guilds = {};
@@ -116,6 +116,12 @@ function save() {
   lastValidText = writeJsonAtomicWithBackup(filePath, guilds, lastValidText);
 }
 
+export function flushStore() {
+  if (!deferredSaveTimer) return false;
+  save();
+  return true;
+}
+
 function scheduleNoncriticalSave(delayMs = 150) {
   if (deferredSaveTimer) return;
   deferredSaveTimer = setTimeout(() => {
@@ -142,11 +148,26 @@ export function getGuildSettings(guildId) {
   return guilds[id];
 }
 
+export function getExistingGuildSettings(guildId) {
+  const id = String(guildId ?? '').trim();
+  if (!id || !Object.hasOwn(guilds, id)) return null;
+  guilds[id] = normalizeGuild(guilds[id]);
+  return guilds[id];
+}
+
 export function updateGuildSettings(guildId, patch) {
   const current = getGuildSettings(guildId);
   guilds[guildId] = normalizeGuild({ ...current, ...(isObject(patch) ? patch : {}) });
   save();
   return guilds[guildId];
+}
+
+export function deleteGuildSettings(guildId) {
+  const id = String(guildId ?? '').trim();
+  if (!id || !Object.hasOwn(guilds, id)) return false;
+  delete guilds[id];
+  save();
+  return true;
 }
 
 export function setUserAlias(guildId, userId, alias) {
@@ -235,10 +256,9 @@ export function isUserTtsOptedOut(guildId, userId) {
 export function setUserTtsOptOut(guildId, userId, enabled) {
   const current = getGuildSettings(guildId);
   current.ttsOptOutUserIds = updateOptOutIds(current.ttsOptOutUserIds, userId, enabled);
-  // Speaker-label generation is an independent Google request. Abort any
-  // currently active label work as soon as privacy opt-out becomes effective;
-  // queued/current message audio is cancelled separately by audio.js.
-  if (enabled) cancelAllSpeakerLabelGeneration(new Error('TTS privacy opt-out enabled.'));
+  // Speaker-label generation is a separate Google request. Privacy ownership
+  // is scoped to this guild/user; another person's label must continue.
+  if (enabled) cancelSpeakerLabelGenerationForOwner(guildId, userId, new Error('TTS privacy opt-out enabled.'));
   save();
   return enabled;
 }

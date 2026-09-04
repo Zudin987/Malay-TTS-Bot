@@ -11,16 +11,47 @@ $Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $Principal = New-Object Security.Principal.WindowsPrincipal($Identity)
 if (!$Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Run setup-clean.cmd as administrator to install the SYSTEM task and protect private state.' }
 
+if ($InstallPath.StartsWith('\\')) { throw 'The SYSTEM task must not execute from a network/UNC path.' }
+$PathRoot = [IO.Path]::GetPathRoot($InstallPath)
+if ($InstallPath.TrimEnd('\') -eq $PathRoot.TrimEnd('\')) { throw 'Refusing to register a SYSTEM task against a drive root.' }
+$InstallItem = Get-Item -LiteralPath $InstallPath -Force
+if (($InstallItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'The installation root must not be a reparse point.' }
+$ReparsePoint = Get-ChildItem -LiteralPath $InstallPath -Force -Recurse -ErrorAction Stop |
+  Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 } |
+  Select-Object -First 1
+if ($ReparsePoint) { throw "The installation tree contains a reparse point: $($ReparsePoint.FullName)" }
+
+function Invoke-CheckedIcacls([string[]]$Arguments, [string]$Failure) {
+  & icacls.exe @Arguments | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw $Failure }
+}
+
+$OwnerSid = $Identity.User.Value
+# npm ci runs before this script. Seal every executable/config/runtime/dependency
+# path before SYSTEM registration. Reset first so pre-existing explicit entries
+# cannot survive beneath the root, then make future children inherit only the
+# three deliberate maintenance identities.
+Invoke-CheckedIcacls -Arguments @($InstallPath, '/reset', '/T', '/C') -Failure 'Failed to reset the application-tree ACL.'
+Invoke-CheckedIcacls -Arguments @(
+  $InstallPath, '/inheritance:r', '/grant:r',
+  "*${OwnerSid}:(OI)(CI)F", '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F',
+  '/T', '/C'
+) -Failure 'Failed to seal the application-tree ACL.'
+
 $DataPath = Join-Path $InstallPath 'data'
 New-Item -ItemType Directory -Path $DataPath -Force | Out-Null
-$OwnerSid = $Identity.User.Value
 # Inheritance protects future atomic replacements, backups, caches and locks.
-& icacls.exe $DataPath /inheritance:r /grant:r "*${OwnerSid}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /T /C | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'Failed to protect the state directory.' }
+Invoke-CheckedIcacls -Arguments @(
+  $DataPath, '/inheritance:r', '/grant:r',
+  "*${OwnerSid}:(OI)(CI)F", '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F',
+  '/T', '/C'
+) -Failure 'Failed to protect the state directory.'
 $EnvPath = Join-Path $InstallPath '.env'
 if (Test-Path -LiteralPath $EnvPath) {
-  & icacls.exe $EnvPath /inheritance:r /grant:r "*${OwnerSid}:F" '*S-1-5-18:R' '*S-1-5-32-544:F' | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw 'Failed to protect .env.' }
+  Invoke-CheckedIcacls -Arguments @(
+    $EnvPath, '/inheritance:r', '/grant:r',
+    "*${OwnerSid}:F", '*S-1-5-18:R', '*S-1-5-32-544:F'
+  ) -Failure 'Failed to protect .env.'
 }
 
 # https://learn.microsoft.com/powershell/module/scheduledtasks/new-scheduledtaskprincipal
