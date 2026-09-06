@@ -4,6 +4,7 @@
   "dg": "dungeon",
   "dmg": "damage",
   "gh": "guild hunt",
+  "gpt": "G P T",
   "gs": "gear score",
   "hsr": "H S R",
   "mf": "madefaker",
@@ -17,6 +18,8 @@
   "ssr": "S S R",
   "sv": "stimen",
   "sv30": "stimen vault thirty",
+  "url": "U R L",
+  "ux": "U X",
   "wp": "weapon",
   "wwm": "W W M"
 }
