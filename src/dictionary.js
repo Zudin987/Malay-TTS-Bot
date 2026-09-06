@@ -10,6 +10,10 @@ const dictionaryBackupPath = `${dictionaryPath}.bak`;
 const WORD_CHAR_CLASS = '[\\p{L}\\p{N}_]';
 const WATCH_INTERVAL_MS = 300;
 const RELOAD_DEBOUNCE_MS = 200;
+// Malaysian chat in this guild often uses "gak" as "juga", but Indonesian
+// uses the same spelling as negation. These strong Indonesian markers keep the
+// fallback from confidently changing "bisa gak?" into the wrong sentence.
+const INDONESIAN_GAK_CONTEXT_PATTERN = /\b(?:bisa|udah|nggak|gue|gw|kalian|banget|aja|kayak|ngerti|gimana|kalo|kok|dong|deh|sih)\b/iu;
 
 let dictionary = Object.create(null);
 let dictionaryPattern = null;
@@ -88,7 +92,6 @@ export function loadDictionary() {
 
 function mergedDictionary(guildId) {
   if (!guildId) return { entries: dictionary, pattern: dictionaryPattern };
-
   const id = String(guildId);
   const overrides = getGuildDictionaryOverrides(id);
   if (Object.keys(overrides).length === 0) {
@@ -127,11 +130,13 @@ export function replaceDictionaryWords(text, guildId = null) {
   if (!text) return text;
   const { entries, pattern } = mergedDictionary(guildId);
   if (!pattern) return text;
+  const sourceHasIndonesianGakContext = INDONESIAN_GAK_CONTEXT_PATTERN.test(text);
 
   return text.replace(pattern, (matched) => {
     if (isReservedAcronymKey(matched)) return matched;
     const key = matched.toLowerCase();
     if (key === 'la' && matched === 'LA') return matched;
+    if (key === 'gak' && sourceHasIndonesianGakContext) return matched;
     return entries[key] ?? matched;
   });
 }
