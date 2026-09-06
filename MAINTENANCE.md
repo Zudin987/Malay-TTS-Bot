@@ -42,6 +42,20 @@ Provider first-audio success is not the same as audible Discord playback. `/ask`
 
 The runtime accepts **ten environment key slots** and keeps **round-robin selection**. One Live speech item uses one selected key; duplicate credentials do not create independent quota/auth capacity. Quota failures do not trigger same-request key rotation. Environment key changes require a full process restart.
 
+### Google fallback pronunciation invariants
+
+Google Translate TTS preprocessing is a pronunciation aid, not an autocorrect or rewrite system.
+
+- Keep whole-message routing deterministic and conservative: credible Malay/Manglish evidence wins before English evidence and uses `tl=ms`.
+- Clearly English messages may use `tl=en`, including short gamer/technical phrases, but only a curated safe set of one-word English messages may switch alone. Unknown one-word text/usernames stay on the conservative Malay/literal path.
+- Do not add per-word language switching; mixed Manglish should stay one coherent voice.
+- Add Malay shorthand/typos only when they are observed and high-confidence. Ambiguous short forms must remain context-gated.
+- Protect unambiguous all-caps game/technical initials from shouting-case normalization. Context-sensitive initials must expand only with game/technical evidence.
+- Do not globally reinterpret ambiguous abbreviations such as ordinary English words, country codes, pronouns or multiple-game initials just to improve one corpus example.
+- Do not add fuzzy/edit-distance autocorrect. New nicknames, game names and uncertain slang must remain literal.
+- Keep link/domain stripping before normal-chat dictionary preprocessing so abbreviations inside URLs are never transformed into spoken chat text.
+- Preserve the Indonesian `gak` collision guard and other multilingual guards when extending dictionaries.
+
 ## Voice / speaker architecture
 
 Gemini voice pool:
@@ -130,6 +144,8 @@ Before calling a release final:
 - test the FFmpeg PCM -> filters/limiter -> libopus/Ogg -> decode path
 - review provider cancellation, failover, queue, speaker-label and disconnect/recovery behavior
 - verify `/ask` provider-first-audio without playback progress cannot hold FIFO: Gemini gets at most one Google-only retry, Google failure terminates, and any real playback progress forbids full-answer restart
+- verify Google fallback regressions cover short gamer-English routing, Malay-marker precedence, actual `tl` selection, context-scoped shorthand and protected acronym/game-name readings
+- verify unknown names/one-word text remain conservative and no fuzzy autocorrect has been introduced
 - verify privacy opt-out cancels queued/current message TTS and active speaker-label provider work
 - verify opt-out/cache purge is owner-scoped and leaves another guild/user's work intact
 - verify voice-log recipients are current authorized guild members before every DM
