@@ -1,59 +1,51 @@
-## v0.24.3
+## v0.24.4
 
-Patch release hardening `/ask` speech after v0.24.2 correctly restored Gemini 3.1 Live as the primary speech provider, and improving Google fallback pronunciation from a real NeverRun chat corpus audit.
+Second corpus-driven Google fallback pronunciation audit. This release keeps the v0.24.3 `/ask` audibility/queue hardening unchanged and improves how the deterministic Google Translate TTS fallback handles short gamer-English, Malay/Manglish shorthand, and game/technical initials.
 
-### `/ask` audibility fallback
+### Short gamer-English routing
 
-- Root cause addressed: provider **first audio** and Discord **audible playback** are separate milestones. A Live turn could return PCM successfully, be selected as the provider, and then leave the audio pipeline waiting up to the old 10-second player-start limit before the listener heard anything.
-- `/ask` now has one bounded **3500 ms post-provider audibility window**. The window covers both entering Discord `Playing` and obtaining real `playbackDuration` progress; entering `Playing` alone is not treated as audible success.
-- If Gemini 3.1 Live is selected but the `/ask` item reaches **0 ms playback progress** within that audibility window, the stale Live turn is cancelled and the exact displayed answer is retried **once** with Google Malay (`google-ms`). That retry sets `skipLive: true`, so it cannot loop back into Live.
-- If Google already owns the `/ask` attempt and still reaches 0 ms playback progress, no second retry is created. The failed `/ask` item retires and FIFO continues to later normal-chat TTS.
-- Once any `/ask` audio has made real playback progress, the bot never restarts the full answer from the beginning. Existing conservative verified-tail recovery may still operate, preventing a late local/provider completion from creating a duplicate full answer.
-- Normal chat keeps its existing 10-second Discord player-start behavior; this shorter audibility policy is scoped only to `/ask`.
+- Google fallback remains Malay-first on ambiguity, but short clearly-English gaming/technical messages can now use English TTS instead of being forced through Malay pronunciation.
+- Covered real-chat shapes include `server down`, `carry me`, `raid gear`, `skill issue`, `server reset`, `max level`, `world boss in 27 minute`, and normalized `gg` / `good game`.
+- A small curated set of safe one-word English gaming/technical messages may route to English. Unknown single words, usernames, nicknames, new game names and other uncertain text still default to Malay/literal handling.
+- Any credible Malay/Manglish marker wins before English evidence, so mixed lines remain one coherent Malay voice. There is still no per-word language switching.
 
-### Google fallback pronunciation audit
+### Malay shorthand and typo coverage
 
-- Audited the Google fallback preprocessing against the supplied NeverRun text-channel and voice-channel exports rather than growing the dictionary from guesses.
-- The existing shipped dictionary was already broad and remains the first normal-chat normalization layer. New aliases are limited to observed, high-confidence Malay shorthand/typos such as standalone contextual `x` -> `tak`, `ko` -> `kau`, `acaner` -> `macam mana`, `kiteorg`/`kteorg` -> `kita orang`, and several unambiguous spelling slips.
-- Ambiguous short aliases remain context gated. Uppercase `X` stays a literal letter; `EA` and `KO` now have exact uppercase acronym readings while lowercase chat forms remain available to the Malay context layer.
-- Added a multilingual collision guard for `gak`: Malaysian usage may still normalize to `juga`, but strong Indonesian context such as `bisa gak?` preserves `gak` instead of changing the sentence to the wrong meaning.
-- Google Translate TTS is no longer forced to `tl=ms` for every message. A deterministic whole-message detector selects English only for strongly English text with no meaningful Malay marker. Ambiguous and mixed Manglish stays Malay. There is deliberately no per-word voice/language switching.
-- Nicknames, game names, dialect words and uncertain slang are not fuzzy-autocorrected. Unknown text remains literal rather than being guessed from edit distance.
+- Added only high-confidence forms observed in the supplied NeverRun exports: contextual `jd` -> `jadi`, `ksh` -> `kasih`, `kjp` -> `sekejap`, `skl` -> `sekali`, and `memng` -> `memang`.
+- Existing context-gated aliases from v0.24.3 remain, including `x`, `ko`, `acaner`, `kiteorg`/`kteorg`, and the Indonesian `gak` collision guard.
+- Short ambiguous forms are not promoted to blind global replacements. Unknown text is still preserved instead of guessed through edit-distance/fuzzy autocorrect.
 
-### Regression coverage
+### Acronym and game-name pronunciation
 
-Added explicit tests for:
+- Added deterministic readings for observed all-caps game/technical initials that could otherwise be damaged by ordinary shouting-case normalization: `SAO`, `NTE`, `RYL`, `GPT`, `URL`, and `UX`.
+- Added context-scoped readings for `ML`, `HSR`, `WWM`, and `SSR`, with `game`, `gaming`, and `play` available as game-context signals.
+- Ambiguous forms such as `AS`, `TO`, `IT`, `US`, `MY`, `MT`, and `DP` remain untouched globally.
 
-- bounded `/ask` audibility timing while normal chat retains its previous timeout;
-- Gemini first-audio success followed by zero playback progress -> exactly one Google-only retry;
-- cancellation of stale Gemini work during that retry;
-- no full-answer replay after any actual playback progress;
-- Google zero-progress failure -> no retry loop;
-- `Playing` without `playbackDuration` progress not counting as `/ask` audibility;
-- provider failure on `/ask` clearing queue ownership so a following normal-chat item still runs;
-- real-chat Malay shorthand and typo normalization without changing uppercase acronym forms;
-- intentional nicknames/dialect slang staying literal;
-- Indonesian `gak` collision protection;
-- conservative Malay/Manglish vs clearly-English Google TTS language routing and the actual `tl` request parameter.
+### Safety boundaries preserved
 
-The v0.24.2 provider-routing regressions remain in place: exact displayed answer -> Gemini 3.1 Live first, exact-text Google fallback, deterministic ten-key rotation, provider metrics and one logical `/ask` queue item.
+- Normal MessageCreate speech still strips raw/autolink/masked links and bare domains before dictionary preprocessing, so URL/domain text is not rewritten as chat abbreviations.
+- No fuzzy autocorrect, semantic rewriting, translation, grammar correction, or text completion was added.
+- Gemini Live input remains light and strict; the fallback pronunciation dictionaries are not restored to Gemini.
+- `/ask` keeps the v0.24.3 3500 ms post-provider audibility guard, exactly one Google-only retry after a zero-progress Gemini handoff, no Google retry loop, and no full-answer restart after any real playback progress.
 
-### Release hygiene and preserved protections
+### Regression and release hygiene
 
-- `package.json` and the root `package-lock.json` metadata are both aligned to **0.24.3**, correcting the non-runtime version-metadata mismatch noted after v0.24.2.
-- The existing ten Gemini key slots, deterministic round robin, bad-key isolation, quota/cooldown behavior, `/ask` ownership and STOP/supersession rules, no-prefetch protection, privacy opt-out/cache ownership, graceful shutdown, clean-package exclusions, checksum-pinned portable runtimes, Windows SYSTEM lifecycle, full-tree ACL sealing, standard-user write-denial proof and release-provenance gates remain preserved.
+- Added real-chat regressions for the second-audit Malay forms, short gamer-English routing, Malay-marker precedence, exact Google `tl=en` / `tl=ms` request selection, and deterministic acronym readings.
+- `package.json` and root `package-lock.json` are both aligned to **0.24.4**; dependency versions are otherwise unchanged.
+- Fresh npm advisory validation for the v0.24.4 dependency files reports zero vulnerabilities.
+- Existing ten-key rotation, provider cancellation/failover, privacy/cache ownership, graceful shutdown, clean-package exclusions, checksum-pinned runtimes, Windows SYSTEM lifecycle, full-tree ACL sealing and standard-user write-denial gates remain preserved.
 
 ### CLEAN installation or upgrade
 
 1. Stop the existing bot using `stop-bot.vbs`.
 2. Back up only `.env` and `data\guilds.json`.
-3. Extract `Malay-TTS-Bot-v0.24.3-CLEAN.zip` into an empty `C:\Malay-TTS-Bot` installation. Restore only those two user files; keep the new `config\settings.json`.
+3. Extract `Malay-TTS-Bot-v0.24.4-CLEAN.zip` into an empty `C:\Malay-TTS-Bot` installation. Restore only those two user files; keep the new `config\settings.json`.
 4. Run `setup-clean.cmd` as administrator, then start the **Malay TTS Bot** SYSTEM task or use `restart-bot.vbs`.
 
 The ZIP includes portable **Node 24.19.0 with npm** and **FFmpeg 9.0.1**, a per-file checksum manifest and fresh defaults. It contains no user `.env`, guild state, application `node_modules`, logs, caches or lock files.
 
 ### Validation and limits
 
-Publishing remains gated on five consecutive full-suite passes on Linux and Windows, source/JSON validation, dependency audit, real CLEAN ZIP re-extraction, bundled-runtime checks, and Windows proof of two SYSTEM starts/stops, ten-key rotation, deferred-store persistence, the PCM/filter/Opus/decode audio path, packaged hashes, full application/private-state ACLs, protected data logs and standard-user write denial. The release includes `verification.json` and the CLEAN ZIP SHA-256.
+Publishing remains gated on five consecutive full-suite passes on Linux and Windows, source/JSON validation, a mandatory dependency audit, real CLEAN ZIP re-extraction, bundled-runtime checks, and Windows proof of SYSTEM starts/stops, ten-key rotation, deferred-store persistence, the PCM/filter/Opus/decode path, packaged hashes, full application/private-state ACLs, protected data logs and standard-user write denial. The release includes `verification.json` and the CLEAN ZIP SHA-256.
 
-CI uses fixture credentials and does not use a production Discord token or Gemini key. Gemini Live speech remains generative, so strict prompting materially constrains lexical behavior but cannot provide an independent absolute acoustic fidelity guarantee. The Google fallback remains the existing unofficial Translate TTS endpoint; Malay is the default language and only high-confidence whole-message English is routed to English TTS.
+CI uses fixture credentials and does not use a production Discord token or Gemini key. Gemini Live speech remains generative, so strict prompting materially constrains lexical behavior but cannot provide an independent absolute acoustic-fidelity guarantee. The Google fallback remains the existing unofficial Translate TTS endpoint; routing is deterministic and conservative rather than a general language-identification service.
