@@ -5,11 +5,18 @@
   "dmg": "damage",
   "gh": "guild hunt",
   "gs": "gear score",
+  "hsr": "H S R",
   "mf": "madefaker",
+  "ml": "M L",
   "nm": "nightmare",
+  "nte": "N T E",
   "pt": "party",
+  "ryl": "R Y L",
+  "sao": "S A O",
   "sk": "shield knight",
+  "ssr": "S S R",
   "sv": "stimen",
   "sv30": "stimen vault thirty",
-  "wp": "weapon"
+  "wp": "weapon",
+  "wwm": "W W M"
 }
