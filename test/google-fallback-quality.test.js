@@ -45,6 +45,24 @@ test('observed high-confidence typos normalize but nicknames and dialect slang s
   assert.equal(normalChatGoogleText('selek Izi Eriii ghey noh uish'), 'selek Izi Eriii ghey noh uish');
 });
 
+test('second audit covers recurring Malay shorthand only when context makes it safe', () => {
+  assert.equal(normalChatGoogleText('janji jd'), 'janji jadi');
+  assert.equal(normalChatGoogleText('fokus ksh balance dengan mastery'), 'fokus kasih balance dengan mastery');
+  assert.equal(normalChatGoogleText('nnti kjp aku test'), 'nanti sekejap aku test');
+  assert.equal(normalChatGoogleText('lg skl'), 'lagi sekali');
+  assert.equal(normalChatGoogleText('Yakk memng build icicle dmg'), 'Yakk memang build icicle damage');
+  assert.equal(normalChatGoogleText('JD document KSH SKL'), 'JD document KSH SKL');
+});
+
+test('second audit gives common game and technical initials deterministic letter readings', () => {
+  assert.equal(normalChatGoogleText('SAO NTE RYL'), 'S A O N T E R Y L');
+  assert.equal(normalChatGoogleText('siapa main nte'), 'siapa main N T E');
+  assert.equal(normalChatGoogleText('game lama sao integral factor'), 'game lama S A O integral factor');
+  assert.equal(normalChatGoogleText('u play ml to?'), 'you play M L to?');
+  assert.equal(normalChatGoogleText('aku main hsr'), 'aku main H S R');
+  assert.equal(normalChatGoogleText('chat gpt url ux'), 'chat G P T U R L U X');
+});
+
 test('Indonesian negation gak is not rewritten as Malaysian juga when strong Indonesian context is present', () => {
   assert.equal(replaceDictionaryWords('bisa gak?'), 'bisa gak?');
   assert.equal(replaceDictionaryWords('udah bisa gak sekarang?'), 'udah bisa gak sekarang?');
@@ -57,6 +75,36 @@ test('Google fallback language routing is conservative for Manglish and strong f
   assert.equal(inferGoogleTtsLanguage('aku tak sure lagi nak manage resources'), 'ms');
   assert.equal(inferGoogleTtsLanguage('I see material la, nanti aku check'), 'ms');
   assert.equal(inferGoogleTtsLanguage('hello'), 'ms');
+});
+
+test('second audit routes short gamer-English to English while Malay markers still win', () => {
+  for (const text of [
+    'Server still down ? Cannot connect',
+    'Carry me',
+    'max level ?',
+    'world boss in 27 minute',
+    'good game',
+    'raid gear',
+    'skill issue',
+    'server reset',
+    'raid',
+    'dungeon',
+    'test'
+  ]) {
+    assert.equal(inferGoogleTtsLanguage(text), 'en', text);
+  }
+
+  for (const text of [
+    'ya still down',
+    '20 min lagi main quest open',
+    'gem kuning luck mastery',
+    'rancak raid season two',
+    'dan damage reduction buff',
+    'Thanks guys, akan ku usahakan build',
+    'terkubur shield knight'
+  ]) {
+    assert.equal(inferGoogleTtsLanguage(text), 'ms', text);
+  }
 });
 
 test('Google request uses English only for confidently English whole messages', async () => {
@@ -72,6 +120,15 @@ test('Google request uses English only for confidently English whole messages', 
   for await (const _chunk of english.audioStream) {}
   await english.completion;
   assert.equal(english.languageCode, 'en');
+  assert.equal(urls[0].searchParams.get('tl'), 'en');
+
+  urls.length = 0;
+  const shortGamingEnglish = await streamGoogleMalay('raid gear', {
+    fetchImpl, timeoutMs: 1000, completionTimeoutMs: 2000, retryCount: 0
+  });
+  for await (const _chunk of shortGamingEnglish.audioStream) {}
+  await shortGamingEnglish.completion;
+  assert.equal(shortGamingEnglish.languageCode, 'en');
   assert.equal(urls[0].searchParams.get('tl'), 'en');
 
   urls.length = 0;

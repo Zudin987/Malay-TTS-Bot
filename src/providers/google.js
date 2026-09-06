@@ -13,28 +13,77 @@ const DEFAULT_PARALLEL_CHUNKS = 3;
 // meaningful Malay marker. This intentionally defaults to Malay on ambiguity.
 const MALAY_ROUTING_WORDS = new Set([
   'aku', 'kau', 'korang', 'kita', 'kami', 'dia', 'diorang', 'saya', 'awak',
-  'tak', 'tidak', 'nak', 'mahu', 'dah', 'sudah', 'belum', 'boleh', 'jangan',
-  'kenapa', 'sebab', 'kalau', 'tapi', 'jadi', 'nanti', 'dulu', 'lepas',
-  'masuk', 'keluar', 'pergi', 'balik', 'tunggu', 'tengok', 'cuba', 'pakai',
-  'punya', 'orang', 'macam', 'sangat', 'lagi', 'saja', 'dekat', 'kat', 'dengan',
-  'untuk', 'yang', 'ini', 'itu', 'ada', 'apa', 'siapa', 'bagi', 'buat', 'makan',
-  'tidur', 'pukul', 'malam', 'pagi', 'petang', 'sekejap', 'semua', 'memang',
-  'betul', 'rasa', 'faham', 'tahu', 'dapat', 'kena', 'suruh', 'tolong', 'cepat',
-  'lambat', 'senang', 'susah', 'bagus', 'cantik', 'sedap', 'lah', 'la', 'weh',
-  'kot', 'je', 'ni', 'tu', 'pun', 'ke', 'jom'
+  'tak', 'tidak', 'nak', 'mahu', 'mau', 'dah', 'sudah', 'belum', 'boleh', 'jangan',
+  'kenapa', 'sebab', 'kalau', 'tapi', 'jadi', 'juga', 'nanti', 'dulu', 'lepas',
+  'masuk', 'keluar', 'pergi', 'balik', 'datang', 'sampai', 'tunggu', 'tengok',
+  'cuba', 'pakai', 'punya', 'orang', 'macam', 'sangat', 'lagi', 'saja', 'dekat',
+  'kat', 'dengan', 'untuk', 'yang', 'ini', 'itu', 'ada', 'apa', 'siapa', 'bagi',
+  'buat', 'makan', 'minum', 'tidur', 'pukul', 'malam', 'pagi', 'petang', 'sekejap',
+  'semua', 'memang', 'betul', 'rasa', 'faham', 'tahu', 'dapat', 'kena', 'suruh',
+  'tolong', 'cepat', 'lambat', 'senang', 'susah', 'bagus', 'cantik', 'sedap',
+  'lah', 'la', 'weh', 'kot', 'je', 'ni', 'tu', 'pun', 'ke', 'jom', 'ya',
+  // Extra Malay/colloquial markers below come from the NeverRun corpus. They
+  // are routing guards, not rewrites: their job is to keep real Manglish on
+  // Malay TTS even when the same sentence also contains several gaming words.
+  'baru', 'mana', 'nama', 'ramai', 'kurang', 'atas', 'ikut', 'dengar', 'tekan',
+  'naik', 'sini', 'lebih', 'semalam', 'jauh', 'salah', 'malas', 'lagu', 'benda',
+  'siap', 'sakit', 'gila', 'biasa', 'takut', 'kerja', 'jual', 'sempat', 'mahal',
+  'kuat', 'jalan', 'rumah', 'beza', 'situ', 'laju', 'letak', 'tinggal', 'kawan',
+  'sekali', 'kata', 'terus', 'cukup', 'dalam', 'dua', 'esok', 'nampak', 'masa',
+  'bawah', 'cuma', 'ajak', 'atau', 'asal', 'pandai', 'mari', 'borak', 'agak',
+  'gerak', 'kah', 'penting', 'janji', 'geng', 'mantap', 'tadi', 'tiba', 'fokus',
+  'wajib', 'walaupun', 'akan', 'jumpa', 'hantar', 'beli', 'nyanyi', 'harap',
+  'laku', 'rancak', 'terkubur', 'kasi', 'atur', 'dan', 'warna', 'kuning',
+  'hijau', 'merah', 'biru', 'putih', 'hitam', 'minta', 'ambil', 'simpan',
+  'mula', 'pilih', 'cari', 'tanya', 'jawab', 'rehat', 'mandi', 'murah', 'penat',
+  'mengantuk', 'baik', 'buruk', 'lawa', 'tinggi', 'rendah', 'panjang', 'pendek',
+  'awal', 'akhir', 'depan', 'belakang', 'kecil', 'besar', 'banyak', 'sikit',
+  'sorang', 'seorang', 'entah', 'ingat', 'lupa', 'habis', 'kosong', 'penuh',
+  'harga', 'duit', 'ringgit', 'fon', 'baju', 'gambar', 'abang', 'bang', 'kak',
+  'fuh', 'boh', 'tah', 'lu', 'ku', 'di'
 ]);
 const ENGLISH_ROUTING_WORDS = new Set([
   'a', 'an', 'the', 'and', 'or', 'but', 'if', 'then', 'this', 'that', 'these',
   'those', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'i', 'you', 'we',
   'they', 'he', 'she', 'it', 'my', 'your', 'our', 'their', 'me', 'him', 'her',
-  'us', 'them', 'do', 'does', 'did', 'not', 'can', 'could', 'would', 'should',
-  'will', 'have', 'has', 'had', 'what', 'why', 'how', 'when', 'where', 'who',
-  'which', 'for', 'from', 'to', 'of', 'in', 'on', 'at', 'with', 'without', 'as',
-  'by', 'about', 'just', 'only', 'very', 'really', 'still', 'already', 'maybe',
-  'please', 'thanks', 'thank', 'sorry', 'hello', 'hi', 'good', 'bad', 'new', 'old',
-  'need', 'want', 'like', 'get', 'got', 'make', 'use', 'play', 'join', 'leave',
-  'wait', 'check', 'try', 'know', 'think', 'see', 'look', 'come', 'go', 'guys',
-  'anyone', 'someone', 'today', 'tomorrow', 'yes', 'no'
+  'us', 'them', 'do', 'does', 'did', 'not', 'can', 'cannot', 'could', 'would',
+  'should', 'will', 'have', 'has', 'had', 'what', 'why', 'how', 'when', 'where',
+  'who', 'which', 'for', 'from', 'to', 'of', 'in', 'on', 'at', 'with', 'without',
+  'as', 'by', 'about', 'just', 'only', 'very', 'really', 'still', 'already',
+  'maybe', 'please', 'thanks', 'thank', 'sorry', 'hello', 'hi', 'good', 'bad',
+  'new', 'old', 'need', 'want', 'like', 'get', 'got', 'make', 'use', 'play',
+  'join', 'leave', 'wait', 'check', 'try', 'know', 'think', 'see', 'look',
+  'come', 'go', 'guys', 'anyone', 'someone', 'today', 'tomorrow', 'yes', 'no',
+  // Common English gaming/technical vocabulary in NeverRun. Adding these as
+  // evidence fixes short phrases such as "raid gear" and "server down" without
+  // changing mixed Malay sentences because Malay markers always win first.
+  'game', 'gaming', 'server', 'down', 'connect', 'connection', 'carry', 'max',
+  'level', 'world', 'boss', 'minute', 'score', 'hard', 'mode', 'raid', 'dragon',
+  'first', 'easy', 'next', 'farm', 'gear', 'normal', 'english', 'language',
+  'drop', 'mage', 'stock', 'healer', 'enough', 'damage', 'shield', 'knight',
+  'weapon', 'maintenance', 'skill', 'issue', 'discord', 'bug', 'real', 'life',
+  'daily', 'reset', 'dungeon', 'class', 'heal', 'party', 'season', 'crit',
+  'start', 'bot', 'build', 'quest', 'team', 'support', 'role', 'range', 'melee',
+  'magic', 'match', 'run', 'clear', 'void', 'legendary', 'gold', 'tier', 'test',
+  'testing', 'release', 'global', 'version', 'client', 'desktop', 'download',
+  'upload', 'install', 'fix', 'ping', 'latency', 'settings', 'free', 'premium',
+  'screenshot', 'wrong', 'link', 'factor', 'mastery', 'haste', 'attack', 'defense',
+  'ability', 'rotation', 'combo', 'character', 'cooldown', 'pvp', 'pve', 'guild',
+  'module', 'talent', 'stat', 'buff', 'debuff', 'queue', 'tank', 'mech',
+  'inventory', 'item', 'items', 'event', 'events', 'update', 'patch', 'login',
+  'launch', 'launcher', 'audio', 'voice', 'tts', 'model', 'provider', 'fallback',
+  'error', 'fail', 'failed', 'success', 'ready', 'online', 'offline', 'restart',
+  'retry', 'timeout', 'network', 'account', 'code', 'file', 'folder', 'window',
+  'windows', 'music', 'song', 'chat', 'message', 'user', 'admin', 'system',
+  'service', 'process', 'memory', 'cpu', 'gpu', 'fps', 'loot', 'resource',
+  'resources', 'low', 'after', 'all', 'now'
+]);
+const ENGLISH_SINGLE_WORDS = new Set([
+  'server', 'raid', 'dungeon', 'damage', 'gear', 'skill', 'build', 'boss',
+  'carry', 'maintenance', 'reset', 'launcher', 'discord', 'screenshot', 'ping',
+  'latency', 'healer', 'mage', 'tank', 'quest', 'inventory', 'loot', 'pvp',
+  'pve', 'cooldown', 'buff', 'debuff', 'season', 'help', 'invite', 'testing',
+  'test', 'morning', 'random', 'last', 'whale', 'scam', 'pull'
 ]);
 
 export class GoogleTtsHttpError extends Error {
@@ -67,9 +116,15 @@ function routingWords(value) {
 
 export function inferGoogleTtsLanguage(value) {
   const words = routingWords(value);
-  if (words.length < 2) return 'ms';
+  if (!words.length) return 'ms';
   const malayScore = words.reduce((sum, word) => sum + (MALAY_ROUTING_WORDS.has(word) ? 1 : 0), 0);
   if (malayScore > 0) return 'ms';
+
+  // A single unknown/name stays on the Malay default. Only a curated set of
+  // unambiguous English gaming/technical words can opt a one-word message into
+  // English, avoiding fuzzy language guesses on usernames and new game terms.
+  if (words.length === 1) return ENGLISH_SINGLE_WORDS.has(words[0]) ? 'en' : 'ms';
+
   const englishScore = words.reduce((sum, word) => sum + (ENGLISH_ROUTING_WORDS.has(word) ? 1 : 0), 0);
   const minimum = words.length <= 5 ? 2 : 3;
   return englishScore >= minimum && englishScore / words.length >= 0.28 ? 'en' : 'ms';

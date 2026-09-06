@@ -19,6 +19,16 @@ Live keeps a fresh one-turn session, a 2500 ms first-audio window and the existi
 
 Normal eligible Discord messages remain strict TTS-only and are not treated as questions for the bot to answer. The explicit `/ask` command is the separate opt-in chat-answer path. Usernames are spoken separately with Google Malay TTS.
 
+## Google fallback language and pronunciation
+
+Google Translate TTS remains the deterministic fallback after Gemini Live. Its normal-chat preprocessing uses the shipped dictionaries only to improve pronunciation of known, high-confidence chat forms; it does not perform fuzzy autocorrect, grammar rewriting, translation, or semantic completion.
+
+Fallback language selection is whole-message and conservative. Malay/Manglish evidence always wins first and keeps `tl=ms`. Clearly English messages use `tl=en`, including short gamer/technical phrases such as `server down`, `carry me`, `raid gear`, `skill issue`, `server reset`, and `good game`. A small safe one-word English set is allowed, while unknown single words, usernames and uncertain game names still default to Malay/literal handling. There is deliberately no per-word voice/language switching.
+
+Observed Malay shorthand remains context-safe. v0.24.4 adds forms such as contextual `jd` → `jadi`, `ksh` → `kasih`, `kjp` → `sekejap`, `skl` → `sekali`, and `memng` → `memang`, while retaining earlier aliases such as `x`, `ko`, `acaner`, `kiteorg`/`kteorg` and the Indonesian `gak` collision guard. Ambiguous abbreviations are not promoted to blind global replacements.
+
+Game/technical initials with unambiguous readings are protected from all-caps word normalization. Exact readings include `SAO`, `NTE`, `RYL`, `GPT`, `URL` and `UX`; `ML`, `HSR`, `WWM` and `SSR` expand only when context makes the game/technical meaning safe. Normal MessageCreate sanitization strips links/domains before these dictionary layers run.
+
 ## Speaker name speed
 
 Speaker usernames can be made faster in `config/settings.json` without regenerating the cached Google Malay label audio:
@@ -86,7 +96,7 @@ Useful commands: `/ask`, `/join`, `/leave`, `/speaker`, `/changevoice`, `/name`,
 
 ## Gemini read-aloud prompting
 
-Live uses a strict system instruction and a collision-resistant, nonce-delimited transcript. The working normal-chat protocol and six voices remain: Charon, Orus, Schedar, Gacrux, Vindemiatrix and Despina. The prompt forbids answering, rewriting and additional words; generative speech still cannot provide an absolute lexical guarantee. `/ask` now uses this same strict Live read-aloud path as its primary speech provider, while recovery tails may still use Google or already-generated PCM when deterministic recovery is required.
+Live uses a strict system instruction and a collision-resistant, nonce-delimited transcript. The working normal-chat protocol and six voices remain: Charon, Orus, Schedar, Gacrux, Vindemiatrix and Despina. The prompt forbids answering, rewriting and additional words; generative speech still cannot provide an absolute lexical guarantee. `/ask` uses this same strict Live read-aloud path as its primary speech provider, while recovery tails may still use Google or already-generated PCM when deterministic recovery is required.
 
 Square-bracket spans are neutralized for Gemini audio, for example `[laughs]` becomes `(laughs)`. This preserves their words without treating them as performance tags. Google input is unchanged.
 
@@ -104,7 +114,7 @@ A small control socket bound only to `127.0.0.1` provides OS-owned exclusivity a
 
 ## Release validation
 
-v0.24.3 ships portable Node 24.19.0 including npm, and FFmpeg 9.0.1. Source commits contain no binaries. `scripts/build-clean.py` downloads checksum-pinned runtimes and builds from tracked source using an explicit allowlist and fixed archive ordering/timestamps. `release-manifest.json` records the source commit and per-file checksums.
+v0.24.4 ships portable Node 24.19.0 including npm, and FFmpeg 9.0.1. Source commits contain no binaries. `scripts/build-clean.py` downloads checksum-pinned runtimes and builds from tracked source using an explicit allowlist and fixed archive ordering/timestamps. `release-manifest.json` records the source commit and per-file checksums.
 
 CI requires five consecutive full test passes on both Linux and Windows. It re-extracts the real CLEAN ZIP, checks every shipped JavaScript and JSON file (including portable npm), installs application dependencies with bundled npm and no system Node on PATH, and verifies two SYSTEM starts/stops, ten-key rotation, deferred-store flushing, the PCM/filter/Opus/decode path, packaged source/runtime hashes, full-tree/private-state ACLs, protected data logs, and real write denial from a disposable standard Windows account. The mandatory npm advisory check has bounded network retries; only a network-only outage may use a zero-vulnerability baseline that is no more than 48 hours old and matches the exact dependency-file hashes. Every workflow action is pinned to a reviewed full commit SHA and Dependabot maintains those pins. Publishing from main depends on every gate passing and never overwrites an existing release/tag.
 

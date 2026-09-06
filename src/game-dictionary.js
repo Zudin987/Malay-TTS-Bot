@@ -7,9 +7,9 @@ export const gameDictionaryPath = path.join(rootDir, 'config', 'dictionary-game.
 const WORD_CHAR_CLASS = '[\\p{L}\\p{N}_]';
 const WATCH_INTERVAL_MS = 300;
 const RELOAD_DEBOUNCE_MS = 200;
-const GAME_CONTEXT_PATTERN = /\b(?:raid|boss|tank|heal(?:er|ing)?|gear|damage|skill|dungeon|mech|buff|debuff|cooldown|level|season|party|queue|crit|attack|shield|mage|melee|range|farm|dps|pvp|pve|guild|class|weapon|module|talent|stat|lifewave|mastery|helmet|build|far\s+sea|stimen|vault)\b/iu;
+const GAME_CONTEXT_PATTERN = /\b(?:game|gaming|play|raid|boss|tank|heal(?:er|ing)?|gear|damage|skill|dungeon|mech|buff|debuff|cooldown|level|season|party|queue|crit|attack|shield|mage|melee|range|farm|dps|pvp|pve|guild|class|weapon|module|talent|stat|lifewave|mastery|helmet|build|far\s+sea|stimen|vault)\b/iu;
 const SELF_CONTEXT_SAFE = new Set(['sk', 'gh', 'gs', 'sv', 'nm', 'dg', 'dmg', 'mf']);
-const ALWAYS_EXPAND = new Set(['sv', 'sv30', 'dmg', 'dg', 'mf']);
+const ALWAYS_EXPAND = new Set(['sv', 'sv30', 'dmg', 'dg', 'mf', 'gpt', 'url', 'ux']);
 
 let dictionary = Object.create(null);
 let dictionaryPattern = null;

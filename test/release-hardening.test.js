@@ -31,7 +31,7 @@ test('dependency-audit outage evidence is clean, exact-file bound and short live
   const root = fileURLToPath(new URL('..', import.meta.url));
   const baseline = JSON.parse(fs.readFileSync(new URL('../scripts/audit-baseline.json', import.meta.url), 'utf8'));
   const hash = (name) => digestDependencyText(fs.readFileSync(new URL(`../${name}`, import.meta.url), 'utf8'));
-  const validationNow = Date.parse('2026-09-04T13:00:00Z');
+  const validationNow = Date.parse('2026-09-06T06:00:00Z');
   assert.equal(baseline.packageJsonLfSha256, hash('package.json'));
   assert.equal(baseline.packageLockLfSha256, hash('package-lock.json'));
   assert.equal(digestDependencyText('same\r\ncontent\r\n'), digestDependencyText('same\ncontent\n'));
