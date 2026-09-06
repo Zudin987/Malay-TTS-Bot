@@ -79,6 +79,9 @@ export function replaceMalayDictionaryWords(text) {
     if (isAllCapsToken(matched)) return matched;
 
     const key = matched.toLowerCase();
+    // A single uppercase X is commonly a literal letter/variable. Lowercase x
+    // is allowed to mean Malay chat "tak" only after the context gate has fired.
+    if (key === 'x' && matched === 'X') return matched;
     // In gaming chat, "tp to boss" means teleport, not Malay "tapi".
     if (key === 'tp' && /^\s+to\b/iu.test(source.slice(offset + matched.length))) return matched;
 

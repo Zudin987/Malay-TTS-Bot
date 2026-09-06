@@ -38,6 +38,8 @@ Normal chat and `/ask` speech use **Gemini 3.1 Flash Live → Google Malay (`goo
 
 `/ask` generates its displayed answer with the existing Gemini text model, then sends that exact finalized answer into the same strict read-aloud Live path. The collision-resistant transcript boundaries and system instruction prohibit answering, translating, completing, paraphrasing, rewriting or adding words. Google receives the same exact answer only when Live is unavailable or fails. There is no second text-generation or rewriting stage. Recovery tails may still use Google or already-generated PCM when deterministic recovery requires bypassing Live.
 
+Provider first-audio success is not the same as audible Discord playback. `/ask` therefore keeps one bounded post-provider audibility window: it must both enter playback and make real `playbackDuration` progress. If Gemini was selected but reaches 0 ms playback progress, cancel that stale Live turn and retry the exact answer once with Google only. If Google also reaches 0 ms, retire the `/ask` item and release FIFO; never create a retry loop. Once any `/ask` playback progress exists, never restart the full answer from the beginning. Keep this guard scoped to `/ask` unless a deliberate product decision changes normal-chat timing.
+
 The runtime accepts **ten environment key slots** and keeps **round-robin selection**. One Live speech item uses one selected key; duplicate credentials do not create independent quota/auth capacity. Quota failures do not trigger same-request key rotation. Environment key changes require a full process restart.
 
 ## Voice / speaker architecture
@@ -127,6 +129,7 @@ Before calling a release final:
 - run the full regression suite repeatedly (at least 5 consecutive clean passes for timing-sensitive releases)
 - test the FFmpeg PCM -> filters/limiter -> libopus/Ogg -> decode path
 - review provider cancellation, failover, queue, speaker-label and disconnect/recovery behavior
+- verify `/ask` provider-first-audio without playback progress cannot hold FIFO: Gemini gets at most one Google-only retry, Google failure terminates, and any real playback progress forbids full-answer restart
 - verify privacy opt-out cancels queued/current message TTS and active speaker-label provider work
 - verify opt-out/cache purge is owner-scoped and leaves another guild/user's work intact
 - verify voice-log recipients are current authorized guild members before every DM

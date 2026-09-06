@@ -111,6 +111,7 @@ const defaults = {
     playbackSafetyMs: 10_000,
     playbackHardMaxMs: 60_000,
     progressWatchdogMs: 12_000,
+    askAudibilityTimeoutMs: 3500,
     peakLimiter: {
       enabled: true,
       ceilingDb: -5.0,
@@ -265,6 +266,7 @@ function normalizeSettings(parsed) {
       playbackSafetyMs: clampInt(pipeline.playbackSafetyMs, defaults.audioPipeline.playbackSafetyMs, 3000, 30_000),
       playbackHardMaxMs: clampInt(pipeline.playbackHardMaxMs, defaults.audioPipeline.playbackHardMaxMs, 15_000, 60_000),
       progressWatchdogMs: clampInt(pipeline.progressWatchdogMs, defaults.audioPipeline.progressWatchdogMs, 3000, 30_000),
+      askAudibilityTimeoutMs: clampInt(pipeline.askAudibilityTimeoutMs, defaults.audioPipeline.askAudibilityTimeoutMs, 500, 6000),
       peakLimiter: {
         enabled: limiter.enabled !== false,
         ceilingDb: clamp(limiter.ceilingDb, defaults.audioPipeline.peakLimiter.ceilingDb, -12, -0.1),

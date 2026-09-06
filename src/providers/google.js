@@ -7,6 +7,36 @@ const ENDPOINT = 'https://translate.google.com/translate_tts';
 const DEFAULT_MAXIMUM_LENGTH = 200;
 const DEFAULT_PARALLEL_CHUNKS = 3;
 
+// Google Translate TTS is normally kept on Malay because mixed Manglish sounds
+// more coherent in one voice than switching language every few words. A whole
+// message may use English only when the evidence is strong and there is no
+// meaningful Malay marker. This intentionally defaults to Malay on ambiguity.
+const MALAY_ROUTING_WORDS = new Set([
+  'aku', 'kau', 'korang', 'kita', 'kami', 'dia', 'diorang', 'saya', 'awak',
+  'tak', 'tidak', 'nak', 'mahu', 'dah', 'sudah', 'belum', 'boleh', 'jangan',
+  'kenapa', 'sebab', 'kalau', 'tapi', 'jadi', 'nanti', 'dulu', 'lepas',
+  'masuk', 'keluar', 'pergi', 'balik', 'tunggu', 'tengok', 'cuba', 'pakai',
+  'punya', 'orang', 'macam', 'sangat', 'lagi', 'saja', 'dekat', 'kat', 'dengan',
+  'untuk', 'yang', 'ini', 'itu', 'ada', 'apa', 'siapa', 'bagi', 'buat', 'makan',
+  'tidur', 'pukul', 'malam', 'pagi', 'petang', 'sekejap', 'semua', 'memang',
+  'betul', 'rasa', 'faham', 'tahu', 'dapat', 'kena', 'suruh', 'tolong', 'cepat',
+  'lambat', 'senang', 'susah', 'bagus', 'cantik', 'sedap', 'lah', 'la', 'weh',
+  'kot', 'je', 'ni', 'tu', 'pun', 'ke', 'jom'
+]);
+const ENGLISH_ROUTING_WORDS = new Set([
+  'a', 'an', 'the', 'and', 'or', 'but', 'if', 'then', 'this', 'that', 'these',
+  'those', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'i', 'you', 'we',
+  'they', 'he', 'she', 'it', 'my', 'your', 'our', 'their', 'me', 'him', 'her',
+  'us', 'them', 'do', 'does', 'did', 'not', 'can', 'could', 'would', 'should',
+  'will', 'have', 'has', 'had', 'what', 'why', 'how', 'when', 'where', 'who',
+  'which', 'for', 'from', 'to', 'of', 'in', 'on', 'at', 'with', 'without', 'as',
+  'by', 'about', 'just', 'only', 'very', 'really', 'still', 'already', 'maybe',
+  'please', 'thanks', 'thank', 'sorry', 'hello', 'hi', 'good', 'bad', 'new', 'old',
+  'need', 'want', 'like', 'get', 'got', 'make', 'use', 'play', 'join', 'leave',
+  'wait', 'check', 'try', 'know', 'think', 'see', 'look', 'come', 'go', 'guys',
+  'anyone', 'someone', 'today', 'tomorrow', 'yes', 'no'
+]);
+
 export class GoogleTtsHttpError extends Error {
   constructor(status) {
     super(`Google Malay TTS returned HTTP ${status}.`);
@@ -29,6 +59,26 @@ function graphemes(value) {
     return [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text)].map((entry) => entry.segment);
   }
   return Array.from(text);
+}
+
+function routingWords(value) {
+  return String(value ?? '').toLocaleLowerCase('en-US').match(/\p{L}+(?:['’]\p{L}+)?/gu) ?? [];
+}
+
+export function inferGoogleTtsLanguage(value) {
+  const words = routingWords(value);
+  if (words.length < 2) return 'ms';
+  const malayScore = words.reduce((sum, word) => sum + (MALAY_ROUTING_WORDS.has(word) ? 1 : 0), 0);
+  if (malayScore > 0) return 'ms';
+  const englishScore = words.reduce((sum, word) => sum + (ENGLISH_ROUTING_WORDS.has(word) ? 1 : 0), 0);
+  const minimum = words.length <= 5 ? 2 : 3;
+  return englishScore >= minimum && englishScore / words.length >= 0.28 ? 'en' : 'ms';
+}
+
+function resolveLanguageCode(requested, text) {
+  const value = String(requested ?? '').trim().toLocaleLowerCase('en-US');
+  if (value === 'ms' || value === 'en') return value;
+  return inferGoogleTtsLanguage(text);
 }
 
 function isSpace(unit) { return /^\s$/u.test(unit); }
@@ -68,11 +118,11 @@ export function splitGoogleText(input, maximumLength = DEFAULT_MAXIMUM_LENGTH) {
   return chunks;
 }
 
-function makeChunkUrl(chunk, index, total) {
+function makeChunkUrl(chunk, index, total, languageCode = 'ms') {
   const url = new URL(ENDPOINT);
   url.searchParams.set('ie', 'UTF-8');
   url.searchParams.set('client', 'tw-ob');
-  url.searchParams.set('tl', 'ms');
+  url.searchParams.set('tl', languageCode);
   url.searchParams.set('q', chunk);
   url.searchParams.set('idx', String(index));
   url.searchParams.set('total', String(total));
@@ -149,6 +199,7 @@ export async function streamGoogleMalay(text, options = {}) {
   throwIfAborted(options.signal);
   const chunks = splitGoogleText(text, options.maximumLength ?? DEFAULT_MAXIMUM_LENGTH);
   if (!chunks.length) throw new Error('Google Malay TTS received empty text.');
+  const languageCode = resolveLanguageCode(options.languageCode, text);
 
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   // timeoutMs is the first-ordered-chunk deadline. Once audio can begin, allow
@@ -191,7 +242,7 @@ export async function streamGoogleMalay(text, options = {}) {
       const index = nextIndex++;
       if (index >= chunks.length) return;
       try {
-        const part = await fetchChunkWithRetry(fetchImpl, makeChunkUrl(chunks[index], index, chunks.length), {
+        const part = await fetchChunkWithRetry(fetchImpl, makeChunkUrl(chunks[index], index, chunks.length, languageCode), {
           signal: deadline.signal,
           retryCount: options.retryCount,
           retryDelayMs: options.retryDelayMs,
@@ -239,7 +290,7 @@ export async function streamGoogleMalay(text, options = {}) {
       }
       await raceWithSignal(Promise.all(workers), deadline.signal);
       output.end();
-      return { audioBytes: totalBytes };
+      return { audioBytes: totalBytes, languageCode };
     } catch (error) {
       if (!deadline.signal.aborted) deadline.cancel(error);
       output.destroy(error);
@@ -256,6 +307,7 @@ export async function streamGoogleMalay(text, options = {}) {
     audioStream: output,
     audioFormat: 'mp3',
     mimeType: 'audio/mpeg',
+    languageCode,
     completion,
     cancel: (reason) => deadline.cancel(cancellationError(reason)),
     firstChunkBytes: first.length
