@@ -1,10 +1,24 @@
 # Malay TTS Bot
 
-Private Windows Discord TTS bot for **Malaysian Malay / Malaysian English**.
+Self-hosted Windows Discord TTS bot for **Malaysian Malay / Malaysian English**. Reads eligible chat messages in voice channels and supports a separate `/ask` command for short AI answers.
+
+[Download CLEAN release](https://github.com/Zudin987/Malay-TTS-Bot/releases/latest) · [Project website](https://zudin987.github.io/projects/malay-tts/) · [Report an issue](https://github.com/Zudin987/Malay-TTS-Bot/issues)
 
 Lightweight design: Gemini first, Google Malay fallback, no local AI model, and Task Scheduler-friendly Windows runtime.
 
-## Use
+## First installation
+
+The supported deployment is **Windows 11** at `C:\Malay-TTS-Bot`. The CLEAN ZIP includes portable Node and FFmpeg; internet access is needed for dependencies and speech providers.
+
+1. Create your own Discord bot, enable **Message Content Intent**, and invite it to your server with the `bot` and `applications.commands` scopes. Grant it access to the intended text channel and permission to connect and speak in the voice channel.
+2. Extract the current CLEAN ZIP into an empty `C:\Malay-TTS-Bot` folder.
+3. Copy `.env.example` to `.env`. Fill in `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `DISCORD_GUILD_ID` and your `GEMINI_API_KEY`. Keep this file private. Additional Gemini key slots are optional; see below.
+4. Run `setup-clean.cmd` **as administrator**. It installs dependencies, checks the configuration, deploys slash commands and registers the Windows SYSTEM task.
+5. Start the **Malay TTS Bot** task. Join a voice channel, use `/join`, then check `/status`. Use `/ttsprivacy` to inspect provider data handling.
+
+If setup fails, follow the reported error and run `doctor.cmd`. Do not post tokens or `.env` contents in an issue.
+
+## Upgrade an existing installation
 
 1. Stop the previous bot with `stop-bot.vbs`, then install/use the bot at `C:\Malay-TTS-Bot`.
 2. On upgrade, preserve only `.env` and `data\guilds.json`.
