@@ -2,7 +2,7 @@
 
 Self-hosted Windows Discord TTS bot for **Malaysian Malay / Malaysian English**. Reads eligible chat messages in voice channels and supports a separate `/ask` command for short AI answers.
 
-[Download CLEAN release](https://github.com/Zudin987/Malay-TTS-Bot/releases/latest) · [Project website](https://zudin987.github.io/projects/malay-tts/) · [Report an issue](https://github.com/Zudin987/Malay-TTS-Bot/issues)
+[Download latest release](https://github.com/Zudin987/Malay-TTS-Bot/releases/latest) · [Project website](https://zudin987.github.io/projects/malay-tts/)
 
 Lightweight design: Gemini first, Google Malay fallback, no local AI model, and Task Scheduler-friendly Windows runtime.
 
