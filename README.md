@@ -37,4 +37,6 @@ For a clean upgrade, stop the old bot, preserve **only** `.env` and `data\guilds
 
 ## More information
 
-[Technical reference](TECHNICAL_REFERENCE.md) · [Maintenance and troubleshooting](MAINTENANCE.md) · [Release notes](RELEASE-NOTES.md) · [Third-party notices](THIRD-PARTY-NOTICES.md)
+**Use this README for current installation and upgrade steps.** The technical reference below is an archived snapshot of the former README, retained for historical provider and implementation details; its setup instructions may become outdated.
+
+[Archived technical reference](TECHNICAL_REFERENCE.md) · [Maintenance and troubleshooting](MAINTENANCE.md) · [Release notes](RELEASE-NOTES.md) · [Third-party notices](THIRD-PARTY-NOTICES.md)
