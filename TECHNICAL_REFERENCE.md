@@ -1,0 +1,135 @@
+# Malay TTS Bot
+
+Self-hosted Windows Discord TTS bot for **Malaysian Malay / Malaysian English**. Reads eligible chat messages in voice channels and supports a separate `/ask` command for short AI answers.
+
+[Download latest release](https://github.com/Zudin987/Malay-TTS-Bot/releases/latest) · [Project website](https://zudin987.github.io/projects/malay-tts/)
+
+Lightweight design: Gemini first, Google Malay fallback, no local AI model, and Task Scheduler-friendly Windows runtime.
+
+## First installation
+
+The supported deployment is **Windows 11** at `C:\Malay-TTS-Bot`. The CLEAN ZIP includes portable Node and FFmpeg; internet access is needed for dependencies and speech providers.
+
+1. Create your own Discord bot, enable **Message Content Intent**, and invite it to your server with the `bot` and `applications.commands` scopes. Grant it access to the intended text channel and permission to connect and speak in the voice channel.
+2. Extract the current CLEAN ZIP into an empty `C:\Malay-TTS-Bot` folder.
+3. Copy `.env.example` to `.env`. Fill in `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `DISCORD_GUILD_ID` and your `GEMINI_API_KEY`. Keep this file private. Additional Gemini key slots are optional; see below.
+4. Run `setup-clean.cmd` **as administrator**. It installs dependencies, checks the configuration, deploys slash commands and registers the Windows SYSTEM task.
+5. Start the **Malay TTS Bot** task. Join a voice channel, use `/join`, then check `/status`. Use `/ttsprivacy` to inspect provider data handling.
+
+If setup fails, follow the reported error and run `doctor.cmd`. Do not post tokens or `.env` contents in an issue.
+
+## Upgrade an existing installation
+
+1. Stop the previous bot with `stop-bot.vbs`, then install/use the bot at `C:\Malay-TTS-Bot`.
+2. On upgrade, preserve only `.env` and `data\guilds.json`.
+3. Extract the new CLEAN build into an empty installation and restore only those two user files.
+4. Run `setup-clean.cmd` **as administrator**. It installs dependencies, rejects reparse-point paths, seals the complete application tree, and only then registers the SYSTEM task.
+5. Run `doctor.cmd` if you want to verify dependencies/audio.
+6. Start the **Malay TTS Bot** Task Scheduler task, or use `restart-bot.vbs`.
+
+Speech providers: **Gemini 3.1 Flash Live → Google Malay (`google-ms`)**.
+
+Live keeps a fresh one-turn session, a 2500 ms first-audio window and the existing setup timing. Google starts directly after an initial Live failure, with up to its configured 3500 ms first-audio window. The overall first-audio budget remains 7000 ms; there are no intermediate speech providers.
+
+Normal eligible Discord messages remain strict TTS-only and are not treated as questions for the bot to answer. The explicit `/ask` command is the separate opt-in chat-answer path. Usernames are spoken separately with Google Malay TTS.
+
+## Google fallback language and pronunciation
+
+Google Translate TTS remains the deterministic fallback after Gemini Live. Its normal-chat preprocessing uses the shipped dictionaries only to improve pronunciation of known, high-confidence chat forms; it does not perform fuzzy autocorrect, grammar rewriting, translation, or semantic completion.
+
+Fallback language selection is whole-message and conservative. Malay/Manglish evidence always wins first and keeps `tl=ms`. Clearly English messages use `tl=en`, including short gamer/technical phrases such as `server down`, `carry me`, `raid gear`, `skill issue`, `server reset`, and `good game`. A small safe one-word English set is allowed, while unknown single words, usernames and uncertain game names still default to Malay/literal handling. There is deliberately no per-word voice/language switching.
+
+Observed Malay shorthand remains context-safe. v0.24.4 adds forms such as contextual `jd` → `jadi`, `ksh` → `kasih`, `kjp` → `sekejap`, `skl` → `sekali`, and `memng` → `memang`, while retaining earlier aliases such as `x`, `ko`, `acaner`, `kiteorg`/`kteorg` and the Indonesian `gak` collision guard. Ambiguous abbreviations are not promoted to blind global replacements.
+
+Game/technical initials with unambiguous readings are protected from all-caps word normalization. Exact readings include `SAO`, `NTE`, `RYL`, `GPT`, `URL` and `UX`; `ML`, `HSR`, `WWM` and `SSR` expand only when context makes the game/technical meaning safe. Normal MessageCreate sanitization strips links/domains before these dictionary layers run.
+
+## Speaker name speed
+
+Speaker usernames can be made faster in `config/settings.json` without regenerating the cached Google Malay label audio:
+
+```json
+"speakerLabel": {
+  "enabled": true,
+  "speed": 1.15,
+  "gapMs": 75,
+  "maxWaitMs": 300,
+  "gain": 1.5
+}
+```
+
+`speakerLabel.speed` accepts **0.8x through 1.5x**. The default is **1.15x**. `gapMs` is the silence between the spoken username and the message; the default is **75 ms**.
+
+Speaker-label PCM cache entries are owner-scoped by guild and user. Enabling `/ttsoptout` cancels only that user's label work and removes that user's memory/disk entries; another user's identical spoken label remains intact. Unowned cache entries from releases before v0.24.1 are removed at startup. The configured cache age is shown by `/ttsprivacy` and defaults to 90 days.
+
+## /ask short chat answers
+
+Use `/ask question:<text>` when you intentionally want an AI answer. It uses `gemini-3.1-flash-lite` with minimal thinking and returns one compact public Discord embed, normally 1–3 short sentences. The embed title is `<display name> ask` and contains **Question** and **AI reply** fields. The model itself still cannot request images, embeds, tables, or long article-style output.
+
+After the embed is posted, the same displayed answer is queued when the asker is in the active normal voice channel. Only the answer is spoken. Its exact text is sent to the strict read-aloud Gemini 3.1 Live turn first; the randomized transcript boundaries and read-aloud system instruction forbid answering, paraphrasing, translating, completing, or adding words. Google Malay receives the same exact answer only if Live is unavailable or fails. There is no extra Gemini rewriting stage. TTS failure never removes the posted answer. Bot replies remain excluded from normal MessageCreate speech.
+
+`/ask` also has a playback-level audibility guard. After a speech provider returns first audio, the item has one bounded 3500 ms window to enter Discord playback **and make real `playbackDuration` progress**. If Gemini Live returned audio but the listener still received 0 ms of playback progress, that stale Live turn is cancelled and the exact same answer is retried once through Google Malay. If the Google attempt also reaches 0 ms progress, the `/ask` item retires instead of looping or blocking later normal-chat TTS. Once any `/ask` audio has progressed, the full answer is never restarted from the beginning.
+
+A newer `/ask` reserves ordering after admission but does not cancel a valid older answer. It supersedes older pre-audible speech only after the new answer is visible, its voice connection is confirmed, and its own queue item is accepted. Already audible speech is not interrupted.
+
+Text generation uses the existing ten-slot Gemini round-robin. Credential-auth failures disable only the bad slot and try the next available key within one request deadline. Quota and model/project permission failures do not rotate keys to retry the same request.
+
+## Gemini API keys
+
+The bot accepts up to ten configured Gemini API keys in `.env`:
+
+- `GEMINI_API_KEY` — slot 1 and the backward-compatible default
+- `GEMINI_API_KEY_2`
+- `GEMINI_API_KEY_3`
+- `GEMINI_API_KEY_4`
+- `GEMINI_API_KEY_5`
+- `GEMINI_API_KEY_6`
+- `GEMINI_API_KEY_7`
+- `GEMINI_API_KEY_8`
+- `GEMINI_API_KEY_9`
+- `GEMINI_API_KEY_10`
+- `GEMINI_API_KEY_SLOT=1` — optional starting slot for the round-robin sequence
+
+With all ten slots populated, Gemini requests use **1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 1**. Each Live speech item selects one key. Empty slots are skipped; duplicate credentials count once. Google speech does not consume a Gemini key selection.
+
+If a key is rejected as invalid/revoked, that slot is removed from the runtime round-robin until `/restarttts`. Quota/rate-limit failures do not trigger an immediate second-key retry inside the same message; the normal provider cooldown and Google fallback still apply.
+
+The round-robin is intended for multiple keys from the same Google Cloud project. Keys in the same project share that project's Gemini quota, so this does not multiply project quota. Changing key values or the starting slot in `.env` requires restarting the bot process.
+
+## Important
+
+- Keep `.env` private.
+- Do not restore an old `config/settings.json` during a clean upgrade.
+- Changes to `config/settings.json` are staged on disk until an idle `/restarttts` or a full process restart; there is no automatic settings hot reload.
+- Normal message text may go to Gemini Live and then Google Malay on fallback. Display names/aliases are separately sent to Google for speaker announcements. `/ask` sends its explicit question to the configured Gemini text model, then sends the displayed answer to Gemini 3.1 Live for strict read-aloud with Google Malay fallback.
+- `/ttsoptout` cancels normal message/label work and purges that user's label cache. It cannot retract data already sent, and `/ask` remains a separate explicit action.
+
+Useful commands: `/ask`, `/join`, `/leave`, `/speaker`, `/changevoice`, `/name`, `/dictionary`, `/restarttts`, `/status`, `/ttsprivacy`, `/ttsoptout`.
+
+[Maintenance](MAINTENANCE.md) · [Latest release](../../releases/latest)
+
+
+## Gemini read-aloud prompting
+
+Live uses a strict system instruction and a collision-resistant, nonce-delimited transcript. The working normal-chat protocol and six voices remain: Charon, Orus, Schedar, Gacrux, Vindemiatrix and Despina. The prompt forbids answering, rewriting and additional words; generative speech still cannot provide an absolute lexical guarantee. `/ask` uses this same strict Live read-aloud path as its primary speech provider, while recovery tails may still use Google or already-generated PCM when deterministic recovery is required.
+
+Square-bracket spans are neutralized for Gemini audio, for example `[laughs]` becomes `(laughs)`. This preserves their words without treating them as performance tags. Google input is unchanged.
+
+Edit `geminiLive.profile` in `config/settings.json`: fidelity belongs in `systemInstruction`; delivery/accent/pacing belongs in `stylePrompt`. Provider fallback defaults use the same profile definitions as missing-file startup.
+
+Eligible normal speech remains text, resolved mentions and `hantar gambar` for images. Links, non-image files, GIFs, videos, emoji and code-only payloads remain silent. One Discord message remains one logical speech item.
+
+Historical release notes are available on [GitHub Releases](../../releases).
+
+## Windows process control
+
+The checked-in `install-task.ps1` rejects UNC, drive-root and reparse-point application trees. After `npm ci`, it resets and seals the complete tree so only SYSTEM, Administrators and the installing maintenance identity can write it, then registers the portable Node executable, absolute bootstrap path and `C:\Malay-TTS-Bot` working directory under SYSTEM. It uses one instance, a startup trigger and three restarts after failure. `data` inherits the same private policy, `.env` gives SYSTEM read-only access, and `bot.log`/`bot-old.log` are created under `data`.
+
+A small control socket bound only to `127.0.0.1` provides OS-owned exclusivity and nonce/PID-bound graceful stopping. The port is derived from the installation path (23000–38999). `data/bot.lock` records identity; stale, empty or corrupt records are replaced only after the OS grants ownership. A port collision fails closed. Stop control starts before Discord login, startup is limited to 45 seconds and shutdown to five seconds. The bot does not kill an arbitrary PID or poll a stop-request file.
+
+## Release validation
+
+v0.24.4 ships portable Node 24.19.0 including npm, and FFmpeg 9.0.1. Source commits contain no binaries. `scripts/build-clean.py` downloads checksum-pinned runtimes and builds from tracked source using an explicit allowlist and fixed archive ordering/timestamps. `release-manifest.json` records the source commit and per-file checksums.
+
+CI requires five consecutive full test passes on both Linux and Windows. It re-extracts the real CLEAN ZIP, checks every shipped JavaScript and JSON file (including portable npm), installs application dependencies with bundled npm and no system Node on PATH, and verifies two SYSTEM starts/stops, ten-key rotation, deferred-store flushing, the PCM/filter/Opus/decode path, packaged source/runtime hashes, full-tree/private-state ACLs, protected data logs, and real write denial from a disposable standard Windows account. The mandatory npm advisory check has bounded network retries; only a network-only outage may use a zero-vulnerability baseline that is no more than 48 hours old and matches the exact dependency-file hashes. Every workflow action is pinned to a reviewed full commit SHA and Dependabot maintains those pins. Publishing from main depends on every gate passing and never overwrites an existing release/tag.
+
+Repository administrators should separately require `validate`, `windows-validate` and `clean-windows-package` in branch protection. Workflow publishing gates do not configure GitHub's merge permissions.
