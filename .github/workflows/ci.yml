@@ -48,7 +48,7 @@ jobs:
         run: |
           ffmpeg -hide_banner -loglevel error -f lavfi -i 'sine=frequency=440:duration=0.20' -af 'volume=0.600,alimiter=limit=0.562341:attack=1.0:release=60.0:level=false' -c:a libopus -f ogg -y /tmp/malay-tts-probe.ogg
           ffmpeg -hide_banner -loglevel error -i /tmp/malay-tts-probe.ogg -f null -
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: tests-${{ runner.os }}-${{ github.sha }}
@@ -74,7 +74,7 @@ jobs:
       - name: Test packaged runtime, SYSTEM lifecycle and full-tree ACLs
         shell: pwsh
         run: ./scripts/verify-windows.ps1 -PackagePath 'C:\Malay-TTS-Bot'
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: clean-windows-${{ github.sha }}
           path: dist/*
@@ -98,7 +98,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '24.19.0'
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: clean-windows-${{ github.sha }}
           path: dist
