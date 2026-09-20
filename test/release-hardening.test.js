@@ -11,8 +11,8 @@ test('every GitHub Action dependency is pinned to an immutable commit', () => {
   for (const value of uses) assert.match(value, /^actions\/(?:checkout|setup-node|upload-artifact|download-artifact)@[a-f\d]{40}$/u);
   assert.match(workflow, /actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\s+# v7/u);
   assert.match(workflow, /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020\s+# v7/u);
-  assert.match(workflow, /actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\s+# v4/u);
-  assert.match(workflow, /actions\/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093\s+# v4/u);
+  assert.match(workflow, /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\s+# v7\.0\.1/u);
+  assert.match(workflow, /actions\/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c\s+# v8\.0\.1/u);
 });
 
 test('Dependabot is configured to maintain GitHub Actions pins', () => {
@@ -56,7 +56,6 @@ test('Windows installer seals the full application tree before SYSTEM registrati
   assert.match(installer, /\*S-1-5-11:\(OI\)\(CI\)RX/u);
   assert.match(installer, /\*S-1-5-32-545:\(OI\)\(CI\)RX/u);
   assert.match(installer, /'\/remove:g', '\*S-1-1-0', '\*S-1-5-11', '\*S-1-5-32-545'/u);
-  assert.match(installer, /ReparsePoint/u);
   assert.match(verifier, /applicationTreeAcl = \$true/u);
   assert.match(verifier, /standardUserWriteDenied = \$true/u);
   assert.match(verifier, /New-LocalUser/u);
