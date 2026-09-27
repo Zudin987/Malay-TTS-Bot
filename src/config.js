@@ -56,6 +56,10 @@ const defaults = {
   maximumQueuedMessages: 10,
   imagePhrase: 'hantar gambar',
   fixedVolume: 0.6,
+  providerGain: {
+    geminiLive: 1.0,
+    googleMs: 1.5
+  },
   voiceLogEnabled: false,
   intonation: { enabled: true },
   ask: {
@@ -171,6 +175,7 @@ function normalizeSettings(parsed) {
   const ask = isObject(parsed.ask) ? parsed.ask : {};
   const geminiText = isObject(parsed.geminiText) ? parsed.geminiText : {};
   const diagnostics = isObject(parsed.diagnostics) ? parsed.diagnostics : {};
+  const providerGain = isObject(parsed.providerGain) ? parsed.providerGain : {};
   const providerHealth = isObject(parsed.providerHealth) ? parsed.providerHealth : {};
   const pipeline = isObject(parsed.audioPipeline) ? parsed.audioPipeline : {};
   const limiter = isObject(pipeline.peakLimiter) ? pipeline.peakLimiter : {};
@@ -208,6 +213,10 @@ function normalizeSettings(parsed) {
     maximumQueuedMessages: clampInt(parsed.maximumQueuedMessages, defaults.maximumQueuedMessages, 1, 50),
     imagePhrase: String(parsed.imagePhrase ?? defaults.imagePhrase).trim() || defaults.imagePhrase,
     fixedVolume: clamp(parsed.fixedVolume, defaults.fixedVolume, 0, 2),
+    providerGain: {
+      geminiLive: clamp(providerGain.geminiLive, defaults.providerGain.geminiLive, 0, 2),
+      googleMs: clamp(providerGain.googleMs, defaults.providerGain.googleMs, 0, 2)
+    },
     voiceLogEnabled: parsed.voiceLogEnabled === true,
     intonation: { enabled: intonation.enabled !== false },
     ask: {
