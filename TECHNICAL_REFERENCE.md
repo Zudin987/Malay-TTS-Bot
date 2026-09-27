@@ -43,6 +43,19 @@ Observed Malay shorthand remains context-safe. v0.24.4 adds forms such as contex
 
 Game/technical initials with unambiguous readings are protected from all-caps word normalization. Exact readings include `SAO`, `NTE`, `RYL`, `GPT`, `URL` and `UX`; `ML`, `HSR`, `WWM` and `SSR` expand only when context makes the game/technical meaning safe. Normal MessageCreate sanitization strips links/domains before these dictionary layers run.
 
+## Provider volume matching
+
+Normal message playback applies a small provider-specific gain before the existing peak limiter so the Google Malay fallback blends more naturally with Gemini Live. The shipped calibration is **1.0x for Gemini Live** and **1.5x for Google MS**:
+
+```json
+"providerGain": {
+  "geminiLive": 1.0,
+  "googleMs": 1.5
+}
+```
+
+This multiplier is combined with `fixedVolume` only for normal provider playback. Speaker-label gain remains independent, so the existing `speakerLabel.gain` behavior is unchanged. The peak limiter still runs after provider gain.
+
 ## Speaker name speed
 
 Speaker usernames can be made faster in `config/settings.json` without regenerating the cached Google Malay label audio:

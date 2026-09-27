@@ -24,6 +24,18 @@ export function getPeakLimiterOptions(audioPipeline = {}) {
   };
 }
 
+export function getProviderGain(provider, providerGain = {}) {
+  const name = String(provider ?? '').trim().toLowerCase();
+  if (name === 'google-ms') return clampNumber(providerGain?.googleMs, 1.5, 0, 2);
+  if (name.startsWith('gemini')) return clampNumber(providerGain?.geminiLive, 1.0, 0, 2);
+  return 1;
+}
+
+export function getProviderPlaybackVolume({ volume = 0.6, provider = '', providerGain = {} } = {}) {
+  const safeVolume = clampNumber(volume, 0.6, 0, 2);
+  return Math.min(2, safeVolume * getProviderGain(provider, providerGain));
+}
+
 export function buildAudioFilters({ volume = 0.6, playbackSpeed = 1, audioPipeline = {} } = {}) {
   const safeVolume = clampNumber(volume, 0.6, 0, 2);
   const safeSpeed = clampNumber(playbackSpeed, 1, 0.5, 2);

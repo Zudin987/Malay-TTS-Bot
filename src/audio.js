@@ -13,7 +13,7 @@ import { selectPrefetchCandidates } from './prefetch-plan.js';
 import { synthesize } from './tts.js';
 import { settings } from './config.js';
 import { recordTtsMetrics, recordTtsOutcome } from './tts-metrics.js';
-import { buildAudioFilters } from './audio-filters.js';
+import { buildAudioFilters, getProviderPlaybackVolume } from './audio-filters.js';
 import { shouldRecoverTranscriptTail } from './recovery-evidence.js';
 import {
   buildSpeakerPreludePcm,
@@ -882,7 +882,11 @@ function createMessagePipeline(guildId, state, item, generated, playbackSpeed) {
   } else if (format === 'mp3' || mime.includes('mpeg') || mime.includes('mp3')) input = ['-f','mp3'];
   else if (format === 'ogg' || mime.includes('ogg')) input = ['-f','ogg'];
 
-  const volume = clampNumber(settings.fixedVolume, 0.6, 0, 2);
+  const volume = getProviderPlaybackVolume({
+    volume: settings.fixedVolume,
+    provider: generated?.provider,
+    providerGain: settings.providerGain
+  });
   const filters = buildAudioFilters({ volume, playbackSpeed, audioPipeline: settings.audioPipeline });
   const ffmpegStartedAt = performance.now();
   let firstEncodedAt = 0;
