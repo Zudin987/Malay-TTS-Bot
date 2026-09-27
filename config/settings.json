@@ -17,6 +17,10 @@
   "maximumQueuedMessages": 10,
   "imagePhrase": "hantar gambar",
   "fixedVolume": 0.6,
+  "providerGain": {
+    "geminiLive": 1.0,
+    "googleMs": 1.5
+  },
   "voiceLogEnabled": false,
   "intonation": {
     "enabled": true
