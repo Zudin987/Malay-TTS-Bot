@@ -16,7 +16,7 @@ test('provider gain defaults calibrate Google MS to the established speaker-labe
   assert.equal(getProviderGain('safe-audio-tail-replay'), 1.0);
 
   assert.equal(getProviderPlaybackVolume({ volume: 0.6, provider: 'gemini-3.1-live' }), 0.6);
-  assert.equal(getProviderPlaybackVolume({ volume: 0.6, provider: 'google-ms' }), 0.9);
+  assert.ok(Math.abs(getProviderPlaybackVolume({ volume: 0.6, provider: 'google-ms' }) - 0.9) < 1e-12);
 });
 
 test('provider gain settings are configurable and safely bounded', () => {
