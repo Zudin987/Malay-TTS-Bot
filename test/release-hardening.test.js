@@ -6,13 +6,29 @@ import { digestDependencyText, isAuthoritativeAuditReport, validateAuditBaseline
 
 test('every GitHub Action dependency is pinned to an immutable commit', () => {
   const workflow = fs.readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
-  const uses = [...workflow.matchAll(/^\s*-\s+uses:\s*([^\s#]+)/gmu)].map((match) => match[1]);
+  // Dependabot can update immutable SHA pins without changing the security policy.
+  // Check the allowlist, full commit SHAs, version comments and consistent pins.
+  const uses = [...workflow.matchAll(/^\s*-\s+uses:\s*([^\s#]+)\s+#\s+(\S+)\s*$/gmu)];
   assert.ok(uses.length >= 7);
-  for (const value of uses) assert.match(value, /^actions\/(?:checkout|setup-node|upload-artifact|download-artifact)@[a-f\d]{40}$/u);
-  assert.match(workflow, /actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\s+# v7/u);
-  assert.match(workflow, /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020\s+# v7/u);
-  assert.match(workflow, /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\s+# v7\.0\.1/u);
-  assert.match(workflow, /actions\/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c\s+# v8\.0\.1/u);
+  assert.equal(uses.length, [...workflow.matchAll(/^\s*-\s+uses:\s*[^\s#]+/gmu)].length);
+
+  const expectedActions = new Set(['checkout', 'setup-node', 'upload-artifact', 'download-artifact']);
+  const observedActions = new Set();
+  const pins = new Map();
+  for (const [, value, version] of uses) {
+    const match = /^actions\/(checkout|setup-node|upload-artifact|download-artifact)@([a-f\d]{40})$/u.exec(value);
+    assert.ok(match, 'Action must be allowlisted and pinned to a full commit SHA: ' + value);
+    assert.match(version, /^v\d+(?:\.\d+){0,2}$/u, 'Missing or invalid version comment for ' + value);
+    const action = match[1];
+    observedActions.add(action);
+    const pin = match[2] + ' # ' + version;
+    if (pins.has(action)) {
+      assert.equal(pin, pins.get(action), action + ' must use the same version and SHA everywhere');
+    } else {
+      pins.set(action, pin);
+    }
+  }
+  assert.deepEqual(observedActions, expectedActions);
 });
 
 test('Dependabot is configured to maintain GitHub Actions pins', () => {
