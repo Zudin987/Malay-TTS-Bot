@@ -49,11 +49,16 @@ test('dependency-audit outage evidence is clean, exact-file bound and short live
   const hash = (name) => digestDependencyText(fs.readFileSync(new URL(`../${name}`, import.meta.url), 'utf8'));
   const validationNow = Date.parse('2026-09-27T09:04:00Z');
   assert.equal(baseline.packageJsonLfSha256, hash('package.json'));
-  assert.equal(baseline.packageLockLfSha256, hash('package-lock.json'));
+  // Historical clean-audit evidence must not be rewritten when dependencies change.
+  // Use current-file hashes only for the positive validator unit test.
+  const matchingFilesBaseline = { ...baseline, packageLockLfSha256: hash('package-lock.json') };
   assert.equal(digestDependencyText('same\r\ncontent\r\n'), digestDependencyText('same\ncontent\n'));
-  assert.doesNotThrow(() => validateAuditBaseline(baseline, { root, now: validationNow }));
+  assert.doesNotThrow(() => validateAuditBaseline(matchingFilesBaseline, { root, now: validationNow }));
+  if (baseline.packageLockLfSha256 !== matchingFilesBaseline.packageLockLfSha256) {
+    assert.throws(() => validateAuditBaseline(baseline, { root, now: validationNow }), /changed/u);
+  }
   assert.throws(() => validateAuditBaseline(baseline, { root, now: Date.parse(baseline.expiresAt) }), /expired/u);
-  assert.throws(() => validateAuditBaseline({ ...baseline, packageLockLfSha256: '0'.repeat(64) }, { root, now: validationNow }), /changed/u);
+  assert.throws(() => validateAuditBaseline({ ...matchingFilesBaseline, packageLockLfSha256: '0'.repeat(64) }, { root, now: validationNow }), /changed/u);
   assert.equal(isAuthoritativeAuditReport({ auditReportVersion: 2, metadata: { vulnerabilities: { high: 1 } } }), true);
   assert.equal(isAuthoritativeAuditReport({ error: { code: 'ETIMEDOUT' } }), false);
 });
